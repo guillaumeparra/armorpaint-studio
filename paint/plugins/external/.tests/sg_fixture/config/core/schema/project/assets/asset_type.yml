@@ -1,0 +1,3 @@
+type: "shotgun_list_field"
+entity_type: "Asset"
+field_name: "sg_asset_type"

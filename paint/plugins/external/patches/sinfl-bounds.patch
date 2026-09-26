@@ -1,0 +1,100 @@
+diff --git a/base/sources/libs/sinfl.h b/base/sources/libs/sinfl.h
+index c18d688b..5c1a138a 100644
+--- a/base/sources/libs/sinfl.h
++++ b/base/sources/libs/sinfl.h
+@@ -122,6 +122,7 @@ extern "C" {
+ 
+ struct sinfl {
+ 	const unsigned char *bitptr;
++	const unsigned char *bitend; /* STUDIO-PATCH(sinfl-bounds), see sinfl_refill */
+ 	unsigned long long   bitbuf;
+ 	int                  bitcnt;
+ 
+@@ -210,7 +211,24 @@ static void sinfl_copy128(unsigned char **dst, unsigned char **src) {
+ }
+ #endif
+ static void sinfl_refill(struct sinfl *s) {
+-	s->bitbuf |= sinfl_read64(s->bitptr) << s->bitcnt;
++	/* STUDIO-PATCH(sinfl-bounds): only the uncompressed-block path checked the end of the input, so on
++	   malformed data the huffman paths refilled from past the end of the buffer, again and again. Past the end
++	   we feed zero bytes instead: bitptr legitimately passes bitend on the last refill of a valid stream, so
++	   only the read has to stay in bounds. Decoding then runs on zeros until it fails or fills the output. */
++	unsigned long long w;
++	if (sinfl_likely(s->bitptr + 8 <= s->bitend)) {
++		w = sinfl_read64(s->bitptr);
++	}
++	else {
++		unsigned char buf[8] = {0};
++		int           avail  = s->bitend > s->bitptr ? (int)(s->bitend - s->bitptr) : 0;
++		int           i;
++		for (i = 0; i < 8 && i < avail; i++) {
++			buf[i] = s->bitptr[i];
++		}
++		w = sinfl_read64(buf);
++	}
++	s->bitbuf |= w << s->bitcnt;
+ 	s->bitptr += (63 - s->bitcnt) >> 3;
+ 	s->bitcnt |= 56; /* bitcount in range [56,63] */
+ }
+@@ -377,6 +395,7 @@ static int sinfl_decompress(unsigned char *out, int cap, const unsigned char *in
+ 	int               last  = 0;
+ 
+ 	s.bitptr = in;
++	s.bitend = e; /* STUDIO-PATCH(sinfl-bounds) */
+ 	while (1) {
+ 		switch (state) {
+ 		case hdr: {
+@@ -466,16 +485,28 @@ static int sinfl_decompress(unsigned char *out, int cap, const unsigned char *in
+ 					default:
+ 						lens[n++] = (unsigned char)sym;
+ 						break;
++					/* STUDIO-PATCH(sinfl-bounds): a repeat writes up to 138 entries, and only the top of the
++					   loop checked n. Malformed deflate data overran lens[288 + 32] on the stack, and a
++					   repeat-previous at n == 0 read lens[-1]. */
+ 					case 16:
+-						for (i = 3 + sinfl_get(&s, 2); i; i--, n++)
++						i = 3 + sinfl_get(&s, 2);
++						if (sinfl_unlikely(n == 0 || n + i > nlit + ndist))
++							return -2;
++						for (; i; i--, n++)
+ 							lens[n] = lens[n - 1];
+ 						break;
+ 					case 17:
+-						for (i = 3 + sinfl_get(&s, 3); i; i--, n++)
++						i = 3 + sinfl_get(&s, 3);
++						if (sinfl_unlikely(n + i > nlit + ndist))
++							return -2;
++						for (; i; i--, n++)
+ 							lens[n] = 0;
+ 						break;
+ 					case 18:
+-						for (i = 11 + sinfl_get(&s, 7); i; i--, n++)
++						i = 11 + sinfl_get(&s, 7);
++						if (sinfl_unlikely(n + i > nlit + ndist))
++							return -2;
++						for (; i; i--, n++)
+ 							lens[n] = 0;
+ 						break;
+ 					}
+@@ -523,6 +554,11 @@ static int sinfl_decompress(unsigned char *out, int cap, const unsigned char *in
+ 					int            dsym = sinfl_decode(&s, s.dsts, 8);
+ 					int            offs = sinfl__get(&s, dbits[dsym]) + dbase[dsym];
+ 					unsigned char *dst = out, *src = out - offs;
++					/* STUDIO-PATCH(sinfl-bounds): a back reference may not point before the start of the
++					   output. Only the end was checked, so malformed deflate data read out of bounds (found by
++					   paint/plugins/external/.tests, see external/PATCHES.md). */
++					if (sinfl_unlikely(offs > (int)(out - o)))
++						return -2;
+ 					out = out + len;
+ 					if (sinfl_unlikely(out > oe))
+ 						return -2;
+@@ -655,7 +691,8 @@ extern int zsinflate(void *out, int cap, const void *mem, int size) {
+ 		if (n < 0)
+ 			return -2;
+ 		unsigned a = sinfl_adler32(1u, (unsigned char *)out, n);
+-		unsigned h = eob[0] << 24 | eob[1] << 16 | eob[2] << 8 | eob[3] << 0;
++		/* STUDIO-PATCH(sinfl-bounds): eob[0] << 24 overflowed int (undefined behavior) for bytes >= 0x80 */
++		unsigned h = (unsigned)eob[0] << 24 | (unsigned)eob[1] << 16 | (unsigned)eob[2] << 8 | (unsigned)eob[3] << 0;
+ 		return a == h ? n : -1;
+ 	}
+ 	else {

@@ -1,0 +1,22 @@
+diff --git a/base/sources/iron_ui.c b/base/sources/iron_ui.c
+index f7bb8e0e..fd0a9dbf 100644
+--- a/base/sources/iron_ui.c
++++ b/base/sources/iron_ui.c
+@@ -1472,7 +1472,7 @@ static void ui_update_text_edit(int align, bool editable) {
+ 
+ void ui_set_hovered_tab_name(char *name) {
+ 	if (ui_input_in_rect(current->_window_x, current->_window_y, current->_window_w, current->_window_h)) {
+-		strcpy(current->hovered_tab_name, name);
++		snprintf(current->hovered_tab_name, sizeof(current->hovered_tab_name), "%s", name); // STUDIO-PATCH(tab-name-bounds)
+ 		current->hovered_tab_x = current->_window_x;
+ 		current->hovered_tab_y = current->_window_y;
+ 		current->hovered_tab_w = current->_window_w;
+@@ -2114,7 +2114,7 @@ bool ui_tab(int *value, char *text, bool vertical, uint32_t color, bool align_ri
+ 		}
+ 	}
+ 	assert(current->tab_count < 16);
+-	strcpy(current->tab_names[current->tab_count], text);
++	snprintf(current->tab_names[current->tab_count], sizeof(current->tab_names[0]), "%s", text); // STUDIO-PATCH(tab-name-bounds)
+ 	current->tab_colors[current->tab_count]  = color;
+ 	current->tab_enabled[current->tab_count] = current->enabled;
+ 	current->tab_count++;

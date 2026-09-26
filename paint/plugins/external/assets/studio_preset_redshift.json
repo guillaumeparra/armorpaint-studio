@@ -1,0 +1,15 @@
+{
+	"version": 1,
+	"description": "Redshift Standard Material: suffixes are the shader parameters (refl_roughness, metalness...). Colour maps as linear half EXR, data maps raw, displacement in 32-bit float, OpenGL normals (RS Bump Map in tangent-space mode).",
+	"naming": "<file>[_<variant>]_<channel>[.<UDIM>].<ext>",
+	"defaults": { "format": "exr", "bits": 16, "color_space": "raw" },
+	"textures": [
+		{ "name": "base_color", "channels": ["base_r", "base_g", "base_b"], "color_space": "linear" },
+		{ "name": "refl_roughness", "channels": ["rough"] },
+		{ "name": "metalness", "channels": ["metal"] },
+		{ "name": "normal", "channels": ["nor_r", "nor_g", "nor_b"] },
+		{ "name": "displacement", "channels": ["height"], "bits": 32 },
+		{ "name": "opacity", "channels": ["opac"] },
+		{ "name": "emission_color", "channels": ["base_r * emis", "base_g * emis", "base_b * emis"], "color_space": "linear" }
+	]
+}

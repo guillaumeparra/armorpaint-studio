@@ -1,0 +1,4 @@
+# Le tk-core du banc (STUDIO_TEST_TK_CORE) : même chemin que celui déjà importé, donc pas de core swap.
+location:
+  type: path
+  path: $STUDIO_TEST_TK_CORE

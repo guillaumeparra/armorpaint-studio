@@ -1,0 +1,3 @@
+# Aucun moteur : le sidecar doit fonctionner avec une config qui n'a pas tk-shell (repli sans moteur).
+engines: {}
+frameworks: {}

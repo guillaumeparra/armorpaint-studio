@@ -1,0 +1,82 @@
+diff --git a/base/sources/iron_obj.c b/base/sources/iron_obj.c
+index ba1cfdb0..b2ad7a65 100644
+--- a/base/sources/iron_obj.c
++++ b/base/sources/iron_obj.c
+@@ -4,10 +4,15 @@
+ #include "iron_array.h"
+ #include "iron_math.h"
+ #include "iron_string.h"
++#include <float.h> // STUDIO-PATCH(obj-float-exponent)
+ #include <math.h>
+ #include <stdlib.h>
+ #include <string.h>
+ 
++// STUDIO-PATCH(obj-float-exponent): exponent found by read_float, applied once the whole mantissa is parsed
++static int read_float_exp = 0;
++static int read_exponent();
++
+ static raw_mesh_t *part = NULL;
+ static f32_array_t pos_temp;
+ static f32_array_t uv_temp;
+@@ -132,14 +137,8 @@ static float read_float() {
+ 		}
+ 		if (c == 'E' || c == 'e') {
+ 			part->pos++;
+-			int first = buf[0] == '-' ? -(buf[1] - 48) : buf[0] - 48;
+-			int exp   = read_int();
+-			int dec   = 1;
+-			int loop  = exp > 0 ? exp : -exp;
+-			for (int i = 0; i < loop; ++i) {
+-				dec *= 10;
+-			}
+-			return exp > 0 ? (float)first * dec : (float)first / dec;
++			read_float_exp = read_exponent(); // STUDIO-PATCH(obj-float-exponent)
++			break;
+ 		}
+ 		if (bi < 9) {
+ 			buf[bi++] = c;
+@@ -166,9 +165,44 @@ static float read_float() {
+ 	else {
+ 		res /= dot;
+ 	}
++	// STUDIO-PATCH(obj-float-exponent): the mantissa parsed above, scaled in double and clamped to the float range
++	// (no inf in the mesh). Without exponent the result is unchanged.
++	if (read_float_exp != 0) {
++		double d       = (double)res * pow(10.0, read_float_exp);
++		read_float_exp = 0;
++		return d > FLT_MAX ? FLT_MAX : d < -FLT_MAX ? -FLT_MAX : (float)d;
++	}
+ 	return res;
+ }
+ 
++// STUDIO-PATCH(obj-float-exponent): "e-3", "E+2"... read up to the end of the token. Saturated at 99, past the
++// float range: 10^99 times the mantissa (9 characters at most) stays finite in double, and there is no loop.
++static int read_exponent() {
++	int  exp    = 0;
++	bool neg    = false;
++	bool digits = true;
++	if (part->pos < bytes_length && (bytes[part->pos] == '-' || bytes[part->pos] == '+')) {
++		neg = bytes[part->pos++] == '-';
++	}
++	while (part->pos < bytes_length) {
++		char c = bytes[part->pos];
++		if (c == ' ' || c == '\n' || c == '\r' || c == '\t') {
++			break;
++		}
++		if (digits && c >= '0' && c <= '9') {
++			exp = exp * 10 + (c - 48);
++			if (exp > 99) {
++				exp = 99;
++			}
++		}
++		else {
++			digits = false;
++		}
++		part->pos++;
++	}
++	return neg ? -exp : exp;
++}
++
+ static char *read_string() {
+ 	size_t begin = part->pos;
+ 	while (part->pos < bytes_length) { // STUDIO-PATCH(obj-global-indices)

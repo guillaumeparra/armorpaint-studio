@@ -1,0 +1,15 @@
+{
+	"version": 1,
+	"description": "Arnold aiStandardSurface (Maya/Houdini/Katana): suffixes are the shader parameters in Maya's camelCase. Colour maps as linear half EXR, data maps raw, height in 32-bit float, OpenGL normals (aiNormalMap default). Run maketx on the result for .tx.",
+	"naming": "<file>[_<variant>]_<channel>[.<UDIM>].<ext>",
+	"defaults": { "format": "exr", "bits": 16, "color_space": "raw" },
+	"textures": [
+		{ "name": "baseColor", "channels": ["base_r", "base_g", "base_b"], "color_space": "linear" },
+		{ "name": "specularRoughness", "channels": ["rough"] },
+		{ "name": "metalness", "channels": ["metal"] },
+		{ "name": "normal", "channels": ["nor_r", "nor_g", "nor_b"] },
+		{ "name": "height", "channels": ["height"], "bits": 32 },
+		{ "name": "opacity", "channels": ["opac"] },
+		{ "name": "emissionColor", "channels": ["base_r * emis", "base_g * emis", "base_b * emis"], "color_space": "linear" }
+	]
+}

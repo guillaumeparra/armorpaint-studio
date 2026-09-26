@@ -1,0 +1,29 @@
+diff --git a/paint/sources/io/export_texture.c b/paint/sources/io/export_texture.c
+index 93a0ae7b..96e9a0b1 100644
+--- a/paint/sources/io/export_texture.c
++++ b/paint/sources/io/export_texture.c
+@@ -233,6 +233,9 @@ static void export_texture_run_layers(char *path, slot_layer_t_array_t *layers,
+ 	render_target_t *rt    = any_map_get(render_path_render_targets, "empty_white");
+ 	gpu_texture_t   *empty = rt->_image;
+ 
++#ifdef WITH_EXTERNAL // STUDIO-PATCH(export-naming): file name before the object suffix, see below
++	char *studio_base = f;
++#endif
+ 	// Append object mask name
+ 	bool export_selected = g_context->layers_export == EXPORT_MODE_SELECTED;
+ 	if (export_selected && slot_layer_get_object_mask(layers->buffer[0]) > 0) {
+@@ -412,6 +415,14 @@ static void export_texture_run_layers(char *path, slot_layer_t_array_t *layers,
+ 		char                    *tex_name = !string_equals(t->name, "") ? string("_%s", t->name) : "";
+ 		bool  single_channel = string_equals(c->buffer[0], c->buffer[1]) && string_equals(c->buffer[1], c->buffer[2]) && string_equals(c->buffer[3], "1.0");
+ 		char *out_path       = string("%s%s%s%s%s", path, PATH_SEP, f, tex_name, ext);
++#ifdef WITH_EXTERNAL // STUDIO-PATCH(export-naming): textures named by the ShotGrid template in external/, see external/PATCHES.md
++		char *studio_export_texture_path(char *variant, char *channel, char *udim, char *ext);
++		char *studio_variant = f + string_length(studio_base) + (string_length(f) > string_length(studio_base) ? 1 : 0);
++		char *studio_path    = studio_export_texture_path(studio_variant, t->name, is_udim ? object_name : "", ext);
++		if (studio_path != NULL) {
++			out_path = studio_path;
++		}
++#endif
+ 		if (string_equals(c->buffer[0], "base_r") && string_equals(c->buffer[1], "base_g") && string_equals(c->buffer[2], "base_b") &&
+ 		    string_equals(c->buffer[3], "1.0") && string_equals(t->color_space, "linear")) {
+ 			export_texture_write_texture(out_path, pixpaint, 1, 0);
