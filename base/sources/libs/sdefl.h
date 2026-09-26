@@ -777,7 +777,10 @@ extern int zsdeflate(struct sdefl *s, void *out, const void *in, int n, int lvl)
 	return (int)(q - (unsigned char *)out);
 }
 extern int sdefl_bound(int len) {
-	int max_blocks = 1 + sdefl_div_round_up(len, SDEFL_RAW_BLK_SIZE);
+	/* STUDIO-PATCH(sdefl-bound): stored blocks restart at every SDEFL_BLK_MAX block (256 KiB, not a multiple of
+	   SDEFL_RAW_BLK_SIZE), so each one can add a 5-byte stored-block header the old bound did not count: incompressible
+	   input over 256 KiB overflowed the output buffer. */
+	int max_blocks = 1 + sdefl_div_round_up(len, SDEFL_RAW_BLK_SIZE) + sdefl_div_round_up(len, SDEFL_BLK_MAX);
 	int bound      = 5 * max_blocks + len + 1 + 4 + 8 + 3;
 	return bound;
 }
