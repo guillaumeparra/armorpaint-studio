@@ -46,6 +46,10 @@ void import_texture_run(char *path, bool hdr_as_envmap) {
 	if (importer == NULL || cached) {
 		image = import_texture_default_importer(path);
 	}
+	else if (!iron_file_exists(data_resolve_path(path))) { // STUDIO-PATCH(import-null-guards): the plugin importers dereference the blob
+		console_error(string("Could not open file %s.", path));
+		return;
+	}
 	else {
 		image = importer(path);
 	}

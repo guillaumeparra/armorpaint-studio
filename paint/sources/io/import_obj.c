@@ -3,6 +3,10 @@
 
 void import_obj_run(char *path, bool replace_existing) {
 	buffer_t *b = data_get_blob(path);
+	if (b == NULL) { // STUDIO-PATCH(import-null-guards)
+		console_error(string("Could not open file %s.", path));
+		return;
+	}
 	import_obj_parse(b, replace_existing);
 	data_delete_blob(path);
 }

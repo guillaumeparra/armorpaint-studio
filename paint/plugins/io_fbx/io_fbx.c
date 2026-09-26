@@ -503,6 +503,9 @@ void *io_fbx_parse(char *buf, size_t size) {
 	if (active_base_scene == NULL) {
 		ufbx_load_opts opts = {.generate_missing_normals = true};
 		active_base_scene = active_eval_scene = ufbx_load_memory(buf, size, &opts, NULL);
+		if (active_base_scene == NULL) { // STUDIO-PATCH(import-null-guards): not an fbx, see external/PATCHES.md
+			return NULL;
+		}
 		active_tex1                           = true;
 		for (size_t i = 0; i < active_eval_scene->nodes.count; ++i) {
 			ufbx_node *n = active_eval_scene->nodes.data[i];

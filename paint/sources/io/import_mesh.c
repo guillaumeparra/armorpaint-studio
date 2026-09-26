@@ -18,6 +18,12 @@ void import_mesh_run(char *path, bool _clear_layers, bool replace_existing, bool
 		}
 	}
 
+	// STUDIO-PATCH(import-null-guards): the importers dereference the blob without checking it, see external/PATCHES.md
+	if (!iron_file_exists(data_resolve_path(path))) {
+		console_error(string("Could not open file %s.", path));
+		return;
+	}
+
 	import_mesh_clear_layers = _clear_layers;
 	import_mesh_no_reset     = keep_camera;
 	import_mesh_append       = !replace_existing;
@@ -40,6 +46,10 @@ void import_mesh_run(char *path, bool _clear_layers, bool replace_existing, bool
 		raw_mesh_t *(*importer)(char *path) = any_map_get(import_mesh_importers, ext);
 
 		raw_mesh_t *mesh = importer(path);
+		if (mesh == NULL) { // STUDIO-PATCH(import-null-guards)
+			console_error(string("Could not import file %s.", path));
+			return;
+		}
 		if (string_equals(mesh->name, "")) {
 			mesh->name = string_copy(path_base_name(path));
 		}
