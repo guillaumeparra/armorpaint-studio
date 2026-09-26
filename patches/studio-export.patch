@@ -1,0 +1,43 @@
+diff --git a/paint/sources/io/export_texture.c b/paint/sources/io/export_texture.c
+index 96e9a0b1..91298774 100644
+--- a/paint/sources/io/export_texture.c
++++ b/paint/sources/io/export_texture.c
+@@ -375,6 +375,12 @@ static void export_texture_run_layers(char *path, slot_layer_t_array_t *layers,
+ 		}
+ 	}
+ 
++#ifdef WITH_EXTERNAL // STUDIO-PATCH(studio-export): a studio preset composes and writes the flattened layers itself
++	bool studio_export_layers(char *path, char *base, char *f, char *udim, slot_layer_t_array_t *layers);
++	if (studio_export_layers(path, studio_base, f, is_udim ? object_name : "", layers)) {
++		return;
++	}
++#endif
+ 	gpu_texture_t *texpaint      = layers_expa;
+ 	gpu_texture_t *texpaint_nor  = layers_expb;
+ 	gpu_texture_t *texpaint_pack = layers_expc;
+@@ -590,6 +596,12 @@ void export_texture_run(char *path, bool bake_material) {
+ 	if (box_export_preset == NULL) {
+ 		box_export_parse_preset();
+ 	}
++#ifdef WITH_EXTERNAL // STUDIO-PATCH(studio-export): studio presets (formats, expressions, preflight) in external/, see external/PATCHES.md
++	bool studio_export_begin(char *path, bool bake_material);
++	if (!studio_export_begin(path, bake_material)) {
++		return;
++	}
++#endif
+ 
+ 	if (bake_material) {
+ 		export_texture_run_bake_material(path);
+@@ -708,6 +720,12 @@ void export_texture_run(char *path, bool bake_material) {
+ 		}
+ 	}
+ 
++#ifdef WITH_EXTERNAL // STUDIO-PATCH(studio-export): files renamed into place and manifest written, or export failed
++	bool studio_export_end(void);
++	if (!studio_export_end()) {
++		return;
++	}
++#endif
+ #ifdef IRON_IOS
+ 	if (config_is_iphone()) {
+ 		console_info(string("%s (\"Files/On My iPhone/%s\")", tr("Textures exported"), manifest_title));

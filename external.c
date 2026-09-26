@@ -1,5 +1,6 @@
 #include "studio.h"
 #include "studio_exec.h"
+#include "studio_export.h"
 #include "studio_export_naming.h"
 #include "studio_exr.h"
 #include "studio_shotgrid.h"
@@ -15,4 +16,5 @@ void external_init(void) {
 	studio_shotgrid_init();
 	studio_workfiles_init();
 	studio_export_naming_init();
+	studio_export_init();
 }

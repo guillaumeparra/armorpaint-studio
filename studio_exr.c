@@ -127,11 +127,12 @@ static const char *studio_exr_software(void) {
 	return software;
 }
 
-bool studio_exr_write_texture(char *path, buffer_t *pixels, int width, int height, int bits, int type, int off) {
-	if (studio_exr_legacy_writer || (bits != 16 && bits != 32)) {
-		return false;
-	}
+const char *studio_exr_software_string(void) {
+	return studio_exr_software();
+}
 
+bool studio_exr_encode_texture(const void *pixels, size_t pixels_size, int width, int height, int bits, int type, int off,
+                               int compression, void **out, size_t *size, char *err, size_t err_size) {
 	const char *names[STUDIO_EXR_MAX_METADATA + 1]  = {"software"};
 	const char *values[STUDIO_EXR_MAX_METADATA + 1] = {studio_exr_software()};
 	for (int i = 0; i < studio_exr_metadata_count; i++) {
@@ -139,23 +140,35 @@ bool studio_exr_write_texture(char *path, buffer_t *pixels, int width, int heigh
 		values[i + 1] = studio_exr_metadata_values[i];
 	}
 	studio_exr_encode_t in = {
-	    .pixels      = pixels->buffer,
-	    .pixels_size = pixels->length,
+	    .pixels      = pixels,
+	    .pixels_size = pixels_size,
 	    .width       = width,
 	    .height      = height,
 	    .bits        = bits,
 	    .type        = type,
 	    .off         = off,
-	    .compression = studio_exr_compression,
+	    .compression = compression >= 0 ? (exr_compression)compression : studio_exr_compression,
 	    .attr_count  = studio_exr_metadata_count + 1,
 	    .attr_names  = names,
 	    .attr_values = values,
 	};
-	void      *data = NULL;
-	size_t     size = 0;
-	exr_result r    = studio_exr_encode(&in, &data, &size);
-	if (!EXR_OK(r)) {
-		studio_exr_report(true, "EXR export failed (%s): %s", exr_result_string(r), path);
+	exr_result r = studio_exr_encode(&in, out, size);
+	if (!EXR_OK(r) && err != NULL && err_size > 0) {
+		snprintf(err, err_size, "%s", exr_result_string(r));
+	}
+	return EXR_OK(r);
+}
+
+bool studio_exr_write_texture(char *path, buffer_t *pixels, int width, int height, int bits, int type, int off) {
+	if (studio_exr_legacy_writer || (bits != 16 && bits != 32)) {
+		return false;
+	}
+	void  *data = NULL;
+	size_t size = 0;
+	char   err[128];
+	if (!studio_exr_encode_texture(pixels->buffer, pixels->length, width, height, bits, type, off, -1, &data, &size, err,
+	                               sizeof(err))) {
+		studio_exr_report(true, "EXR export failed (%s): %s", err, path);
 	}
 	else if (!studio_exr_save(path, data, size)) {
 		studio_exr_report(true, "EXR export: cannot write %s", path);

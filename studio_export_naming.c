@@ -183,6 +183,29 @@ char *studio_export_texture_path(char *variant, char *channel, char *udim, char 
 	return out;
 }
 
+int studio_export_naming_path(const char *variant, const char *channel, const char *udim, const char *ext, char **path,
+                              char **error) {
+	*path  = NULL;
+	*error = NULL;
+	if (!ensure()) {
+		return 0;
+	}
+	const char *pattern = udim[0] != 0 ? nm.pattern_udim : nm.pattern;
+	if (pattern == NULL) {
+		*error = strdup(string_tmp("ShotGrid template %s %s a UDIM key: export %s", nm.template,
+		                           udim[0] != 0 ? "has no" : "requires",
+		                           udim[0] != 0 ? "without per-tile mode or fix the template" : "per UDIM tile"));
+		return -1;
+	}
+	char *name = variant[0] != 0 ? string_tmp("%s_%s", variant, channel) : (char *)channel;
+	*path      = studio_naming_expand(pattern, name, udim, ext);
+	return *path != NULL ? 1 : 0;
+}
+
+const char *studio_export_naming_template(void) {
+	return ensure() ? nm.template : NULL;
+}
+
 // Le modèle est demandé dès que le projet ouvert change, pour ne pas attendre le sidecar à l'export.
 static void naming_update(void *data) {
 	(void)data;

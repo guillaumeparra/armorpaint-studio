@@ -172,6 +172,37 @@ qui valide un fichier avant de le lui confier, et `io_exr_parse()` déborde touj
 
 ---
 
+## sdefl-bound
+
+| | |
+|---|---|
+| Fichier | `base/sources/libs/sdefl.h` (`sdefl_bound`) |
+| Commit studio | `40fd15a8` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-26) |
+| Trouvé | 2026-09-26, par `.tests/export.sh` (encodeur PNG du lot B2 sur du bruit, sous ASan) |
+
+**Bug.** sdefl (encodeur deflate vendoré par iron) découpe l'entrée en blocs de 256 Ko et stocke tel quel un bloc
+que Huffman n'arrive pas à réduire, en blocs stockés de 64 Ko (65 535 octets) à 5 octets d'en-tête. 256 Ko n'est pas
+un multiple de 65 535 : chaque bloc stocké en coûte un de plus que ce que `sdefl_bound()` prévoit (5 blocs de
+64 Ko par bloc de 256 Ko, pour 4 comptés). Sur des données incompressibles de plus de 256 Ko, l'encodeur écrit
+au-delà du tampon dimensionné par `sdefl_bound()` — 25 octets sur 2 Mo de bruit, environ 1,3 Ko sur une texture 4K
+RGBA. `iron_deflate_raw()` est le compresseur zlib de stb_image_write (`STBIW_ZLIB_COMPRESS`, `iron_image.c`) :
+tout export PNG upstream d'une texture assez bruitée débordait le tas. `iron_deflate()` a la même borne.
+
+**Correctif.** `sdefl_bound()` compte aussi un en-tête par bloc de 256 Ko (`sdefl_div_round_up(len,
+SDEFL_BLK_MAX)`). Le code studio (`studio_image.c`) calcule sa propre borne et ne dépend pas de ce patch.
+
+**Test.** `.tests/export.sh` : `iron_deflate_raw()` sur 8 Mo de bruit, sous ASan (débordement signalé sans le
+patch, dans `sdefl_flush`).
+
+**Signes que l'upstream l'a corrigé.** `SDEFL_BLK_MAX` (ou une taille de bloc multiple de 65 535) dans
+`sdefl_bound()`, ou une mise à jour de sdefl depuis vurtun/sdefl : rejouer le test sans le patch avant de le retirer.
+
+**Non couvert.** `sdefl_bound()` et les appelants prennent un `int` : au-delà de 2 Go d'entrée, rien n'est borné
+(stb_image_write n'y arrive pas pour une texture ≤ 16K RGBA 8 bits, 1 Go).
+
+---
+
 ## menubar-hook
 
 | | |
@@ -285,3 +316,51 @@ construction de `out_path` ou l'ajout du suffixe objet change, refaire les deux 
 **Non couvert.** L'export « bake material » (`export_texture_run_bake_material`, autre construction de chemin).
 L'export par tuile UDIM et par objet n'a pas été rejoué dans l'app : ces modes ne se règlent que dans l'UI, le
 scripting n'expose pas `layers_export`. Seuls la substitution et le modèle `pattern_udim` sont testés.
+
+## studio-export
+
+| | |
+|---|---|
+| Fichier | `paint/sources/io/export_texture.c` (`export_texture_run`, `export_texture_run_layers`) |
+| Commit studio | `a5083508` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-26) |
+| Injection | 18 lignes sous `#ifdef WITH_EXTERNAL`, en trois blocs — l'app compile toujours sans `external/` |
+| Dépend de | `export-naming` (variable `studio_base`) |
+
+**Motif.** L'upstream écrit chaque texture d'un preset en PNG ou JPG 8 bits, ou en EXR 16/32 bits (réglage global
+`base_bits`). Le preset ne décrit que quatre canaux nommés et un `color_space`. Un studio veut, par texture, le format,
+la profondeur, la compression, l'espace colorimétrique et le nom de fichier, ainsi que des canaux calculés. Il veut
+aussi un contrôle avant écriture, une écriture atomique et un manifeste (lots B2, B4, B5).
+
+**Correctif.** Trois points d'injection vers `external/studio_export.c`. Ils ne font rien si le preset choisi n'est
+pas un preset studio.
+- **`export_texture_run`**, après le chargement du preset : `studio_export_begin()`.
+  - Pour un preset studio, il rappelle `export_texture_run` en passe à blanc. L'upstream parcourt objets, atlas et
+    tuiles UDIM, et le plan de fichiers est relevé.
+  - Le préflight s'exécute ensuite.
+  - `false` arrête l'export : problème bloquant, préflight seul, ou fin de la passe à blanc.
+- **`export_texture_run_layers`**, une fois les calques aplatis dans `layers_expa/b/c` : `studio_export_layers()`.
+  - En passe à blanc, il note les fichiers de la variante.
+  - En passe réelle, il relit les trois textures, compose, encode et écrit en `.studio-tmp`.
+  - `true` saute l'écriture upstream par canal.
+- **Avant « Textures exported »** : `studio_export_end()` met les fichiers en place par renommage, puis écrit le
+  manifeste. `false` (échec) supprime les temporaires ; aucun fichier existant n'est remplacé.
+
+Les boucles de l'upstream (objets, atlas, tuiles, masque d'objet, bake) restent la seule source des variantes : le
+studio ne les réimplémente pas.
+
+**Test.** Hors app : `.tests/export.sh`, qui teste sous ASan/UBSan les encodeurs PNG et TIFF (relus par libpng et
+libtiff), les expressions, les presets, le préflight et SHA-256. Dans l'app : `.tests/export_app.sh`, qui vérifie :
+- les exports par script et par `--export-textures` ;
+- l'égalité au pixel près d'un preset studio raw 8 bits avec `generic` upstream ;
+- les empreintes du manifeste ;
+- l'écrasement bloqué et le dossier en lecture seule ;
+- un échec au milieu de l'écriture, qui ne remplace rien.
+
+**Signes que l'upstream l'a corrigé.** Des presets d'export avec format et profondeur par texture, ou un hook d'export
+pour les plugins. Porter alors `studio_export.c` dessus. Si `export_texture_run` ou l'aplatissement des calques change
+(noms `layers_expa/b/c`, ordre des canaux, encodage des ids émission/subsurface dans `nor.a`), revoir `load_row()`.
+
+**Non couvert.** L'export par tuile UDIM et par objet n'a pas été rejoué dans l'app : il faut un maillage à tuiles ou
+des masques d'objet. Le plan et le préflight de ces modes sont testés hors app. Le mode « pack into project » garde
+l'écriture upstream.

@@ -26,7 +26,7 @@ Modules, un par lot (voir `ARMORPAINT_LOTS.md` à la racine d'armorpaint) :
 | `studio_exr` | B1 | ✅ lecture et écriture EXR par tinyexr |
 | `studio_proc`, `studio_exec` | C1 | ✅ exécution de processus, jobs asynchrones, API de scripting (macOS ; Linux écrit, non testé) |
 | `studio_naming`, `studio_export_naming` | B3 | ✅ noms des textures exportées par le template Toolkit du fichier de travail (macOS ; validé sur site simulé) |
-| `studio_export` | B2, B4-B5 | à faire |
+| `studio_export`, `studio_preset`, `studio_expr`, `studio_image`, `studio_preflight`, `studio_sha256`, `studio_fs`, `assets/studio_preset_*.json` | B2, B4, B5 | ✅ presets d'export studio : PNG 8/16, TIFF 8/16/32 (none/LZW/deflate), JPG, EXR 16/32 ; canaux calculés ; préflight ; écriture atomique ; manifeste (macOS) |
 | `studio_ocio` | A | à faire |
 | `studio_sg`, `studio_shotgrid`, `studio_json`, `assets/studio_sg_*.py` | C2 | ✅ sidecar ShotGrid (Toolkit), superviseur, API de scripting (macOS ; validé sur site simulé) |
 | `studio_workfiles`, `tk-armorpaint/` | C3 | ✅ Workfiles (tk-multi-workfiles2) et menu ShotGrid, par le moteur Toolkit tk-armorpaint (macOS ; validé sur site simulé) |
@@ -48,6 +48,8 @@ upstream sans rebuild ; les réglages destinés aux artistes passeront par l'UI 
 | `STUDIO_EXR_READER=legacy` | rend la lecture EXR à l'importeur upstream |
 | `STUDIO_EXR_THREADS` | nombre de threads de codec (défaut : cœurs matériels) |
 | `STUDIO_SG_*`, `STUDIO_SGTK_PATH` | sidecar ShotGrid, voir « ShotGrid (C2) » |
+| `STUDIO_EXPORT_PRESETS` | presets d'export studio : dossiers ou fichiers `.json`, séparés par `:` (`;` sous Windows), prioritaires sur les presets livrés |
+| `STUDIO_EXPORT_THREADS` | threads de composition et d'encodage des exports studio (défaut : cœurs matériels) |
 
 ## Exécution (C1)
 
@@ -306,13 +308,131 @@ STUDIO_SG_NAMING=1 ArmorPaint --background robot.v003.arm --export-textures png 
 Point d'injection upstream : `STUDIO-PATCH(export-naming)` (PATCHES.md). L'export « bake material » n'est pas
 couvert.
 
+## Export studio (B2, B4, B5)
+
+Un **preset studio** est un preset d'export plus riche que ceux d'ArmorPaint. Pour chaque texture, il fixe le format,
+la profondeur, la compression, l'espace colorimétrique, le nom de fichier et des canaux calculés. L'export vérifie
+tout avant d'écrire, écrit de façon atomique et laisse un manifeste.
+
+**Presets livrés** (`assets/studio_preset_<nom>.json`, copiés dans `data/`) : `arnold`, `karma`, `renderman`,
+`vray` et `redshift`. Suffixes des paramètres du shader de chaque moteur. Cartes de couleur en EXR half linéaire,
+données brutes, hauteur en float 32 bits. `STUDIO_EXPORT_PRESETS` en ajoute ou en remplace : le nom du preset est
+celui du fichier, et le premier trouvé l'emporte.
+
+**Installation.** Au démarrage, chaque preset studio valide reçoit un preset upstream du même nom dans
+`data/export_presets/`, avec les 4 canaux et le `color_space` les plus proches. Il apparaît ainsi dans la boîte
+d'export et en ligne de commande. Le registre `data/studio_presets_generated.txt` note ces fichiers et leur
+empreinte.
+- Un preset upstream du même nom n'est jamais écrasé : le preset studio n'est pas installé et la console le dit.
+- Un fichier que le studio a écrit est retiré quand son preset disparaît, sauf s'il a été modifié depuis.
+- Un preset invalide est signalé au démarrage, avec la clé en faute (`textures[2].bits: …`).
+
+Le preset est relu à chaque export : une modification prend effet sans relancer ArmorPaint.
+
+### Format
+
+```json
+{
+	"version": 1,
+	"description": "Lookdev maison",
+	"naming": "<file>[_<variant>]_<channel>[.<UDIM>].<ext>",
+	"resolutions": [2048, "4096x4096"],
+	"overwrite": "warn",
+	"manifest": true,
+	"defaults": { "format": "exr", "bits": 16, "color_space": "raw",
+	              "compression": { "exr": "zip", "tiff": "lzw", "png": "default" } },
+	"textures": [
+		{ "name": "base", "suffix": "BaseColor", "channels": ["base_r", "base_g", "base_b"], "color_space": "linear" },
+		{ "name": "orm", "channels": ["occ", "rough", "metal"], "format": "png", "bits": 16 },
+		{ "name": "mask", "channels": ["clamp(1 - metal * 2, 0, 1)"], "format": "tiff", "bits": 32, "compression": "deflate" },
+		{ "name": "preview", "channels": ["base_r", "base_g", "base_b"], "format": "jpg", "quality": 85,
+		  "naming": "<file>/preview/<file>.<ext>" }
+	]
+}
+```
+
+La lecture est stricte : une clé inconnue, un type faux ou une combinaison impossible est une erreur.
+
+| Clé | Valeurs |
+|---|---|
+| `format` | `png` (8, 16 bits), `jpg` (8), `tiff` (8, 16, 32 float), `exr` (16 half, 32 float) |
+| `compression` | png `fast`, `default`, `best` ; tiff `none`, `lzw`, `deflate` (défaut) ; exr `none`, `rle`, `zips`, `zip`, `piz`, `pxr24`, `b44`, `b44a`, `htj2k256`, `htj2k32` (défaut : `STUDIO_EXR_COMPRESSION`) ; jpg : `quality` 1-100 (défaut 90) |
+| `color_space` | `raw` : valeurs d'ArmorPaint telles quelles (le `linear` des presets upstream) ; `linear` : couleurs décodées (gamma 2.2 → linéaire) ; `srgb` : décodées, calculées, puis réencodées. Les données, les constantes et l'alpha ne sont jamais transformés |
+| `channels` | 1, 3 ou 4 expressions (pas de 4e canal en JPG) |
+| `naming` | marqueurs `<file>`, `<variant>` (objet ou atlas), `<channel>` (`suffix`, sinon `name`), `<UDIM>`, `<ext>`. Une section `[…]` disparaît si un marqueur qu'elle contient est vide. Un chemin relatif part du dossier choisi ; des sous-dossiers sont permis |
+| `resolutions` | résolutions admises par le show : une autre est bloquante |
+| `overwrite` | `warn` (défaut : remplace et le signale), `allow`, `block` |
+
+**Expressions.** Variables : `base_r`, `base_g`, `base_b`, `opac`, `nor_r`, `nor_g`, `nor_g_directx`, `nor_b`,
+`occ`, `rough`, `smooth`, `metal`, `height`, `emis`, `subs`, `diff_r/g/b`, `spec_r/g/b`. Ce sont les canaux des
+presets upstream, avec les mêmes définitions.
+- **Opérateurs** : `+ - * /` et les parenthèses.
+- **Fonctions** : `abs`, `sqrt`, `min`, `max`, `pow`, `step(edge, x)`, `clamp(x, lo, hi)`, `mix(a, b, t)`.
+- **Garde-fous** : une division par zéro, la racine d'un négatif ou un NaN donnent 0.
+- **Exemples** : un masque d'émission `base_r * emis`, un ORM `occ`, `rough`, `metal`, une carte de brillance
+  `1 - rough`.
+
+### Déroulé d'un export
+
+1. **Plan.** Passe à blanc de l'export upstream. Ses boucles (objets, atlas, tuiles UDIM, masques d'objet) donnent la
+   liste exacte des fichiers, avec le nom ShotGrid (B3) s'il s'applique.
+2. **Préflight.** Le rapport liste chaque fichier et sa taille estimée (non compressée), et sépare les erreurs
+   bloquantes des avertissements. En cas de blocage, rien n'est écrit et le rapport s'affiche.
+
+   | Bloquant | Avertissement |
+   |---|---|
+   | nommage impossible (template ShotGrid), aucun calque visible, aucun fichier, résolution hors show, chemins en double, fichier existant (`block`), dossier non inscriptible, espace disque insuffisant, PNG > 2 Gio, TIFF non compressé > 4 Gio | calques masqués ignorés, profondeur supérieure à celle des calques, hauteur en 8 bits, données en JPG, EXR `srgb`, couleur linéaire en 8 bits, maillage UDIM exporté hors mode tuile, tuiles UDIM manquantes, fichier existant (`warn`), marge disque faible |
+
+3. **Écriture.** Pour chaque variante, les calques aplatis sont relus une fois. Chaque texture est composée en
+   parallèle (`STUDIO_EXPORT_THREADS`), encodée, puis écrite en `<fichier>.studio-tmp`. Une texture uniforme est
+   signalée (« nothing painted? »), c'est le cas typique du calque vide.
+4. **Mise en place.** Quand tout est écrit, les fichiers sont renommés, puis le manifeste est écrit de la même
+   façon. Une erreur avant ce point supprime les temporaires : aucun fichier existant n'est remplacé.
+
+**Manifeste** `<file>.export.json`, dans le dossier commun des fichiers. Il contient :
+- le schéma ;
+- date UTC, utilisateur, machine ;
+- les versions d'ArmorPaint (avec le commit) et du studio ;
+- le projet ;
+- le preset (nom, chemin, SHA-256) ;
+- la résolution, la profondeur des calques, le mode et le template ShotGrid ;
+- pour chaque fichier : chemin relatif, texture, variante, tuile, format, profondeur, compression, espace, canaux,
+  taille, SHA-256 ;
+- les avertissements.
+
+PNG et TIFF sont écrits par `studio_image.c` : filtres adaptatifs, deflate et LZW parallèles, prédicteur TIFF
+(flottant pour 32 bits). L'EXR passe par tinyexr (B1), et le JPG par stb. Le mode « pack into project » garde
+l'écriture upstream.
+
+### Scripts (minic)
+
+```c
+int   studio_export_run(char *dir, char *preset, int mode);        // 1 si écrit ; mode : 0 visible, 1 sélection, 2 par objet, 3 par tuile, -1 inchangé
+char *studio_export_preflight(char *dir, char *preset, int mode);  // rapport JSON, sans rien écrire
+char *studio_export_last_report(void);                              // rapport JSON du dernier export
+int   studio_export_is_studio_preset(char *name);
+```
+
+Le rapport JSON contient `ok`, `preset`, `destination`, la résolution, `total_size`, `manifest`, `files[]` (chemin,
+texture, format, profondeur, compression, taille estimée, `exists`) et `issues[]` (`level`, `code`, `message`). En
+ligne de commande, `ArmorPaint projet.arm --background --export-textures exr16 arnold <dossier>` utilise le preset
+studio. Chaque texture garde son propre format. Le type fixe seulement la profondeur de travail des calques
+aplatis (`png`/`jpg` : 8 bits, `exr16` : half, `exr32` : float), comme dans l'upstream. Pour une sortie 16 ou
+32 bits utile, prendre `exr16` ou `exr32` ; le préflight avertit sinon.
+
+Point d'injection upstream : `STUDIO-PATCH(studio-export)` (PATCHES.md).
+
 ## Tests
 
 ```sh
 .tests/run.sh [dossier de travail]     # EXR (B1) ; FUZZ=<n> pour le nombre de mutations
 .tests/proc.sh [dossier de travail]    # processus (C1)
 STUDIO_TEST_TK_CORE=<tk-core> .tests/sg.sh [dossier de travail]   # ShotGrid (C2), noms des exports (B3) ; STUDIO_TEST_TK_APPS pour le moteur (C3)
+.tests/export.sh [dossier de travail]  # export studio (B2, B4, B5) hors app : encodeurs relus par libpng/libtiff, expressions, presets, préflight ; FUZZ=<n>
+.tests/export_app.sh [dossier]         # export studio dans l'app : scripts, --export-textures, pixels = upstream, manifeste, atomicité
 ```
+
+`export.sh` requiert libpng et libtiff (`brew install libpng libtiff`) ; `export_app.sh`, Pillow et `tiffinfo`.
 
 `sg.sh` fait tourner le sidecar sur un site ShotGrid simulé (`sg_fixture.py` : mockgun avec le schéma d'un vrai
 site, la configuration Toolkit de `sg_fixture/config`, une session Desktop enregistrée, un vrai amorçage). Il lui

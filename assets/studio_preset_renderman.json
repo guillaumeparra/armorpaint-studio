@@ -1,0 +1,15 @@
+{
+	"version": 1,
+	"description": "RenderMan PxrSurface / PxrDisneyBsdf: suffixes follow RenderMan's texturing conventions (Presence for cut-outs). Colour maps as linear half EXR, data maps raw, height in 32-bit float, OpenGL normals (PxrNormalMap default). Run txmake on the result for .tex.",
+	"naming": "<file>[_<variant>]_<channel>[.<UDIM>].<ext>",
+	"defaults": { "format": "exr", "bits": 16, "color_space": "raw" },
+	"textures": [
+		{ "name": "BaseColor", "channels": ["base_r", "base_g", "base_b"], "color_space": "linear" },
+		{ "name": "Metallic", "channels": ["metal"] },
+		{ "name": "Roughness", "channels": ["rough"] },
+		{ "name": "Normal", "channels": ["nor_r", "nor_g", "nor_b"] },
+		{ "name": "Height", "channels": ["height"], "bits": 32 },
+		{ "name": "Presence", "channels": ["opac"] },
+		{ "name": "Emissive", "channels": ["base_r * emis", "base_g * emis", "base_b * emis"], "color_space": "linear" }
+	]
+}

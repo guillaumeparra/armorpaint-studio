@@ -13,3 +13,11 @@ char *studio_naming_expand(const char *pattern, const char *channel, const char 
 
 // Crée les dossiers parents de path (mkdir -p, sans shell). false si le dossier parent n'existe pas au retour.
 bool studio_naming_make_parent(const char *path);
+
+// Noms des presets studio (lot B4). Chaque marqueur <nom> dont le nom figure dans names est remplacé par la valeur
+// correspondante (mêmes substitutions de séparateurs que studio_naming_expand) ; un marqueur inconnu reste tel quel.
+// Une section [ ... ] disparaît, crochets compris, dès qu'un marqueur qu'elle contient vaut "" ; sinon seuls les
+// crochets disparaissent. Pas d'imbrication : un '[' sans ']' qui le suit est littéral. Ex. :
+// "<file>[_<variant>]_<channel>[.<UDIM>].<ext>" donne "robot_BaseColor.exr" sans variante ni tuile. Retourne le
+// chemin (malloc), NULL si la mémoire manque.
+char *studio_naming_format(const char *pattern, const char *const *names, const char *const *values, int count);

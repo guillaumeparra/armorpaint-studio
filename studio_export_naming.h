@@ -21,3 +21,12 @@ void studio_export_naming_init(void);
 // (".png", ou ".1001.png" par tuile). Retourne le chemin (chaîne d'ArmorPaint, dossiers créés), NULL pour garder le
 // nom d'ArmorPaint.
 char *studio_export_texture_path(char *variant, char *channel, char *udim, char *ext);
+
+// Chemin d'une texture de preset studio (lot B4) d'après le template ShotGrid, sans créer de dossier ni écrire dans la
+// console : studio_export.c vérifie tout avant d'écrire (lot B5). udim sans point ("1001", "" hors export par tuile),
+// ext sans point ("exr"). 1 : *path (malloc) ; 0 : pas de nommage ShotGrid pour ce projet, le nom vient du preset ;
+// -1 : *error (malloc), le template ne convient pas (tuile exigée ou absente), l'export est bloqué.
+int studio_export_naming_path(const char *variant, const char *channel, const char *udim, const char *ext, char **path,
+                              char **error);
+// Template Toolkit qui nomme les textures du projet ouvert, NULL hors pipeline.
+const char *studio_export_naming_template(void);
