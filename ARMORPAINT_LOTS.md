@@ -437,6 +437,23 @@ connaît déjà et que la config du studio règle déjà, ouvertes par un moteur
 
 ---
 
+# Chantier D — UDIM natifs (option B)
+
+Décidé le 2026-09-26. Analyse, architecture et détail des phases : **`ARMORPAINT_UDIM.md`** (§6 et §7). Exception assumée au principe directeur : les phases 2 à 4 touchent le cœur (`slot_layer.c`, `util_layer.c`, `render_path_paint.c`, `make_mesh.c`, `export_texture.c`, `.arm`), la logique va dans un nouveau `paint/sources/util/util_udim.c` et les fichiers chauds ne reçoivent que les boucles par tuile (patches `udim-*` dans `PATCHES.md`).
+
+| Lot | Contenu | Estimation |
+|---|---|---|
+| D0 | Correctifs sans regret : importeurs OBJ/FBX (UV négatives, u ≥ 10, triangles à cheval, plafond FBX), erreur > 64 tuiles, UV matériau réelles, gouttière entre cases | 8-12 j |
+| D1 | Tuile = donnée du projet, maillage à plages d'index (plus de split), stockage encore en atlas | 10-15 j |
+| D2 | Jeu de textures par tuile, `layers_set_tile`, nouveau format `.arm` + migration — **point de non-retour du fork** | 20-30 j |
+| D3 | Résolution par tuile, export natif | 6-10 j |
+| D4 | Mémoire : allocation paresseuse, undo par tuile, éviction LZ4 | 12-20 j |
+
+| Chantier D — total | **56-87 j** |
+|---|---|
+
+---
+
 ## Synthèse
 
 | Chantier | Jours-homme | Dépendances |
@@ -445,7 +462,8 @@ connaît déjà et que la config du studio règle déjà, ouvertes par un moteur
 | **A — OCIO** | **33** (18 en voie B) | A0 avant tout |
 | **B — Exporter studio** | **34** | B1 avant B2-B7 ; B3 profite de C2 |
 | **C — ShotGrid** | **37** | C1+C2 avant C3-C4 ; C4 dépend de B3/B5 |
-| **Total** | **106 j-h** (~5,3 mois à 1 ETP) | |
+| **D — UDIM natifs** | **56-87** | D0 indépendant ; D2 avant D3-D4 ; C4 publie `<UDIM>` sans dépendre de D |
+| **Total A-C** | **106 j-h** (~5,3 mois à 1 ETP) | |
 
 ### Chemin recommandé
 
@@ -474,13 +492,12 @@ connaît déjà et que la config du studio règle déjà, ouvertes par un moteur
 | Postes Windows | 🟠 bloque C2 sur Windows | `studio_proc` Windows à écrire et tester sur une machine Windows (le sidecar Python, lui, est portable) |
 | Toolkit du studio | 🟠 C2 validé sur site simulé seulement | Recette C6 sur le vrai site : session Desktop, amorçage de la config de prod, templates ArmorPaint ajoutés |
 | Réécriture upstream (§1.1) | 🔴 | Tout dans `external/`, dépôt séparé, `PATCHES.md` |
-| **Le mur VRAM reste entier** | 🔴 | **Aucun de ces lots ne le lève** — voir la question UDIM |
+| **Le mur VRAM reste entier** | 🔴 | Levé en partie par le chantier D (D4 : allocation par tuile, undo par tuile, éviction) — voir `ARMORPAINT_UDIM.md` |
 
 ### Ce que ces 110 jours ne règlent **pas**
 
 - Le plafond VRAM (§5.3) : 3 render targets pleine résolution par layer, aucun streaming
-- L'UDIM à l'échelle (un layer par tile ⇒ explosion mémoire)
-- La résolution par tile UDIM
+- ~~L'UDIM à l'échelle~~ et ~~la résolution par tile UDIM~~ : repris par le chantier D (2026-09-26)
 - La limite de 64 objets du path tracer / bake RT
 
 Ces points relèvent d'une refonte du modèle de textures, hors périmètre.

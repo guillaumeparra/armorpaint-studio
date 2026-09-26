@@ -262,6 +262,8 @@ Addon Blender fourni : `base/tools/io_export_arm.py` (Blender 5.0).
 
 ### 5.2 UDIM — ⚠️ Existe, mais implémentation « pauvre »
 
+> **Mise à jour 2026-09-26** : partiellement périmé depuis le commit upstream `99156dfc` (« paint across udims », 2026-09-15) — la peinture à travers les tuiles marche et les calques partagés ne sont plus dupliqués par tuile (atlas en grille, résolution `res / ceil(√N)` par tuile). État actuel, limites et pistes vers des UDIM natifs : **[ARMORPAINT_UDIM.md](ARMORPAINT_UDIM.md)**.
+
 **Ce qui marche** :
 - Import avec `Split by: UDIM Tile` pour OBJ (`io/import_obj.c:14`) et FBX (`plugins/io_fbx/io_fbx.c:215`)
 - Nommage conforme : `<mesh>.<1001+>`, export en `<projet>.1001.exr` — compatible Mari/Maya/Arnold
