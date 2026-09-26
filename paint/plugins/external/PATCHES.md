@@ -1,6 +1,6 @@
 # Patches studio sur les fichiers upstream
 
-Tout le code studio vit dans `paint/plugins/external/` (ce dépôt). Les fichiers upstream d'ArmorPaint ne
+Tout le code studio vit dans `paint/plugins/external/`. Les fichiers upstream d'ArmorPaint ne
 reçoivent que des corrections ou des points d'injection de quelques lignes, listés ici. Aucun n'est proposé
 en PR upstream.
 
@@ -9,7 +9,14 @@ Chaque patch a :
 - un marqueur `STUDIO-PATCH(<id>)` dans le code upstream modifié ;
 - `patches/<id>.patch` : le diff à réappliquer ;
 - `patches/<id>.base` : le commit upstream contre lequel il a été validé pour la dernière fois ;
-- un commit sur la branche `studio` du dépôt armorpaint.
+- un commit sur la branche `studio`.
+
+**Branches** (un seul dépôt, `guillaumeparra/armorpaint-studio`) :
+- `upstream` : le code d'armory3d tel quel. On n'y commite jamais ; elle avance en fast-forward sur `armory3d/main`.
+- `studio` : `upstream` + ces patches + nos plugins (`paint/plugins/external/`). Branche de travail et par défaut.
+
+`git diff upstream studio -- ':!paint/plugins/external'` montre exactement nos modifications du code upstream.
+Remotes : `armory3d` (lecture seule, push désactivé) et `origin` (notre dépôt privé).
 
 ## Après chaque pull de l'upstream
 
@@ -26,11 +33,15 @@ installés par `tools/install_hooks.sh`. On peut aussi le lancer à la main. Pou
 Mise à jour type, depuis la racine d'armorpaint :
 
 ```bash
-git checkout main && git pull --ff-only
-git checkout studio && git rebase main        # le hook post-rewrite lance check_patches.sh
+git fetch armory3d
+git checkout upstream && git merge --ff-only armory3d/main
+git checkout studio && git merge upstream     # le hook post-merge lance check_patches.sh
+git push origin upstream studio
 ```
 
-Pour régénérer un patch après l'avoir refait : `git diff main studio -- <fichiers> > patches/<id>.patch`,
+`merge` et non `rebase` : l'historique poussé n'est jamais réécrit.
+
+Pour régénérer un patch après l'avoir refait : `git diff upstream studio -- <fichiers> > patches/<id>.patch`,
 puis `tools/check_patches.sh --ack <id>`.
 
 ---
@@ -69,7 +80,7 @@ l'export en mode fenêtré, et aucune régression sur `--script`, `--api` et `--
 
 **Signes que l'upstream l'a corrigé.** `iron_stop()` n'est plus appelé dans la branche `args_background` de
 `args_run_on_next_frame()`, ou l'export de textures redevient synchrone dans cette fonction. Dans ce cas,
-rejouer le test sur `main` sans le patch.
+rejouer le test sur `upstream` sans le patch.
 
 **Non couvert.** `--export-mesh` et `--export-material` s'exécutent sur la même frame que l'import. Leur
 comportement en `--background` n'a pas été vérifié.
@@ -164,7 +175,7 @@ inchangé).
 
 **Signes que l'upstream l'a corrigé.** Un `bitend` (ou équivalent) dans `struct sinfl`, un test de `n` dans les
 cas 16/17/18, ou un test de `offs` contre `out - o`. Une mise à jour de sinfl depuis vurtun/sinfl peut aussi
-apporter ces bornes : rejouer le fuzz sur `main` sans le patch avant de le retirer.
+apporter ces bornes : rejouer le fuzz sur `upstream` sans le patch avant de le retirer.
 
 **Non couvert.** Le décodeur DWA d'`io_exr.c` lui-même reste sans bornes ; c'est `studio_exr_dwa_legacy_safe()`
 qui valide un fichier avant de le lui confier, et `io_exr_parse()` déborde toujours sa pile au-delà de 4 canaux
@@ -410,7 +421,7 @@ Deux autres effets de la même hypothèse :
 Sur un OBJ à données séparées par objet — tout ce que l'upstream lisait sans planter — la sortie est identique,
 part par part, octet pour octet (étape 1 du banc).
 
-**Test.** `.tests/obj.sh` (hors app, ASan/UBSan, compare à `main:base/sources/iron_obj.c`) :
+**Test.** `.tests/obj.sh` (hors app, ASan/UBSan, compare à `upstream:base/sources/iron_obj.c`) :
 1. `valid/` : 10 fichiers (sphères en `v`, `v/t`, `v//n`, `v/t/n`, CRLF, usemtl, triangles, n-gones concaves,
    grille UDIM), splits objet, matériau et UDIM : sortie identique à l'upstream ;
 2. `shared/` : faces sur les `vn` / `vt` / `v` d'un objet précédent (triangles, quads, n-gone, indices relatifs,
@@ -437,7 +448,7 @@ les n-gones donnent les mêmes objets, avec les mêmes nombres d'indices, qu'ava
 
 **Signes que l'upstream l'a corrigé.** `vind_off` / `tind_off` / `nind_off` disparaissent, ou `array_free` de
 `pos_temp` n'est plus appelé pour chaque part en split objet. Rejouer alors `.tests/obj.sh` avec
-`STUDIO_UPSTREAM=main` sur une copie de `main` **sans** le patch (étape `shared/`).
+`STUDIO_UPSTREAM=upstream` sur une copie d'`upstream` **sans** le patch (étape `shared/`).
 
 **Non couvert.**
 - En split par objet, les `v`/`vt`/`vn` de tout le fichier restent en mémoire jusqu'à la dernière part (l'upstream
@@ -486,7 +497,7 @@ Sans exposant, le résultat est inchangé (étape 4 du banc : 20 000 jetons iden
 1 : sortie identique octet pour octet). La mantisse reste limitée à 9 caractères par `buf`, comme sans exposant :
 `-1.234567e-05` (sortie `%e` par défaut) tient ; au-delà, les chiffres de droite sont perdus.
 
-Deux patches touchent `iron_obj.c` : `obj-global-indices.patch` (`main` → `252f9fc3`) puis
+Deux patches touchent `iron_obj.c` : `obj-global-indices.patch` (`upstream` → `252f9fc3`) puis
 `obj-float-exponent.patch` (`252f9fc3` → `70cece4b`). Les réappliquer dans cet ordre. Pour régénérer celui-ci :
 `git diff <commit studio d'obj-global-indices> studio -- base/sources/iron_obj.c`.
 
@@ -529,3 +540,22 @@ pour l'objet fusionné) et tous les sommets à 0.
 - Le packing int16 des normales (`(int)(n * 32767)`) ne borne pas une normale non normalisée : `vn 1e30 0 0` est
   lu 1e30, et la conversion float → int déborde (`float-cast-overflow`, exclu du banc, saturé sur arm64) — comme `vn 999999999`
   sans exposant.
+
+## track-external
+
+| | |
+|---|---|
+| Fichier | `.gitignore` |
+| Commit studio | `df0d2954` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-26) |
+| Injection | 1 ligne : `paint/plugins/external` n'est plus ignoré (remplacée par un commentaire marqueur) |
+
+**Motif.** L'upstream ignore `paint/plugins/external/`, le dossier des plugins hors arbre. Le code studio y vit. Il
+était donc dans un dépôt git séparé. Depuis le 2026-09-26, tout est dans un seul dépôt : la branche `studio` suit le
+dossier, dont l'historique a été importé par `git subtree add`.
+
+**Test.** `git check-ignore paint/plugins/external/external.c` ne renvoie rien. `git status` voit les modifications
+du dossier.
+
+**Signes que l'upstream l'a changé.** Un conflit sur `.gitignore` au merge d'`upstream`. Garder alors leurs nouvelles
+lignes, et le commentaire marqueur à la place de celle d'`external`.

@@ -3,7 +3,7 @@
 # (base/sources/iron_obj.c).
 #
 # Usage : .tests/obj.sh [dossier de travail]     FUZZ=<n> : nombre de mutations (défaut 1000, ~3 min)
-#         STUDIO_ROOT=<armorpaint> si ce dépôt n'est pas dans paint/plugins/external (worktree)
+#         STUDIO_ROOT=<armorpaint> pour tester une autre copie d'armorpaint
 #
 # 1. valid/  : l'arbre courant produit, part par part, octet pour octet, la même sortie que l'upstream (branche main).
 # 2. shared/ : un OBJ dont les faces utilisent les v/vt/vn d'un objet précédent se lit comme sa version à données
@@ -22,7 +22,7 @@ EXT=$(dirname "$T")
 ROOT=${STUDIO_ROOT:-$(git -C "$EXT/../../.." rev-parse --show-toplevel)}
 BASE="$ROOT/base/sources"
 W=${1:-$(mktemp -d)}
-UPSTREAM=${STUDIO_UPSTREAM:-main}
+UPSTREAM=${STUDIO_UPSTREAM:-upstream}
 mkdir -p "$W/up"
 
 echo "== build ($W)"

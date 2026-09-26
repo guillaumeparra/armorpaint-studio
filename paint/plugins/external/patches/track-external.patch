@@ -1,0 +1,13 @@
+diff --git a/.gitignore b/.gitignore
+index bbbcd620..f231ea2f 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,4 +1,4 @@
+-**/build*/
+-paint/plugins/external
+-.vscode
+-*.DS_Store
++**/build*/
++# STUDIO-PATCH(track-external): paint/plugins/external (studio code) is tracked on the studio branch, see its PATCHES.md
++.vscode
++*.DS_Store

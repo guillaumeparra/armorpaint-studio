@@ -12,7 +12,7 @@
 
 EXT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 ROOT=$(git -C "$EXT_DIR/../../.." rev-parse --show-toplevel) || exit 2
-UPSTREAM=${STUDIO_UPSTREAM:-origin/main}
+UPSTREAM=${STUDIO_UPSTREAM:-upstream} # branche miroir d'armory3d/main
 cd "$ROOT" || exit 2
 
 if [ "$1" = "--ack" ]; then

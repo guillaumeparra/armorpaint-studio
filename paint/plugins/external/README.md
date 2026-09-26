@@ -2,8 +2,9 @@
 
 Ce dossier est compilé dans ArmorPaint par le hook upstream `paint/plugins/external/`
 (`paint/plugins/project.c`, define `WITH_EXTERNAL`). `external_init()` est appelé au démarrage par
-`plugins_init()` (`paint/plugins/plugins.c`). Le dossier est ignoré par le `.gitignore` upstream : c'est un
-dépôt git séparé.
+`plugins_init()` (`paint/plugins/plugins.c`). L'upstream ignore ce dossier ; la branche `studio` le suit (patch
+`track-external`). Branches `upstream` (armory3d tel quel) et `studio` (nos patches et ce dossier) : voir
+`PATCHES.md`.
 
 - `external.c` : point d'entrée. Chaque module s'y enregistre.
 - `studio.h` : déclarations communes et forward declarations des symboles du cœur. Chaque `.c` d'ici est

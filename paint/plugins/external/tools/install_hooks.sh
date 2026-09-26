@@ -1,6 +1,5 @@
 #!/bin/sh
 # Installe les hooks git du dépôt armorpaint qui lancent check_patches.sh après un pull (merge ou rebase).
-# external/ est son propre dépôt git : remonter jusqu'à la racine d'armorpaint.
 ROOT=$(git -C "$(dirname "$0")/../../../.." rev-parse --show-toplevel) || exit 1
 HOOKS=$(git -C "$ROOT" rev-parse --git-path hooks)
 case "$HOOKS" in /*) ;; *) HOOKS="$ROOT/$HOOKS" ;; esac
