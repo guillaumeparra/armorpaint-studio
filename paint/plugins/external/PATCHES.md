@@ -659,3 +659,30 @@ sur `upstream` sans le patch.
 - Polices (`import_font_run`) et sons (`import_sound_run`) ne vérifient pas le fichier ; ils ne sont joignables que
   par glisser-déposer ou le navigateur de fichiers (la ligne de commande ne les accepte pas, l'API de script teste
   `iron_file_exists`), donc avec un fichier qui existe.
+
+---
+
+## external-project
+
+| | |
+|---|---|
+| Fichier | `paint/plugins/project.c` |
+| Commit studio | `1511db63` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-26) |
+| Injection | 1 ligne : `add_project(project, "external/.project");` dans le bloc `if (fs_exists("external"))` |
+
+**Motif.** Le hook upstream compile les `.c` d'`external/`, ses shaders et ses assets, mais ne permet d'ajouter ni
+bibliothèque ni define. Le lot A1 doit lier OpenColorIO en statique sur macOS (`.ocio/lib/libstudio_ocio.a`) : une
+dylib chargée par dlopen est refusée par la validation des bibliothèques du hardened runtime (ArmorPaint est signé
+ad hoc). L'injection fait évaluer `external/.project/project.c`, qui ajoute la bibliothèque et
+`WITH_STUDIO_OCIO_STATIC` quand l'archive existe. Le dossier commence par un point : amake n'en compile pas le
+contenu dans l'app.
+
+**Test.** Après `tools/build_ocio.sh` et `../base/make --compile`, le log de démarrage d'ArmorPaint affiche
+`studio: OCIO 2.5.2, config …` ; `.tests/ocio_app.sh` passe. Sans l'archive, le build réussit et le log affiche
+`OCIO unavailable: ArmorPaint was built without libstudio_ocio`. Sans le patch, même message : la bibliothèque
+n'est pas liée.
+
+**Signes que l'upstream l'a changé.** Un conflit sur `paint/plugins/project.c`, ou un nouveau mécanisme upstream
+pour qu'`external/` déclare ses bibliothèques (par exemple un `add_project(project, "external")` ou un
+`external/project.c` évalué). Le préférer alors et déplacer `.project/project.c` à l'endroit attendu.

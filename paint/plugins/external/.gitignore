@@ -1,2 +1,7 @@
 .DS_Store
 __pycache__/
+# Lot A1 : produits de tools/build_ocio.sh, reconstruits depuis .ocio/ (version d'OCIO épinglée dans .ocio/CMakeLists.txt).
+.ocio/build/
+.ocio/lib/
+.ocio/venv/
+assets/libstudio_ocio.so

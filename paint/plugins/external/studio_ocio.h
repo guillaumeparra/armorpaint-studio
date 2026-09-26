@@ -1,0 +1,55 @@
+#pragma once
+
+// Lot A1 : gestion couleur OCIO. OpenColorIO vit dans libstudio_ocio (shim C++, ABI : studio_ocio_lib.h), liée en
+// statique sur macOS et chargée par dlopen ailleurs ; ce module choisit la configuration, garde les processeurs en cache
+// et sert le reste d'ArmorPaint (export A3, viewport A2, import A4). Sans la bibliothèque ou sans configuration valide, OCIO est
+// indisponible et studio_ocio_status() dit pourquoi : ArmorPaint reste utilisable, rien n'échoue en silence.
+//
+// Configuration, dans l'ordre : chemin explicite (préférences, lot A5), sinon $OCIO, sinon la configuration studio
+// intégrée à OCIO (ocio://studio-config-latest, ACES). Un $OCIO invalide est une erreur, pas un repli : le repli
+// cacherait au studio que sa configuration n'est pas celle qu'il croit.
+//
+// Threads : studio_ocio_init() et studio_ocio_shutdown() depuis le thread principal, hors de tout export. Tout le
+// reste peut être appelé de n'importe quel thread ; studio_ocio_transform() est sûr en parallèle (bandes disjointes).
+
+#include <stdbool.h>
+
+// Bibliothèque : liée en statique sur macOS (.project/project.c) ; ailleurs, chargée par dlopen depuis $STUDIO_OCIO_LIB
+// ou data/libstudio_ocio.so. Sur macOS, $STUDIO_OCIO_LIB ne sert qu'aux bancs de test (build sans liaison statique).
+#define STUDIO_OCIO_DEFAULT_CONFIG "ocio://studio-config-latest"
+
+void studio_ocio_init(void); // external_init() : charge la bibliothèque et la configuration par défaut, journalise
+// Recharge la configuration : config_path NULL ou "" pour l'ordre par défaut. Rend studio_ocio_ready().
+bool        studio_ocio_reload(const char *config_path);
+void        studio_ocio_shutdown(void);
+bool        studio_ocio_ready(void);
+const char *studio_ocio_status(void);        // état lisible : versions et configuration, ou la raison de l'échec
+const char *studio_ocio_config_source(void); // fichier ou URI chargé ; "" si aucun
+const char *studio_ocio_config_name(void);
+const char *studio_ocio_version(void); // version d'OpenColorIO ; "" sans bibliothèque
+
+int         studio_ocio_colorspace_count(void);
+const char *studio_ocio_colorspace_name(int i);
+int         studio_ocio_display_count(void);
+const char *studio_ocio_display_name(int i);
+int         studio_ocio_look_count(void);
+const char *studio_ocio_look_name(int i);
+int         studio_ocio_role_count(void);
+const char *studio_ocio_role_name(int i);
+const char *studio_ocio_display_default(void);
+const char *studio_ocio_view_default(const char *display);
+int         studio_ocio_view_count(const char *display);
+const char *studio_ocio_view_name(const char *display, int i);
+
+const char *studio_ocio_resolve(const char *name);          // nom canonique d'un espace, alias ou rôle ; NULL sinon
+int         studio_ocio_is_data(const char *colorspace);     // 1 donnée, 0 couleur, -1 inconnu
+const char *studio_ocio_encoding(const char *colorspace);    // "scene-linear", "sdr-video"… ; NULL si inconnu
+const char *studio_ocio_family(const char *colorspace);      // NULL si inconnu
+const char *studio_ocio_colorspace_from_path(const char *p); // file_rules de la configuration
+
+// Transforme sur place des pixels float32 entrelacés (3 ou 4 canaux, alpha intact), lignes contiguës. Les processeurs
+// sont gardés en cache par couple (src, dst). Rend false si OCIO est indisponible ou un nom inconnu (message dans le
+// journal une fois par couple). Deux espaces qui se résolvent au même nom : rien à faire, rend true.
+bool studio_ocio_transform(float *pixels, int width, int height, int channels, const char *src, const char *dst);
+// Empreinte de la transformation src → dst (manifeste d'export) ; NULL si indisponible.
+const char *studio_ocio_transform_id(const char *src, const char *dst);

@@ -1,0 +1,8 @@
+/* Version script ELF de libstudio_ocio (Linux) : seuls les symboles studio_ocio_lib_* sortent. Pendant macOS :
+ * studio_ocio_lib.symbols. */
+STUDIO_OCIO_LIB_1 {
+	global:
+		studio_ocio_lib_*;
+	local:
+		*;
+};

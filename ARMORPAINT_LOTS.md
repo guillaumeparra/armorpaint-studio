@@ -40,7 +40,7 @@ paint/plugins/external/
 
 **État actuel** : néant. 2 color spaces (`linear`/`srgb`), le « srgb » étant un gamma 2.2 pur ([export_texture.c:3](paint/sources/io/export_texture.c:3)) et non la courbe sRGB par morceaux. Tonemap Filmic figé dans le shader. LUT `.cube` 8 bits clampé 0-1, viewport seulement.
 
-### A0 — Décision d'architecture · **3 j**
+### A0 — Décision d'architecture · **3 j** — ✅ **fait le 2026-09-26** : voie A, OCIO 2.5.2 lié en statique (macOS)
 
 Trancher entre deux voies. À faire en premier, tout le reste en dépend.
 
@@ -55,6 +55,24 @@ Trancher entre deux voies. À faire en premier, tout le reste en dépend.
 Le reste du chantier suppose **la voie A**. Avec la voie B, retirer A1 et diviser A2-A4 par deux.
 
 **Livrable** : note de décision + POC de link OCIO sur une plateforme.
+
+**Décision (2026-09-26).**
+- **Voie A, le vrai OpenColorIO**, version épinglée `v2.5.2` (VFX Reference Platform CY2026). Il est construit
+  depuis ses sources, dépendances comprises, par `external/tools/build_ocio.sh`. Pas de binaires versionnés : les
+  produits sont ignorés par git et reconstruits par le script (2 à 3 minutes la première fois).
+- **Configuration.** `$OCIO` s'il est défini ; sinon la configuration studio intégrée à OCIO
+  (`ocio://studio-config-latest`, ACES 2.0). Un `$OCIO` invalide est une erreur, sans repli.
+- **macOS : liaison statique, pas de dlopen.** ArmorPaint est signé ad hoc avec le hardened runtime, et sa
+  validation des bibliothèques refuse toute dylib qui n'est pas de la même équipe. Le POC par dlopen a échoué
+  pour cette raison.
+  - `build_ocio.sh` fusionne le shim, OCIO et ses dépendances en un objet (`ld -r`) où seuls les 24 symboles
+    `studio_ocio_lib_*` restent visibles. L'archive est liée par `external/.project/project.c`.
+  - Ce projet est évalué par amake grâce à une injection upstream d'une ligne : patch `external-project`. Le hook
+    `external` ne permet pas d'ajouter une bibliothèque.
+  - Coût : environ 7 Mo sur le binaire.
+- **Linux : dlopen** de `data/libstudio_ocio.so`. Écrit, non testé.
+- **Windows : à faire.** Le shim et le CMake sont portables ; restent le script et la liaison.
+- **POC** : dans l'app, ACEScg → `sRGB - Texture` donne les mêmes valeurs que PyOpenColorIO.
 
 ### A1 — Wrapper C autour d'OCIO v2 · **8 j**
 
@@ -79,6 +97,22 @@ OCIO est du C++ ; le projet est du C. Il faut une couche `extern "C"`.
 - ⚠️ **Le vrai risque est ici** : linker OCIO+Imath sur Windows/Linux/macOS. Prévoir des builds statiques pré-compilés par plateforme, versionnés dans le dépôt studio.
 
 **Livrable** : lib liée, `studio_ocio_init()` charge la config studio et liste les colorspaces.
+
+✅ **Fait le 2026-09-26** (macOS ; Linux écrit, non testé ; partie GPU reportée en A2).
+- **Shim et API.** Le shim C++ `external/.ocio/studio_ocio_lib.cpp` expose une ABI C versionnée
+  (`studio_ocio_lib.h`), sans exception qui la traverse. Le module `external/studio_ocio.c/.h` fournit :
+  configuration et statut, listes (espaces, displays, views, looks, rôles), alias, `is_data`, encodage, file_rules,
+  et une transformation CPU RGB/RGBA sur place.
+- **Transformation.** Processeurs en cache par couple, appel sûr depuis plusieurs threads. L'alpha n'est jamais
+  transmis à OCIO : certaines vues ACES 2.0 le modifient.
+- **API de scripting** minic.
+- **Tests.**
+  - `.tests/ocio.sh`, sous ASan/UBSan : liaison statique et dlopen. Résultat **bit à bit** égal à PyOpenColorIO
+    2.5.2 sur la configuration du banc (LUT, look, file_rules), la studio et la CG : 12 576 valeurs. Couvre aussi
+    les threads, les entrées invalides, les rechargements et les bibliothèques absentes ou incompatibles.
+  - `.tests/ocio_app.sh` : dans l'app, avec le défaut intégré, un `$OCIO` de test et un `$OCIO` invalide.
+- **Différent du plan.** Le build passe par `.project/project.c` et non par le bloc `external` de `project.js`.
+  `studio_ocio_transform` ne prend que du float32 : les exports 8/16 bits convertissent avant l'encodage (A3).
 
 ### A2 — Viewport : display transform · **5 j**
 
@@ -304,7 +338,7 @@ Ne **pas** implémenter l'API ShotGrid en C. Un processus Python séparé, pilot
 
 **Tests** (`external/.tests/sg.sh`) : site ShotGrid simulé (mockgun avec le schéma d'un vrai site, vraie configuration Toolkit sur disque, session Desktop enregistrée, **vrai amorçage avec bascule de core**). 19 tests du sidecar (protocole, erreurs, auth, versions, publish, changement de projet, hook, pas d'invite), 221 contrôles du superviseur sous ASan/UBSan contre un faux sidecar qui se comporte mal sur commande (crash, silence, protocole, stdout fermé, réponses périmées, 8 Mo, annulation, table pleine, ni fuite ni zombie) puis de bout en bout, 373 contrôles du lecteur JSON (troncature à chaque octet, profondeur). Mutation testing sur le rejeu : détecté. Dans l'app : script minic en `--background --script` (auth, job, amorçage, changement de projet rejoué, sans Toolkit, sans Python). **Non validé contre un vrai site** : c'est la recette C6.
 
-### C3 — UI Workfiles · **10 j** — 🟡 **en grande partie fait le 2026-09-26** (macOS ; validé sur site simulé)
+### C3 — UI Workfiles · **10 j** — ✅ **clos le 2026-09-26** (macOS ; validé sur site simulé ; les deux points restants sont abandonnés)
 
 Changement de plan : **pas de panneau maison**. Les fenêtres sont celles de Toolkit (tk-multi-workfiles2), qu'on
 connaît déjà et que la config du studio règle déjà, ouvertes par un moteur Toolkit propre à ArmorPaint.
@@ -314,8 +348,8 @@ connaît déjà et que la config du studio règle déjà, ouvertes par un moteur
 - ✅ **Open / Save / Save As / versions** : ceux de workfiles2 (version suivante, dossiers créés par le schéma, changement de contexte de tâche).
 - ✅ **Menu ShotGrid** dans la barre de menus (le menu standard des moteurs Toolkit : contexte, Jump to Flow Production Tracking / File System, favoris `menu_favourites`, commandes des apps), ops `list_commands` / `show_app`. Raccourcis Ctrl/Cmd+Alt+O et Ctrl/Cmd+Alt+S. `STUDIO_SG_WORKFILES_ON_START=1` ouvre File Open au lancement.
 - ✅ Contexte affiché dans le **titre de la fenêtre** (`robot.v003.arm - Demo / robot / Texture / texturing`) et en tête du menu.
-- ⬜ Contexte dans la barre de statut (le plan), si le titre ne suffit pas.
-- ⬜ Verrouillage (version plus récente d'un autre utilisateur) : à vérifier dans ce que fait workfiles2, pas encore regardé.
+- ~~Contexte dans la barre de statut (le plan), si le titre ne suffit pas.~~ Abandonné (décision du 2026-09-26) : le titre de la fenêtre suffit.
+- ~~Verrouillage (version plus récente d'un autre utilisateur) : à vérifier dans ce que fait workfiles2, pas encore regardé.~~ Abandonné (décision du 2026-09-26).
 - ✅ Freezes corrigés (roue arc-en-ciel) : le sidecar Python, application pour macOS dès sa première fenêtre, ne lisait plus ses événements entre deux requêtes (spindump : 33 s sans réponse) et recevait parfois le premier plan. Il fait maintenant tourner sa boucle Qt au repos, n'a plus d'icône dans le Dock et rend le premier plan à ArmorPaint.
 - ⚠️ Python du sidecar : il lui faut **PySide6** (ou le Python de ShotGrid Desktop, qui l'embarque) : à valider en C6.
 

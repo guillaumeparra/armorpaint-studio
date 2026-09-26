@@ -1,0 +1,27 @@
+# Liste d'export Mach-O de libstudio_ocio (macOS), pendant de studio_ocio_lib.map. ld64 n'accepte pas de motif :
+# chaque fonction de ../studio_ocio_lib.h est listée. Une fonction oubliée ici n'est pas exportée, et
+# studio_ocio.c refuse alors de charger la bibliothèque (symbole manquant au dlsym) : l'oubli se voit.
+_studio_ocio_lib_abi
+_studio_ocio_lib_apply
+_studio_ocio_lib_colorspace_from_path
+_studio_ocio_lib_config_description
+_studio_ocio_lib_config_free
+_studio_ocio_lib_config_load
+_studio_ocio_lib_config_name
+_studio_ocio_lib_count
+_studio_ocio_lib_default_display
+_studio_ocio_lib_default_view
+_studio_ocio_lib_encoding
+_studio_ocio_lib_error
+_studio_ocio_lib_family
+_studio_ocio_lib_is_data
+_studio_ocio_lib_name
+_studio_ocio_lib_ocio_version
+_studio_ocio_lib_proc_cache_id
+_studio_ocio_lib_proc_colorspace
+_studio_ocio_lib_proc_display
+_studio_ocio_lib_proc_free
+_studio_ocio_lib_proc_is_noop
+_studio_ocio_lib_resolve
+_studio_ocio_lib_view_count
+_studio_ocio_lib_view_name

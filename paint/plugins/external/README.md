@@ -19,6 +19,10 @@ Ce dossier est compilé dans ArmorPaint par le hook upstream `paint/plugins/exte
   mise à jour (voir `vendor/patches/README.md`).
 - `assets/` : fichiers de données (copiés dans `data/`), licences des tiers.
 - `.tests/` : bancs de test hors app, sous ASan/UBSan. Le dossier commence par un point : amake l'ignore.
+- `.project/project.c` : réglages de build du code studio (bibliothèques, defines), évalués par amake grâce au patch
+  `external-project`. Le code studio lui-même ne peut pas en ajouter.
+- `.ocio/` : sources du shim C d'OpenColorIO (`studio_ocio_lib.cpp`, projet CMake), construit par
+  `tools/build_ocio.sh` ; voir « Gestion couleur OCIO ».
 
 Modules, un par lot (voir `ARMORPAINT_LOTS.md` à la racine d'armorpaint) :
 
@@ -28,7 +32,8 @@ Modules, un par lot (voir `ARMORPAINT_LOTS.md` à la racine d'armorpaint) :
 | `studio_proc`, `studio_exec` | C1 | ✅ exécution de processus, jobs asynchrones, API de scripting (macOS ; Linux écrit, non testé) |
 | `studio_naming`, `studio_export_naming` | B3 | ✅ noms des textures exportées par le template Toolkit du fichier de travail (macOS ; validé sur site simulé) |
 | `studio_export`, `studio_preset`, `studio_expr`, `studio_image`, `studio_preflight`, `studio_sha256`, `studio_fs`, `assets/studio_preset_*.json` | B2, B4, B5 | ✅ presets d'export studio : PNG 8/16, TIFF 8/16/32 (none/LZW/deflate), JPG, EXR 16/32 ; canaux calculés ; préflight ; écriture atomique ; manifeste (macOS) |
-| `studio_ocio` | A | à faire |
+| `studio_ocio`, `studio_ocio_lib.h`, `.ocio/`, `tools/build_ocio.sh` | A0, A1 | ✅ OpenColorIO 2.5.2 embarqué : configuration, espaces, displays/views, transformations CPU, API de scripting (macOS ; Linux écrit, non testé) |
+| `studio_ocio` (export, viewport, import, UI) | A2-A6 | à faire |
 | `studio_sg`, `studio_shotgrid`, `studio_json`, `assets/studio_sg_*.py` | C2 | ✅ sidecar ShotGrid (Toolkit), superviseur, API de scripting (macOS ; validé sur site simulé) |
 | `studio_workfiles`, `tk-armorpaint/` | C3 | ✅ Workfiles (tk-multi-workfiles2) et menu ShotGrid, par le moteur Toolkit tk-armorpaint (macOS ; validé sur site simulé) |
 | `studio_shotgrid` (UI) | C4-C5 | à faire |
@@ -51,6 +56,8 @@ upstream sans rebuild ; les réglages destinés aux artistes passeront par l'UI 
 | `STUDIO_SG_*`, `STUDIO_SGTK_PATH` | sidecar ShotGrid, voir « ShotGrid (C2) » |
 | `STUDIO_EXPORT_PRESETS` | presets d'export studio : dossiers ou fichiers `.json`, séparés par `:` (`;` sous Windows), prioritaires sur les presets livrés |
 | `STUDIO_EXPORT_THREADS` | threads de composition et d'encodage des exports studio (défaut : cœurs matériels) |
+| `OCIO` | configuration OpenColorIO (fichier `.ocio`, archive `.ocioz` ou URI `ocio://`) ; défaut : `ocio://studio-config-latest` |
+| `STUDIO_OCIO_LIB` | chemin de `libstudio_ocio` pour un build sans liaison statique (bancs de test, Linux) |
 
 ## Exécution (C1)
 
@@ -423,6 +430,56 @@ aplatis (`png`/`jpg` : 8 bits, `exr16` : half, `exr32` : float), comme dans l'up
 
 Point d'injection upstream : `STUDIO-PATCH(studio-export)` (PATCHES.md).
 
+## Gestion couleur OCIO (A0, A1)
+
+**Décision A0 : le vrai OpenColorIO**, pas une réimplémentation. Version épinglée dans `.ocio/CMakeLists.txt`
+(`STUDIO_OCIO_TAG`, aujourd'hui `v2.5.2`, VFX Reference Platform CY2026), construite depuis ses sources avec ses
+dépendances (expat, yaml-cpp, pystring, Imath, zlib, minizip-ng) par `tools/build_ocio.sh`. Premier build : 2 à
+3 minutes, réseau requis. Les produits sont ignorés par git (`.ocio/build/`, `.ocio/lib/`) : relancer le script
+sur une machine neuve, puis rebuild d'ArmorPaint.
+
+OCIO est en C++ et amake ne compile que du C : le shim `.ocio/studio_ocio_lib.cpp` expose une ABI C
+(`studio_ocio_lib.h`, 24 fonctions, version `STUDIO_OCIO_LIB_ABI`). Aucune exception ne la traverse : chaque
+erreur devient un retour NULL/0/-1 et un message (`studio_ocio_lib_error()`, par thread).
+
+- **macOS : liaison statique.** `build_ocio.sh` fusionne le shim, OCIO et ses dépendances en un seul objet
+  (`ld -r`) où seuls les `studio_ocio_lib_*` restent visibles : aucune collision possible avec l'app. L'archive
+  `.ocio/lib/libstudio_ocio.a` est liée par `.project/project.c` (define `WITH_STUDIO_OCIO_STATIC`). Pas de
+  dlopen : ArmorPaint est signé ad hoc avec le hardened runtime, dont la validation des bibliothèques refuse une
+  dylib d'une autre « équipe » (« different Team IDs »). Coût : environ 7 Mo sur le binaire.
+- **Linux : dlopen** de `data/libstudio_ocio.so` (copié dans `assets/` par le script). Écrit, non testé.
+- **Windows : à faire.**
+- Sans bibliothèque, ArmorPaint se construit et démarre sans OCIO ; `studio_ocio_status()` dit pourquoi.
+
+**Configuration**, dans l'ordre : chemin explicite (`studio_ocio_reload`, préférences du lot A5), `$OCIO`, puis la
+configuration studio intégrée à OCIO (`ocio://studio-config-latest`, ACES 2.0). Un `$OCIO` invalide est une erreur,
+sans repli : un repli cacherait au studio que sa configuration n'est pas chargée. Le log de démarrage l'affiche :
+
+```
+studio: OCIO 2.5.2, config "studio-config-v4.0.0_aces-v2.0_ocio-v2.5" from ocio://studio-config-latest (built-in default), 55 colorspaces, display "sRGB - Display"
+```
+
+`studio_ocio_transform()` convertit des pixels float32 (RGB ou RGBA) sur place, avec le processeur CPU par défaut
+d'OCIO (celui d'`ocioconvert` et de PyOpenColorIO). L'alpha n'est jamais transmis à OCIO, dont certaines vues
+d'affichage le modifient. Les processeurs sont gardés en cache par couple (src, dst), et l'appel est sûr depuis
+plusieurs threads sur des bandes disjointes. La liste des espaces contient aussi les espaces d'affichage
+(`sRGB - Display`…).
+
+### Scripts (minic)
+
+```c
+char *studio_ocio_status(void);
+int   studio_ocio_reload(char *config);          // "" : ordre par défaut ; 1 si chargée
+int   studio_ocio_colorspace_count(void);
+char *studio_ocio_colorspace_name(int i);
+char *studio_ocio_display_default(void);
+char *studio_ocio_view_default(char *display);
+char *studio_ocio_resolve(char *name);           // nom canonique d'un espace, alias ou rôle ; "" si inconnu
+int   studio_ocio_is_data(char *colorspace);     // 1 donnée, 0 couleur, -1 inconnu
+char *studio_ocio_colorspace_from_path(char *path);  // file_rules de la configuration
+char *studio_ocio_transform_rgb(char *src, char *dst, float r, float g, float b);  // "r g b" (%.9g) ; "" si échec
+```
+
 ## Tests
 
 ```sh
@@ -432,7 +489,16 @@ Point d'injection upstream : `STUDIO-PATCH(studio-export)` (PATCHES.md).
 STUDIO_TEST_TK_CORE=<tk-core> .tests/sg.sh [dossier de travail]   # ShotGrid (C2), noms des exports (B3) ; STUDIO_TEST_TK_APPS pour le moteur (C3)
 .tests/export.sh [dossier de travail]  # export studio (B2, B4, B5) hors app : encodeurs relus par libpng/libtiff, expressions, presets, préflight ; FUZZ=<n>
 .tests/export_app.sh [dossier]         # export studio dans l'app : scripts, --export-textures, pixels = upstream, manifeste, atomicité
+.tests/ocio.sh [dossier de travail]    # OCIO (A1) hors app : ABI, module, références PyOpenColorIO, threads, erreurs ; OCIO_TEST_CONFIGS=<configs>
+.tests/ocio_app.sh [dossier]           # OCIO dans l'app : configuration par défaut, $OCIO, $OCIO invalide, API de scripting
 ```
+
+`ocio.sh` compare au bit près à PyOpenColorIO, la roue officielle à la même version, installée dans `.ocio/venv`
+au premier lancement. Pour chaque configuration (celle du banc avec LUT, looks et file_rules, puis
+`ocio://studio-config-latest` et `ocio://cg-config-latest`), il vérifie les listes, les rôles, les alias et les
+file_rules, puis chaque espace depuis et vers scene_linear et chaque display/view dans les deux sens, sur des pixels
+HDR, négatifs et nuls. Le harnais est construit deux fois, lié en statique comme l'app et chargé par dlopen, avec
+de fausses bibliothèques (ABI différente, symbole manquant).
 
 `export.sh` requiert libpng et libtiff (`brew install libpng libtiff`) ; `export_app.sh`, Pillow et `tiffinfo`.
 
