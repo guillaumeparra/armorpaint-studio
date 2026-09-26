@@ -54,6 +54,14 @@ def default_settings():
         "work_templates": _env_map(
             "STUDIO_SG_WORK_TEMPLATES", {"Asset": "armorpaint_asset_work", "Shot": "armorpaint_shot_work"}
         ),
+        # Templates des textures exportées par type d'entité (lot B3, op texture_pattern), et noms de leurs clés pour
+        # le canal (base, nor…), la tuile UDIM et l'extension (png, jpg, exr).
+        "texture_templates": _env_map(
+            "STUDIO_SG_TEXTURE_TEMPLATES", {"Asset": "armorpaint_asset_textures", "Shot": "armorpaint_shot_textures"}
+        ),
+        "texture_keys": dict(
+            {"channel": "channel", "udim": "UDIM", "ext": "texture_ext"}, **_env_map("STUDIO_SG_TEXTURE_KEYS", {})
+        ),
         "publish_type": os.environ.get("STUDIO_SG_PUBLISH_TYPE", "ArmorPaint Project"),
         "default_name": os.environ.get("STUDIO_SG_DEFAULT_NAME", "scene"),
         "entity_types": ["Asset", "Shot"],
@@ -593,6 +601,89 @@ class Session(object):
             version += 1
             path = template.apply_fields(dict(fields, name=name, version=version))
         return {"name": name, "version": version, "path": path, "publish_name": pub_name}
+
+    def _project_from_path(self, path):
+        """Projet d'un chemin, comme Toolkit le range : <racine d'un LocalStorage>/<tank_name du projet>/… ; None hors
+        de ces dossiers. Le lien symbolique /tmp -> /private/tmp de macOS compte : le chemin est aussi comparé résolu."""
+        field = {"darwin": "mac_path", "win32": "windows_path"}.get(sys.platform, "linux_path")
+        sg = self._connect()
+        roots = [s[field] for s in sg.find("LocalStorage", [], [field]) if s.get(field)]
+        names = []
+        for candidate in (os.path.normpath(path), os.path.realpath(path)):
+            for root in roots:
+                for r in (os.path.normpath(root), os.path.realpath(root)):
+                    if os.path.normcase(candidate).startswith(os.path.normcase(r.rstrip(os.sep)) + os.sep):
+                        names.append(candidate[len(r.rstrip(os.sep)) + 1 :].split(os.sep)[0])
+        for name in dict.fromkeys(names):
+            project = sg.find_one("Project", [["tank_name", "is", name]], ["id"])
+            if project is not None:
+                return project["id"]
+        return None
+
+    def op_texture_pattern(self, args):
+        """Modèle du chemin des textures exportées depuis le fichier de travail path (lot B3) : le template des textures
+        du type d'entité (réglage texture_templates), rempli avec les champs du fichier (nom, version…) et de son
+        contexte. Les clés du canal, de la tuile UDIM et de l'extension (réglage texture_keys) y restent en marqueurs
+        <channel>, <UDIM>, <ext>, qu'ArmorPaint remplace à chaque texture (studio_export_naming.c). pattern : sans
+        tuile ; pattern_udim : avec (null si le template n'a pas de clé UDIM, ou si elle est obligatoire pour
+        pattern). template null (et reason) : fichier hors des templates du projet, ou pas de template de textures
+        pour son type d'entité ; ArmorPaint garde alors ses noms. Projet : project_id, sinon celui du chemin
+        (_project_from_path), sinon celui déjà amorcé, sinon _default_project()."""
+        path = _str(args, "path")
+        project_id = _int(args, "project_id", required=False) or self._project_from_path(path)
+        if project_id is not None:
+            tk = self.tk_for_project(project_id)
+        else:
+            tk = self.tk or self.tk_for_project(self._default_project())
+        work = tk.template_from_path(path)
+        if work is None:
+            return {"template": None, "reason": "%s matches no template of the project configuration" % path}
+        ctx = tk.context_from_path(path)
+        entity_type = (ctx.entity or {}).get("type")
+        if entity_type is None:  # dossiers absents du path cache : le type d'après le template de travail
+            entity_type = next((t for t, n in self.settings["work_templates"].items() if n == work.name), None)
+        name = self.settings["texture_templates"].get(entity_type)
+        if name is None:
+            return {"template": None, "reason": "no texture template configured for %s (%s)" % (entity_type, work.name)}
+        template = tk.templates.get(name)
+        if template is None:
+            raise BridgeError("template_missing", "template '%s' is not defined in the project configuration" % name)
+        keys = self.settings["texture_keys"]
+        for role in ("channel", "ext"):
+            if keys[role] not in template.keys:
+                raise BridgeError(
+                    "template_missing", "template '%s' has no {%s} key (texture %s)" % (name, keys[role], role)
+                )
+        try:
+            values = ctx.as_template_fields(template)
+        except Exception as e:  # noqa: BLE001 — TankError : contexte sans dossiers ; les champs du fichier suffisent
+            log.debug("texture_pattern: no context fields for %s: %s", template, e)
+            values = {}
+        values.update(work.get_fields(path))
+        values.pop(keys["udim"], None)
+        # Marqueurs hors du type des clés (ignore_types, API interne de Template stable depuis tk-core 0.18) : une clé
+        # channel en alphanumeric ou à choix refuserait "<channel>". Les autres champs sont validés normalement.
+        values.update({keys["channel"]: "<channel>", keys["ext"]: "<ext>"})
+        ignore = [keys["channel"], keys["ext"], keys["udim"]]
+
+        def resolve(fields, skip_defaults=False):
+            try:
+                return template._apply_fields(fields, ignore_types=ignore, skip_defaults=skip_defaults)
+            except self.sgtk.TankError as e:
+                log.info("texture_pattern: %s: %s", template, e)
+                return None
+
+        # Sans tuile : la clé UDIM (une séquence a un défaut, %04d) ne doit pas remplir sa section optionnelle.
+        # skip_defaults=True écarte les sections dont une clé n'a pas de valeur, défaut compris : les autres clés
+        # reçoivent donc leur défaut explicitement.
+        defaults = {k: key.default for k, key in template.keys.items() if key.default is not None and k != keys["udim"]}
+        pattern = resolve(dict(defaults, **values), skip_defaults=True)
+        pattern_udim = resolve(dict(values, **{keys["udim"]: "<UDIM>"})) if keys["udim"] in template.keys else None
+        if pattern is None and pattern_udim is None:
+            raise BridgeError(
+                "template_missing", "template '%s' cannot be filled from %s (%s)" % (name, path, work.name)
+            )
+        return {"template": name, "pattern": pattern, "pattern_udim": pattern_udim}
 
     # ---- Apps Toolkit (moteur tk-armorpaint) -------------------------------------------------------------------------
 

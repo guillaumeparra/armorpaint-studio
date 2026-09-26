@@ -350,6 +350,51 @@ class TestToolkit(Base):
         self.assertEqual(s2.data("list_workfiles", {"task_id": 3})["files"], [])
         self.assertEqual(s2.data("list_projects")[0]["name"], "Demo")  # le site reste accessible
 
+    def test_texture_pattern(self):
+        s = self.start()
+        nv = s.data("next_version", {"task_id": 1, "name": "robot"})
+        work = os.path.dirname(nv["path"])
+        tp = s.data("texture_pattern", {"path": nv["path"]})
+        tex = os.path.join(work, "textures", "v001")
+        self.assertEqual(tp["template"], "armorpaint_asset_textures")
+        # Marqueurs malgré les types des clés (channel alphanumeric, texture_ext à choix, UDIM séquence).
+        self.assertEqual(tp["pattern"], os.path.join(tex, "robot_<channel>.<ext>"))
+        self.assertEqual(tp["pattern_udim"], os.path.join(tex, "robot_<channel>.<UDIM>.<ext>"))
+
+        # Un Shot, dossiers absents du path cache (type d'entité d'après le template de travail) : template sans clé
+        # UDIM ; le projet déjà amorcé sert sans project_id.
+        shot_work = os.path.join(self.workdir, "storage", "demo", "sequences", "sq010", "sq010_0010", "TXT", "work", "armorpaint")
+        tp = s.data("texture_pattern", {"path": os.path.join(shot_work, "fx.v012.arm")})
+        self.assertEqual(tp["template"], "armorpaint_shot_textures")
+        self.assertEqual(tp["pattern"], os.path.join(shot_work, "textures", "v012", "fx_<channel>.<ext>"))
+        self.assertIsNone(tp["pattern_udim"])
+
+        # Hors pipeline : pas de template, ArmorPaint garde ses noms.
+        tp = s.data("texture_pattern", {"path": os.path.join(self.workdir, "loose.arm")})
+        self.assertIsNone(tp["template"])
+        self.assertIn("matches no template", tp["reason"])
+        self.assertEqual(s.error("texture_pattern", {})[0], "bad_request")
+
+        # Un sidecar neuf : le projet vient du chemin (racine de stockage + tank_name), pas de la dernière tâche de
+        # l'artiste (projet 2).
+        s2 = self.start()
+        self.assertEqual(s2.data("texture_pattern", {"path": nv["path"]})["template"], "armorpaint_asset_textures")
+        self.assertIn("Toolkit ready for project 1", s2.stderr())
+
+    def test_texture_pattern_settings(self):
+        # Pas de template de textures pour les Assets : pas de nommage ; un template sans {channel} : erreur.
+        s = self.start(STUDIO_SG_TEXTURE_TEMPLATES="Shot=armorpaint_shot_textures")
+        nv = s.data("next_version", {"task_id": 1, "name": "robot"})
+        tp = s.data("texture_pattern", {"path": nv["path"], "project_id": 1})
+        self.assertIsNone(tp["template"])
+        self.assertIn("no texture template configured for Asset", tp["reason"])
+        s2 = self.start(STUDIO_SG_TEXTURE_TEMPLATES="Asset=armorpaint_asset_work")
+        code, reply = s2.error("texture_pattern", {"path": nv["path"], "project_id": 1})
+        self.assertEqual(code, "template_missing")
+        self.assertIn("{channel}", reply["error"]["message"])
+        s3 = self.start(STUDIO_SG_TEXTURE_TEMPLATES="Asset=nope")
+        self.assertEqual(s3.error("texture_pattern", {"path": nv["path"], "project_id": 1})[0], "template_missing")
+
     def test_missing_template(self):
         s = self.start("no_template")
         code, reply = s.error("next_version", {"task_id": 1})

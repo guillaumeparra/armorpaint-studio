@@ -356,3 +356,11 @@ void studio_workfiles_init(void) {
 		sys_notify_on_next_frame(workfiles_on_start, NULL); // après base_init() (et sa boîte des projets récents)
 	}
 }
+
+int studio_workfiles_project_id(void) {
+	return wf.project_id;
+}
+
+bool studio_workfiles_busy(void) {
+	return wf.job != 0;
+}

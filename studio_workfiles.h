@@ -6,4 +6,12 @@
 // Ctrl+Alt+O (Cmd+Alt+O sur macOS) ouvre File Open, Ctrl+Alt+S File Save ; File Open s'ouvre aussi au démarrage si
 // STUDIO_SG_WORKFILES_ON_START=1.
 
+#include <stdbool.h>
+
 void studio_workfiles_init(void);
+
+// Projet ShotGrid du contexte courant (dernière fenêtre Workfiles), 0 si inconnu.
+int studio_workfiles_project_id(void);
+
+// Vrai tant qu'une fenêtre ShotGrid est ouverte : un appel au sidecar attendrait sa fermeture.
+bool studio_workfiles_busy(void);

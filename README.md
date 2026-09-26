@@ -25,7 +25,8 @@ Modules, un par lot (voir `ARMORPAINT_LOTS.md` à la racine d'armorpaint) :
 |---|---|---|
 | `studio_exr` | B1 | ✅ lecture et écriture EXR par tinyexr |
 | `studio_proc`, `studio_exec` | C1 | ✅ exécution de processus, jobs asynchrones, API de scripting (macOS ; Linux écrit, non testé) |
-| `studio_export` | B2-B5 | à faire |
+| `studio_naming`, `studio_export_naming` | B3 | ✅ noms des textures exportées par le template Toolkit du fichier de travail (macOS ; validé sur site simulé) |
+| `studio_export` | B2, B4-B5 | à faire |
 | `studio_ocio` | A | à faire |
 | `studio_sg`, `studio_shotgrid`, `studio_json`, `assets/studio_sg_*.py` | C2 | ✅ sidecar ShotGrid (Toolkit), superviseur, API de scripting (macOS ; validé sur site simulé) |
 | `studio_workfiles`, `tk-armorpaint/` | C3 | ✅ Workfiles (tk-multi-workfiles2) et menu ShotGrid, par le moteur Toolkit tk-armorpaint (macOS ; validé sur site simulé) |
@@ -111,6 +112,9 @@ projet redémarre le sidecar, et le superviseur la rejoue ; l'appelant ne voit q
 | `STUDIO_SG_PLUGIN_ID` | plugin id de l'amorçage (défaut `basic.armorpaint`) |
 | `STUDIO_SG_BASE_CONFIGURATION` | descripteur de configuration si le projet n'a pas de PipelineConfiguration |
 | `STUDIO_SG_WORK_TEMPLATES` | templates de travail par type d'entité (défaut `Asset=armorpaint_asset_work,Shot=armorpaint_shot_work`) |
+| `STUDIO_SG_TEXTURE_TEMPLATES` | templates des textures exportées par type d'entité (défaut `Asset=armorpaint_asset_textures,Shot=armorpaint_shot_textures`), voir B3 |
+| `STUDIO_SG_TEXTURE_KEYS` | noms des clés de ces templates (défaut `channel=channel,udim=UDIM,ext=texture_ext`) |
+| `STUDIO_SG_NAMING` | `1` : nommage des textures par template, `0` : jamais ; par défaut dès que ShotGrid sert dans la session |
 | `STUDIO_SG_PUBLISH_TYPE` | type de publish (défaut `ArmorPaint Project`) |
 | `STUDIO_SG_DEFAULT_NAME` | nom de fichier de travail par défaut (défaut `scene`) |
 | `STUDIO_SG_HOOK` | fichier Python du studio avec `setup(session)`, qui peut ajouter des opérations (`session.ops["nom"] = fonction(args)`) |
@@ -143,11 +147,12 @@ Le nom de publish suit la convention Toolkit : le nom de fichier sans sa version
 | `upload_thumbnail` | `entity` (`{type, id}`), `path` | `{attachment_id}` |
 | `list_commands` | `task_id` ? ou `project_id` ? | `{context, commands, favourites, has_ui}` : le menu du moteur tk-armorpaint, voir C3 |
 | `show_app` | `command`, `task_id` ? ou `project_id` ? | `{command, context}` à la fin de la commande (fermeture de la fenêtre) |
+| `texture_pattern` | `path`, `project_id` ? | `{template, pattern, pattern_udim}` : chemin des textures exportées depuis le fichier de travail `path`, marqueurs `<channel>`, `<UDIM>`, `<ext>` ; `template` null (et `reason`) hors pipeline. Voir B3 |
 | `ping`, `shutdown` | — | `{}` |
 
 Codes d'erreur (`/error/code`) : du sidecar, `bad_request`, `unknown_op`, `auth_required` (pas de session Desktop,
 ou expirée : jamais d'invite de mot de passe), `sg_unreachable`, `sg_error`, `toolkit_unavailable` (tk-core
-introuvable), `toolkit_error`, `not_found`, `template_missing` (la config n'a pas le template de travail),
+introuvable), `toolkit_error`, `not_found`, `template_missing` (la config n'a pas le template de travail ou de textures),
 `internal`, `app_unavailable` (moteur tk-armorpaint absent de la config, ou commande inconnue : Qt manquant…) ; du superviseur, `sidecar_failed`, `sidecar_died`, `timeout`, `cancelled`. `restart_required` n'arrive
 à l'appelant que si le rejeu échoue lui aussi.
 
@@ -257,12 +262,56 @@ STUDIO_TEST_TK_CORE=<tk-core> STUDIO_TEST_TK_APPS=<clones> STUDIO_SG_PYTHON=<pyt
 (`STUDIO_TEST_TK_APPS` : tk-multi-workfiles2, tk-framework-shotgunutils et tk-framework-qtwidgets clonés depuis
 github.com/shotgunsoftware ; voir l'en-tête du script.)
 
+## Nommage des exports (B3)
+
+Quand le projet ouvert est un fichier de travail ShotGrid, les textures exportées prennent le chemin du template
+Toolkit des textures, rempli avec les champs du fichier : entité, étape, nom, version. Pour `robot.v003.arm`, la
+texture `base` du preset va dans `…/work/armorpaint/textures/v003/robot_base.png`. Chaque version du projet a donc
+ses textures, et le dossier choisi dans la boîte d'export est ignoré. La console l'indique à la première texture :
+« Textures named by ShotGrid template … ».
+
+```yaml
+# core/templates.yml
+keys:
+    channel: {type: str}                    # nom de texture du preset d'export (base, nor, occ…)
+    UDIM: {type: sequence, format_spec: "04"}
+    texture_ext: {type: str, choices: [png, jpg, exr]}
+paths:
+    armorpaint_asset_textures: '@asset_root/work/armorpaint/textures/v{version}/{name}_{channel}[.{UDIM}].{texture_ext}'
+    armorpaint_shot_textures: '@shot_root/work/armorpaint/textures/v{version}/{name}_{channel}.{texture_ext}'
+```
+
+- **Clés obligatoires.** `{channel}` et `{texture_ext}` le sont. Sans `{UDIM}`, ou avec un `{UDIM}` obligatoire,
+  l'export qui ne correspond pas garde les noms d'ArmorPaint, et la console le signale.
+- **Export par objet ou par atlas.** L'objet se place devant le canal : `robot_head_base.png`.
+- **Valeurs non validées.** Canal, tuile et extension viennent d'ArmorPaint : leur type dans `templates.yml`
+  (`filter_by`, `choices`) n'est pas vérifié, mais `/`, `\` et `:` y deviennent `_`.
+
+**Déroulé.** Quand le projet ouvert change (sauvegarde, ouverture, fenêtre Workfiles), `studio_export_naming.c`
+demande le modèle au sidecar (op `texture_pattern`, en job). Le projet Toolkit se déduit du chemin :
+racine de stockage puis `tank_name`. L'export ne fait ensuite que remplacer les marqueurs et créer les dossiers.
+
+- Si le modèle n'est pas encore arrivé, l'export l'attend.
+- Si une fenêtre ShotGrid est ouverte, il ne peut pas l'attendre : il garde les noms d'ArmorPaint et le dit.
+- Hors pipeline (projet jamais sauvé, fichier hors des templates, pas de template pour le type d'entité) ou en cas
+  d'erreur, les noms restent ceux d'ArmorPaint.
+
+**Activation.** Par défaut, le nommage n'est actif que si ShotGrid sert déjà dans la session (sidecar lancé, ou
+ArmorPaint lancé par Desktop). En ligne de commande (ferme), il faut le forcer :
+
+```sh
+STUDIO_SG_NAMING=1 ArmorPaint --background robot.v003.arm --export-textures png generic /ignored
+```
+
+Point d'injection upstream : `STUDIO-PATCH(export-naming)` (PATCHES.md). L'export « bake material » n'est pas
+couvert.
+
 ## Tests
 
 ```sh
 .tests/run.sh [dossier de travail]     # EXR (B1) ; FUZZ=<n> pour le nombre de mutations
 .tests/proc.sh [dossier de travail]    # processus (C1)
-STUDIO_TEST_TK_CORE=<tk-core> .tests/sg.sh [dossier de travail]   # ShotGrid (C2) ; STUDIO_TEST_TK_APPS pour le moteur (C3)
+STUDIO_TEST_TK_CORE=<tk-core> .tests/sg.sh [dossier de travail]   # ShotGrid (C2), noms des exports (B3) ; STUDIO_TEST_TK_APPS pour le moteur (C3)
 ```
 
 `sg.sh` fait tourner le sidecar sur un site ShotGrid simulé (`sg_fixture.py` : mockgun avec le schéma d'un vrai

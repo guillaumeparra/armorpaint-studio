@@ -234,3 +234,54 @@ patch, plantage `__chk_fail_overflow` ; avec, titre tronqué.
 `tab_console_draw()` qui tronque le message.
 
 **Non couvert.** Les autres `strcpy` d'`iron_ui.c` n'ont pas été audités.
+
+---
+
+## export-naming
+
+| | |
+|---|---|
+| Fichier | `paint/sources/io/export_texture.c` (`export_texture_run_layers`) |
+| Commit studio | `0c025bd7` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-26) |
+| Injection | 11 lignes sous `#ifdef WITH_EXTERNAL`, en deux blocs — l'app compile toujours sans `external/` |
+
+**Motif.** L'upstream nomme les textures exportées `<dossier choisi>/<nom du fichier>_<texture><ext>`. Le nom de
+fichier est celui de la dernière boîte de fichiers (`ui_files_filename`). Un studio veut le chemin que donne son
+pipeline : le template Toolkit des textures, rempli avec l'entité, l'étape, le nom et la version du fichier de
+travail (lot B3).
+
+**Correctif.** Pour chaque texture, `export_texture_run_layers()` demande le chemin à
+`studio_export_texture_path()` (`external/studio_export_naming.c`) :
+- **variant** : le suffixe objet ou atlas ajouté au nom par l'upstream (export par objet, calque sélectionné
+  masqué sur un objet). Il est lu par différence avec `f` avant ce suffixe (`studio_base`, premier bloc).
+- **channel** : le nom de texture du preset (`t->name`).
+- **udim** : la tuile (`object_name`, export par tuile).
+- **ext** : l'extension.
+
+`NULL` garde le chemin upstream. L'injection ne fait que remplacer `out_path` : les pixels, les formats et
+`export_texture_write_texture()` sont inchangés. Le chemin vient d'un modèle que le sidecar ShotGrid a résolu
+d'avance (op `texture_pattern`) : l'export ne fait qu'une substitution de chaîne et un `mkdir -p`.
+
+**Test.** Hors app : `.tests/sg.sh` (`naming_test.c` pour la substitution et `mkdir -p`, `sg_test.py
+TestToolkit.test_texture_pattern*` pour le sidecar). Dans l'app, sur le site simulé (`sg_fixture.py`) :
+
+```bash
+export STUDIO_SG_BRIDGE=.tests/sg_fixture.py STUDIO_TEST_WORKDIR=<dir> STUDIO_TEST_TK_CORE=<tk-core>
+# script : next_version de la tâche 1, project_filepath_set, export_texture_run("<dir>/dialog", 0)
+ArmorPaint --background --script seed.c
+# attendu : storage/demo/assets/Prop/robot/TXT/work/armorpaint/textures/v001/robot_{base,nor,occ,rough,metal}.png,
+# rien dans <dir>/dialog
+STUDIO_SG_NAMING=1 ArmorPaint --background <…>/robot.v001.arm --export-textures exr16 generic <dir>/out
+# attendu : les 5 EXR dans textures/v001/, <dir>/out vide
+ArmorPaint --background <…>/robot.v001.arm --export-textures png generic <dir>/out   # sans ShotGrid :
+# attendu : robot.v001_base.png… dans <dir>/out (noms upstream)
+```
+
+**Signes que l'upstream l'a corrigé.** Un modèle de nom dans les presets d'export (`export_preset_t`), ou un hook
+de nommage pour les plugins. Porter alors `studio_export_texture_path()` dessus et retirer le patch. Si la
+construction de `out_path` ou l'ajout du suffixe objet change, refaire les deux blocs.
+
+**Non couvert.** L'export « bake material » (`export_texture_run_bake_material`, autre construction de chemin).
+L'export par tuile UDIM et par objet n'a pas été rejoué dans l'app : ces modes ne se règlent que dans l'UI, le
+scripting n'expose pas `layers_export`. Seuls la substitution et le modèle `pattern_udim` sont testés.
