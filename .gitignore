@@ -1,4 +1,4 @@
 **/build*/
-paint/plugins/external
+# STUDIO-PATCH(track-external): paint/plugins/external (studio code) is tracked on the studio branch, see its PATCHES.md
 .vscode
 *.DS_Store
