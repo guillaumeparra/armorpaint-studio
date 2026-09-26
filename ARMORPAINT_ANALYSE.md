@@ -263,6 +263,8 @@ Addon Blender fourni : `base/tools/io_export_arm.py` (Blender 5.0).
 ### 5.2 UDIM — ⚠️ Existe, mais implémentation « pauvre »
 
 > **Mise à jour 2026-09-26** : partiellement périmé depuis le commit upstream `99156dfc` (« paint across udims », 2026-09-15) — la peinture à travers les tuiles marche et les calques partagés ne sont plus dupliqués par tuile (atlas en grille, résolution `res / ceil(√N)` par tuile). État actuel, limites et pistes vers des UDIM natifs : **[ARMORPAINT_UDIM.md](ARMORPAINT_UDIM.md)**.
+>
+> **Mise à jour 2026-09-27** (lot D0, dans notre fork) : les « limites dures » ci-dessous sont corrigées à l'import, sauf l'export par nom d'objet et le mode Visible en CLI. UV négatives, u ≥ 10 et plus de 64 tuiles : le fichier est refusé avec un message. Les triangles à cheval sont coupés le long des bords de tuile. En FBX, plus de plafond et un objet par nœud et par tuile. Au-delà des 64 tuiles de l'atlas, les tuiles en trop sont signalées au lieu d'écraser la 64e. Patches `udim-import`, `fbx-split`, `udim-tile-limit` de `paint/plugins/external/PATCHES.md`.
 
 **Ce qui marche** :
 - Import avec `Split by: UDIM Tile` pour OBJ (`io/import_obj.c:14`) et FBX (`plugins/io_fbx/io_fbx.c:215`)

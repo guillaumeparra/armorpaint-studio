@@ -141,20 +141,24 @@ Notre couche studio (`studio_export.c`, `studio_atlas.c`) se branche par-dessus 
 |---|---|---|---|---|
 | L1 | Résolution par tuile = `res / ceil(√N)` | atlas en grille dans une texture de calque | 6 tuiles en 4K → 1365 px ; ré-agrandies à l'export | 🔴 |
 | L2 | Pas de résolution par tuile | `config_get_texture_res_*` global (109 références) ; `.arm` carré par calque ([import_arm.c:324](paint/sources/io/import_arm.c:324)) | Impossible d'avoir le visage en 8K et le corps en 2K | 🔴 |
-| L3 | Au-delà de 64 tuiles, tout finit dans la case 63, sans message | `tiles_spent` ([util_mesh.c:164](paint/sources/util/util_mesh.c:164)) | Peinture silencieusement fausse | 🔴 |
+| L3 | Au-delà de 64 tuiles, tout finit dans la case 63, sans message | `tiles_spent` ([util_mesh.c:164](paint/sources/util/util_mesh.c:164)) | Peinture silencieusement fausse | ✅ D0 (🔴) |
 | L4 | Identité de la tuile tirée du nom de l'objet | `util_mesh_udim_tile(name)` | Renommer un objet dans l'onglet Meshes change sa tuile ; un nom `truc.1005` hors UDIM est pris pour une tuile | 🟠 |
-| L5 | Split obligatoire | `import_obj.c`, `build_udim_split` | Plus de split par matériau ni par objet ; N copies des sommets (OBJ) ; tout fusionné (FBX) | 🟠 |
+| L5 | Split obligatoire | `import_obj.c`, `build_udim_split` | Plus de split par matériau ni par objet ; N copies des sommets (OBJ) ; tout fusionné (FBX). Depuis D0 : un objet par objet (nœud FBX) et par tuile, avec ses seuls sommets ; reste le split par matériau (D1) | 🟠 |
 | L6 | Bords de case | cases jointives, sans gouttière | Le filtrage bilinéaire et la dilatation débordent d'une case sur sa voisine : liseré aux bords des îlots collés au bord de tuile | 🟠 |
 | L7 | Grille carrée | `stride = ceil(√N)` | 5 tuiles → grille 3×3 : 44 % de VRAM perdue ; 10 tuiles → 4×4 : 37 % | 🟡 |
 | L8 | UV matériau ≠ UV du DCC | `atlas_uv × stride` = UV locale + (colonne, rangée) de la case | Pour 1001-1004 en grille 2×2, 1003 reçoit le décalage (0, 1) au lieu de (2, 0) : bruits UV et dégradés discontinus entre tuiles voisines | 🟡 |
 | L9 | Deux espaces coexistent (atlas / tuile) | `layers_udim_remap` à chaque flatten ou export | Copies GPU, 4 cibles statiques, perte de résolution dans les deux sens | 🟡 |
 | L10 | Mémoire et undo non proportionnels | un calque = 3 RT pleine résolution ; undo = copie du calque entier ([util_layer.c:70](paint/sources/util/util_layer.c:70)) | Toucher une tuile sauvegarde toutes les tuiles ; dès 8K, l'undo tombe à 4 puis 1 pas | 🟡 |
-| L11 | Import : tuile ≥ 10 en U | `1000 + v·10 + u + 1` jamais borné | u = 10 donne 1011, qui collisionne avec (0, 1) | 🟠 |
-| L12 | Import : UV négatives | `(int)` tronque vers 0 | u = -0,3 part dans 1001 ; u = -1,5 donne un index -1 : **écriture hors tableau** dans `num[]` (OBJ), confirmée sous ASan le 2026-09-26 (`heap-buffer-overflow`, 4 octets avant le tableau) | 🔴 |
-| L13 | Import : triangles à cheval sur deux tuiles | rangement par barycentre, puis repli `uv - (int)uv` et décalage par sommet UV partagé (le dernier écrit gagne) | Triangles déformés, sans avertissement | 🟠 |
-| L14 | FBX : plafond de 100 tuiles, premier jeu d'UV seulement, tous les nœuds fusionnés | `io_fbx.c:10`, `:222`, `:274` | Géométrie perdue sans message | 🟠 |
+| L11 | Import : tuile ≥ 10 en U | `1000 + v·10 + u + 1` jamais borné | u = 10 donne 1011, qui collisionne avec (0, 1) | ✅ D0 (🟠) |
+| L12 | Import : UV négatives | `(int)` tronque vers 0 | u = -0,3 part dans 1001 ; u = -1,5 donne un index -1 : **écriture hors tableau** dans `num[]` (OBJ), confirmée sous ASan le 2026-09-26 (`heap-buffer-overflow`, 4 octets avant le tableau) | ✅ D0 (🔴) |
+| L13 | Import : triangles à cheval sur deux tuiles | rangement par barycentre, puis repli `uv - (int)uv` et décalage par sommet UV partagé (le dernier écrit gagne) | Triangles déformés, sans avertissement | ✅ D0 (🟠) |
+| L14 | FBX : plafond de 100 tuiles, premier jeu d'UV seulement, tous les nœuds fusionnés | `io_fbx.c:10`, `:222`, `:274` | Géométrie perdue sans message | ✅ D0 (🟠) |
 | L15 | CLI `--export-textures` toujours en Visible | `args.c:161` | Pas d'export par tuile en batch (notre `studio_export_run` contourne) | 🟡 |
 | L16 | `atlas_objects` indexé par position | tableau parallèle à `paint_objects` | Trier ou supprimer dans Meshes désynchronise (tâche `task_24e2330f`) | 🟡 |
+
+**Phase 0 faite le 2026-09-27** (macOS) : L3 et L11 à L14 corrigées, L5 en partie, par les patches `udim-import`,
+`fbx-split` et `udim-tile-limit` (`paint/plugins/external/PATCHES.md`). L'import donne aussi le conseil de résolution
+du tableau ci-dessous. L8 passe en phase 1 et L6 en phase 2 (§7).
 
 **Tableau utile pour la production.** Avec le système actuel, la résolution projet nécessaire se déduit du nombre de tuiles :
 
@@ -312,11 +316,11 @@ typedef struct mesh_tile_range {
 
 - L'OBJ garde le calcul actuel des tuiles (`part->udims`). Mais au lieu de créer N objets, il **concatène les N listes d'index** dans l'ordre des tuiles et enregistre les plages. Les UV restent renormalisées 0-1 : bonne précision en `i16`.
 - Split par objet ou par matériau **et** UDIM deviennent orthogonaux : un objet `body` peut couvrir 1001 à 1004 (N8).
-- Corrections à faire au passage (L11 à L14) :
-  - tuile calculée avec `floor()`, pas `(int)` ;
-  - refus explicite des UV négatives et de u ≥ 10, avec un message dans la console d'import ;
-  - triangle à cheval sur deux tuiles : rangé par barycentre, **mais UV décalées par triangle** (duplication du sommet UV) plutôt que par sommet partagé, et un compteur d'avertissement ;
-  - FBX : un objet par nœud, plafond levé (tableau dynamique), jeu d'UV choisi.
+- Corrections L11 à L14 : **faites en phase 0** (2026-09-27, patches `udim-import` et `fbx-split`), reprises telles quelles :
+  - tuile calculée par `floorf`, avec une tolérance aux bords (`base/sources/iron_udim.c`), plus par `(int)` ;
+  - une uv hors des tuiles 1001-1990 (négative, u ≥ 10, nan) fait refuser le fichier, avec un message ;
+  - triangle à cheval : **coupé le long des bords de tuile** (positions, normales, uv, couleurs interpolées) plutôt que rangé par barycentre ; le nombre de triangles coupés est journalisé ;
+  - FBX : un objet par nœud et par tuile, plafonds levés (tableaux dynamiques). Reste à faire : choisir le jeu d'UV qui porte les tuiles (c'est toujours le premier).
 - Un vieux maillage déjà splitté (`cube.1001`…) reste lisible : au chargement, on le **refusionne** (§6.9).
 
 ### 6.3 Rendu viewport
@@ -403,8 +407,8 @@ Le moniteur VRAM du plan OCIO/export (si on le fait) doit afficher le détail **
 
 | Phase | Contenu | Livrable testable | Estimation |
 |---|---|---|---|
-| **0 — Correctifs sans regret** | L11 à L14 dans l'importeur OBJ et FBX (floor, refus avec message, triangles à cheval, plafond FBX dynamique). Erreur explicite au-delà de 64 tuiles (L3). UV matériau = UV UDIM réelles, via `_udim_offset` (L8). Gouttière et clamp entre cases (L6). Résolution projet conseillée à l'import (tableau du §3). | Bancs `udim_cube.obj` enrichis : UV négatives, u ≥ 10, triangle à cheval, 70 tuiles, bruit procédural continu entre 1003 et 1004 | **8-12 j** |
-| **1 — Tuile = donnée, maillage à plages** | `g_project->udim_tiles` sauvé dans le `.arm`. Import sans split, avec plages d'index. Rendu viewport par plage. **Stockage encore en atlas** : les plages remplacent les objets, l'atlas reste pour les calques. Migration des objets `nom.1xxx`. | Un objet `body` sur 4 tuiles, split par matériau et UDIM ensemble, jeux de textures × UDIM à l'export | **10-15 j** |
+| **0 — Correctifs sans regret** ✅ 2026-09-27 | L11 à L14 dans l'importeur OBJ et FBX (refus avec message des uv hors 1001-1990, triangles à cheval coupés, plafond FBX dynamique, un objet par objet et par tuile). Erreur explicite au-delà de 64 tuiles (L3). Résolution projet conseillée à l'import (tableau du §3). **Reportés :** UV matériau réelles (L8) en phase 1 : un uniforme `_udim_offset` par objet ne s'applique pas au maillage fusionné, peint en un seul draw, alors que la phase 1 dessine par plage ; gouttière et clamp entre cases (L6) en phase 2, qui supprime l'atlas qu'ils corrigeraient. | `.tests/obj.sh` (udim/), `.tests/fbx.sh`, `.tests/udim_app.sh` : UV négatives, u ≥ 10, triangles à cheval, 70 tuiles (atlas, peinture, export), conseil de résolution | **8-12 j** |
+| **1 — Tuile = donnée, maillage à plages** | `g_project->udim_tiles` sauvé dans le `.arm`. Import sans split, avec plages d'index. Rendu viewport par plage. **Stockage encore en atlas** : les plages remplacent les objets, l'atlas reste pour les calques. Migration des objets `nom.1xxx`. UV matériau = UV UDIM réelles (L8, reporté de la phase 0), par un décalage par plage. | Un objet `body` sur 4 tuiles, split par matériau et UDIM ensemble, jeux de textures × UDIM à l'export ; bruit procédural continu entre 1003 et 1004 | **10-15 j** |
 | **2 — Jeu de textures par tuile** | `layer_tile_t`, `layers_set_tile`, boucles dans la peinture, le flatten, les masques, la dilatation, le bake et l'export. Nouveau bloc `.arm` et migration depuis l'atlas. Suppression de l'espace atlas UDIM (`tex_coord_atlas`, `layers_udim_remap`). **Résolution encore uniforme.** | Export Per UDIM Tile bit à bit identique à un rendu d'une seule tuile en projet 1 tuile ; peinture continue à travers 1001/1002 | **20-30 j** |
 | **3 — Résolution par tuile** | `res_x`/`res_y` par tuile, UI Meshes, dilatation proportionnelle, inventaire et correction des outils en texels, export natif par tuile | Visage 8K + corps 2K, export aux deux résolutions, sans ré-échantillonnage | **6-10 j** |
 | **4 — Mémoire** | Allocation paresseuse par tuile et par canal, undo par tuile sale, éviction LZ4, moniteur VRAM par tuile | 10 tuiles 4K × 8 calques qui tiennent sur une machine de 24 Go | **12-20 j** |
@@ -447,7 +451,7 @@ Le moniteur VRAM du plan OCIO/export (si on le fait) doit afficher le détail **
 
 ## 10. Questions ouvertes et vérifications à faire
 
-- [x] **L12** : écriture hors tableau confirmée le 2026-09-26. Deux triangles, le second en u ∈ [-1,8 ; -1,2], import `Split by: UDIM Tile` : ASan signale un `heap-buffer-overflow` sur `num[tile] += 3` (`iron_obj.c:569`), 4 octets avant le tableau. Correctif : lot D0.
+- [x] **L12** : écriture hors tableau confirmée le 2026-09-26. Deux triangles, le second en u ∈ [-1,8 ; -1,2], import `Split by: UDIM Tile` : ASan signale un `heap-buffer-overflow` sur `num[tile] += 3` (`iron_obj.c:569`), 4 octets avant le tableau. Corrigé par le lot D0 le 2026-09-27 (patch `udim-import`, cas `neg` d'`.tests/obj.sh`).
 - [ ] Inventorier les outils qui travaillent **en texels** (flou, smudge, clone, taille de brosse en pixels, rayon de dilatation) pour la phase 3.
 - [ ] Composite par tuile : mesurer le coût de `layers_flatten` × N tuiles à chaque trait. Faut-il un cache par tuile, ou recomposer seulement la tuile sale ?
 - [ ] Raytrace et bake : garder l'atlas du maillage fusionné comme proxy, ou passer au bake par tuile ?

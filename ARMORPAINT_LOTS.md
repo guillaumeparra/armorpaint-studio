@@ -443,8 +443,8 @@ Décidé le 2026-09-26. Analyse, architecture et détail des phases : **`ARMORPA
 
 | Lot | Contenu | Estimation |
 |---|---|---|
-| D0 | Correctifs sans regret : importeurs OBJ/FBX (UV négatives, u ≥ 10, triangles à cheval, plafond FBX), erreur > 64 tuiles, UV matériau réelles, gouttière entre cases | 8-12 j |
-| D1 | Tuile = donnée du projet, maillage à plages d'index (plus de split), stockage encore en atlas | 10-15 j |
+| D0 | ✅ **fait le 2026-09-27** (macOS) — Correctifs sans regret : importeurs OBJ/FBX (UV négatives, u ≥ 10, triangles à cheval coupés, plafond FBX levé), erreur > 64 tuiles, conseil de résolution à l'import. Patches `udim-import`, `fbx-split`, `udim-tile-limit`. Reportés : UV matériau réelles en D1, gouttière entre cases en D2 (`ARMORPAINT_UDIM.md` §7) | 8-12 j |
+| D1 | Tuile = donnée du projet, maillage à plages d'index (plus de split), stockage encore en atlas ; UV matériau réelles | 10-15 j |
 | D2 | Jeu de textures par tuile, `layers_set_tile`, nouveau format `.arm` + migration — **point de non-retour du fork** | 20-30 j |
 | D3 | Résolution par tuile, export natif | 6-10 j |
 | D4 | Mémoire : allocation paresseuse, undo par tuile, éviction LZ4 | 12-20 j |
