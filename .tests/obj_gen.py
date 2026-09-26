@@ -1,4 +1,4 @@
-"""Corpus et fuzz du patch obj-global-indices (voir obj.sh).
+"""Corpus et fuzz des patches obj-global-indices et obj-float-exponent (voir obj.sh).
 
 obj_gen.py corpus <dossier>
     valid/  : fichiers valides à données séparées par objet (ce que l'upstream lit bien) : sphères en v, v/t, v//n,
@@ -7,9 +7,12 @@ obj_gen.py corpus <dossier>
               séparées. Le patch doit lire les deux à l'identique.
     bad/    : fichiers malformés (indices hors bornes, nuls, en avant, entiers énormes, face de 700 sommets, nom de
               5000 caractères, fin de fichier au milieu d'une ligne...). Seule exigence : pas de plantage.
+    exp/    : <nom>.obj écrit en notation scientifique (exposants négatifs, positifs, E majuscule, normales et
+              coordonnées minuscules) ; <nom>.ref.obj est le même maillage en décimal. Valeurs exactes dans les deux
+              écritures (multiples de 1/64) : les deux lectures doivent être identiques.
 
 obj_gen.py fuzz <dossier> <n> <exe>...
-    n mutations des fichiers valid/ et shared/, passées à chaque exe en split o et u. Compte les erreurs mémoire
+    n mutations des fichiers valid/, shared/ et exp/, passées à chaque exe en split o et u. Compte les erreurs mémoire
     (ASan), signaux et timeouts par exe, et garde les fichiers fautifs du premier exe dans <dossier>/fuzz_fail/.
 """
 import glob, math, os, random, subprocess, sys
@@ -111,7 +114,7 @@ def quads(f1, f2, vn2=""):
 
 
 def corpus(d):
-    for sub in ("valid", "shared", "bad"):
+    for sub in ("valid", "shared", "bad", "exp"):
         os.makedirs(os.path.join(d, sub), exist_ok=True)
     p = lambda *a: os.path.join(d, *a)
 
@@ -177,10 +180,39 @@ def corpus(d):
     for k, v in bad.items():
         open(p("bad", k + ".obj"), "w").write(v)
 
+    # obj-float-exponent : grille 5 x 4, deux objets, coordonnées multiples de 1/64 (exactes en %.6f et en %.6e)
+    def grid(sci, upper=False):
+        num = lambda x: ("%.6e" % x).replace("e", "E") if upper else "%.6e" % x if sci else "%.6f" % x
+        lines, base = [], 0
+        for o, (ox, sx, sy) in enumerate(((0.0, 0.765625, 0.25), (4.0, 0.015625, 0.03125))):
+            lines.append("o g%d" % o)
+            for j in range(4):
+                for i in range(5):
+                    lines.append("v %s %s %s" % (num(ox + (i - 2) * sx), num(j * sy - 0.375), num(i * j / 64)))
+                    lines.append("vt %s %s" % (num(i * 0.25), num(j * 0.25)))
+                    lines.append("vn %s %s %s" % (num(0), num(0), num(1)))
+            for j in range(3):
+                for i in range(4):
+                    a = base + j * 5 + i + 1
+                    lines.append("f " + " ".join("%d/%d/%d" % (x, x, x) for x in (a, a + 1, a + 6, a + 5)))
+            base += 20
+        return "\n".join(lines) + "\n"
+    open(p("exp", "grid.obj"), "w").write(grid(True))
+    open(p("exp", "grid_upper.obj"), "w").write(grid(True, True))
+    open(p("exp", "grid.ref.obj"), "w").write(grid(False))
+    open(p("exp", "grid_upper.ref.obj"), "w").write(grid(False))
+    # Normales et coordonnées minuscules d'exporteurs (bruit de calcul) : packées à 0 comme leur version nulle
+    tiny = "o t\nv {z} 0 0\nv {one} {z} 0\nv {one} {one} -{z}\nv {z} {one} 0\nvn {n} -{n} {one}\n" \
+           "vt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nf 1/1/1 2/2/1 3/3/1 4/4/1\n"
+    open(p("exp", "tiny.obj"), "w").write(tiny.format(z="1.0e-30", n="3.2e-12", one="1E+0"))
+    open(p("exp", "tiny.ref.obj"), "w").write(tiny.format(z="0", n="0", one="1"))
+
 
 def fuzz(d, n, exes):
-    seeds = [open(f, "rb").read() for f in sorted(glob.glob(os.path.join(d, "valid", "*.obj")) + glob.glob(os.path.join(d, "shared", "*.obj")))]
-    toks = [b"/", b"//", b" ", b"\n", b"\r", b"\t", b"-", b"0", b"9", b"99999", b"-1", b"-99", b"f ", b"v ", b"vt ", b"vn ", b"o x\n", b"usemtl m\n"]
+    seeds = [open(f, "rb").read() for f in sorted(glob.glob(os.path.join(d, "valid", "*.obj")) + glob.glob(os.path.join(d, "shared", "*.obj"))
+                                                   + glob.glob(os.path.join(d, "exp", "*.obj")))]
+    toks = [b"/", b"//", b" ", b"\n", b"\r", b"\t", b"-", b"0", b"9", b"99999", b"-1", b"-99", b"f ", b"v ", b"vt ", b"vn ", b"o x\n", b"usemtl m\n",
+            b"e", b"E+", b"e-", b"e99", b"e-45", b"e999999999999", b"e-2147483649", b"1e10"]
     fails = os.path.join(d, "fuzz_fail")
     os.makedirs(fails, exist_ok=True)
     for e, exe in enumerate(exes):

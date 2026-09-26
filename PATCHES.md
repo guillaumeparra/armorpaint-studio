@@ -417,9 +417,11 @@ part par part, octet pour octet (étape 1 du banc).
    positions réutilisées plus grandes que celles de la part) : sortie identique à la version à données séparées
    lue par l'upstream ;
 3. `bad/` : 15 fichiers malformés, aucune erreur ;
-4. fuzz : 1 000 mutations de `valid/` et `shared/` en splits objet et matériau. Au 2026-09-26 : **0 plantage**
-   contre 1 413 pour l'upstream (heap-buffer-overflow, use-after-free, BUS, SEGV) ; à 3 000 mutations, 0 contre
-   4 251.
+4. fuzz (étape 6 du banc depuis obj-float-exponent) : 1 000 mutations de `valid/` et `shared/` en splits objet et
+   matériau. Au 2026-09-26 : **0 plantage** contre 1 413 pour l'upstream (heap-buffer-overflow, use-after-free,
+   BUS, SEGV) ; à 3 000 mutations, 0 contre 4 251.
+
+Les étapes 4 et 5 du banc (`float`, `exp/`) sont celles de [obj-float-exponent](#obj-float-exponent).
 
 Dans l'app :
 
@@ -440,11 +442,90 @@ les n-gones donnent les mêmes objets, avec les mêmes nombres d'indices, qu'ava
 **Non couvert.**
 - En split par objet, les `v`/`vt`/`vn` de tout le fichier restent en mémoire jusqu'à la dernière part (l'upstream
   ne gardait que ceux de la part courante) : de l'ordre de la taille du fichier, comme en split par matériau.
-- `read_float()` : l'exposant (`1e10`) est calculé dans un `int` par multiplications successives, qui débordent
-  au-delà de 9 et bouclent `exp` fois — un exposant énorme prend du temps sans planter. UBSan le signale pendant le
-  fuzz (`iron_obj.c:140`), seul UB restant. Le packing int16 des coordonnées hors bornes (`float-cast-overflow`,
-  saturé sur arm64) n'est pas non plus traité. Ces deux points relèvent de la lecture des flottants, hors du
-  périmètre des indices.
+- `read_float()` : l'exposant (`1e10`) débordait un `int` (UBSan `iron_obj.c:140` pendant le fuzz) : corrigé par
+  [obj-float-exponent](#obj-float-exponent). Le packing int16 des coordonnées hors bornes (`float-cast-overflow`,
+  saturé sur arm64) n'est pas traité : il relève de la lecture des flottants, hors du périmètre des indices.
 - `import_obj_parse()` pousse la première part même sans face (fichier dont le premier objet n'a pas de face
   valide) : l'import aboutit (rc 0) avec un objet vide, comportement upstream inchangé.
 - Le split UDIM (`obj_parse(…, udim)`) n'a été vérifié qu'hors app, le mode ne se règle que dans l'UI.
+
+---
+
+## obj-float-exponent
+
+| | |
+|---|---|
+| Fichier | `base/sources/iron_obj.c` (`read_float`, nouveau `read_exponent`) |
+| Commit studio | `70cece4b` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-26) |
+| Trouvé | 2026-09-26, fuzz de [obj-global-indices](#obj-global-indices) : UBSan `signed-integer-overflow` sur `dec *= 10` |
+
+**Bug.** `read_float()` lisait mal les flottants en notation scientifique, que certains exporteurs écrivent pour
+les coordonnées et normales minuscules (`1.0e-20`) ou pour toutes les valeurs (`%e`) :
+- sur `e`/`E`, seul le premier chiffre de la mantisse était gardé (`buf[0] - 48`) : `1.5e-3` donnait 0.001,
+  `-0.5e-2` donnait 0, `2.5E3` donnait 2000 ;
+- l'exposant, lu par `read_int()`, prenait le `+` pour un chiffre : `1E+2` et `1.5e+00` donnaient n'importe quoi
+  (inf, 1e-5) ;
+- il était appliqué en multipliant un `int` par 10, `exp` fois : débordement signé dès 1e10 (UB), et une boucle de
+  `exp` tours pour un exposant énorme (`1e2147483647`).
+
+Dans l'app, un OBJ écrit en `%e` (`0.000000e+00`, `1.000000e+00`...) s'importait avec `scale_pos` à inf ou nan et
+tous les sommets à 0 : maillage effondré, sans erreur.
+
+**Correctif.**
+- Sur `e`/`E`, `read_float()` lit l'exposant (`read_exponent()` : signe `+`/`-`, chiffres, saturé à 99, jusqu'à la
+  fin du jeton comme le reste de `read_float()`) puis sort de la boucle : la mantisse bufferisée passe par le calcul
+  décimal habituel, en entier.
+- Le résultat est multiplié par `pow(10, exp)` en double, puis borné à ±`FLT_MAX` : pas d'inf dans le maillage, qui
+  rendrait l'échelle de packing infinie. Pas de boucle, pas d'entier qui déborde. Sous `FLT_MIN`, le résultat devient
+  dénormal puis 0, comme `strtof`.
+- L'exposant passe par une statique (`read_float_exp`), remise à 0 dès qu'elle est appliquée : les lignes de
+  `read_float()` et le haut du fichier touchés par obj-global-indices restent intacts (contexte de son `.patch`).
+
+Sans exposant, le résultat est inchangé (étape 4 du banc : 20 000 jetons identiques bit pour bit à l'upstream ; étape
+1 : sortie identique octet pour octet). La mantisse reste limitée à 9 caractères par `buf`, comme sans exposant :
+`-1.234567e-05` (sortie `%e` par défaut) tient ; au-delà, les chiffres de droite sont perdus.
+
+Deux patches touchent `iron_obj.c` : `obj-global-indices.patch` (`main` → `252f9fc3`) puis
+`obj-float-exponent.patch` (`252f9fc3` → `70cece4b`). Les réappliquer dans cet ordre. Pour régénérer celui-ci :
+`git diff <commit studio d'obj-global-indices> studio -- base/sources/iron_obj.c`.
+
+**Test.** `.tests/obj.sh` (hors app, ASan/UBSan ; `STUDIO_ROOT=<armorpaint>` si ce dépôt est lancé depuis un
+worktree) :
+- étape 4, `float` (`obj_float_test.c`, qui inclut `iron_obj.c` pour appeler `read_float()`) : 30 jetons à exposant
+  comparés à `strtod` borné à ±`FLT_MAX`, à 1 ulp près, fin de jeton comprise : `1.5e-3`, `-0.5e-2`, `1E+2`,
+  `1e-45` (dénormal), `1e999` et `-1e999` (±`FLT_MAX`), `1e-999` et `0e999` (0), `1e2147483648`, `1e`, `1e+`,
+  `1.5e-3x`... Tous passent ; 3 sont à 1 ulp de `strtod` (`6.02e23`, `3.4e38`, `7.450581e-09` : mantisse
+  arrondie en float avant la multiplication). L'upstream en rate 25 sur 30. Puis 20 000 jetons décimaux sans
+  exposant, sortie identique à l'upstream ;
+- étape 5, `exp/` : grille à deux objets en `%.6e`, la même en `E` majuscule, et un quad à coordonnées et normale
+  minuscules (`1.0e-30`, `3.2e-12`, `1E+0`) : sortie identique, splits objet et matériau, à leur version décimale
+  lue par l'upstream. Avant le patch (studio `252f9fc3`), les deux fichiers sortent différents ;
+- étape 6, fuzz, avec des jetons d'exposant (`e`, `E+`, `e-45`, `e999999999999`, `e-2147483649`...) et `exp/` dans
+  les graines. L'étape échoue désormais si l'arbre courant signale un UB. Au 2026-09-26, 1 000 mutations :
+  **0 plantage, 0 UB** (studio `252f9fc3` sur le même fuzz : 620 `signed integer overflow` en `iron_obj.c:140`,
+  upstream : 1 393 plantages) ; 3 000 mutations : 0 plantage, 0 UB.
+
+Dans l'app (chemins absolus : un chemin relatif ne se résout pas et fait planter l'import, bug upstream distinct) :
+
+```bash
+ArmorPaint <w>/exp/grid.obj --background --script .tests/obj_scale.c       # comme grid.ref.obj
+ArmorPaint <w>/exp/grid.ref.obj --background --script .tests/obj_scale.c
+```
+
+`obj_scale.c` affiche, par objet, le nombre d'indices, `scale_pos` et le premier sommet packé. Résultats au
+2026-09-26 : `grid.obj`, `grid_upper.obj` et `grid.ref.obj` donnent `g0(idx=72 scale=1.531250 ...)`,
+`g1(idx=72 scale=4.031250 ...)`, mêmes sommets ; `tiny.obj` = `tiny.ref.obj`. Sans le patch : `scale=inf` (nan
+pour l'objet fusionné) et tous les sommets à 0.
+
+**Signes que l'upstream l'a corrigé.** Le bloc `if (c == 'E' || c == 'e')` de `read_float()` ne contient plus
+`int first = buf[0] ...` ni la boucle `dec *= 10`, ou `read_float()` passe par `strtof`. Rejouer l'étape 4 de
+`.tests/obj.sh` contre l'upstream sans le patch.
+
+**Non couvert.**
+- Écart d'au plus 1 ulp avec `strtof` sur certaines valeurs (mantisse arrondie en float, puis produit en double).
+- Mantisse de plus de 9 caractères : tronquée comme sans exposant (comportement upstream de `read_float()`).
+- `nan`, `inf` écrits en toutes lettres : non reconnus, lus comme avant (valeur quelconque, finie).
+- Le packing int16 des normales (`(int)(n * 32767)`) ne borne pas une normale non normalisée : `vn 1e30 0 0` est
+  lu 1e30, et la conversion float → int déborde (`float-cast-overflow`, exclu du banc, saturé sur arm64) — comme `vn 999999999`
+  sans exposant.
