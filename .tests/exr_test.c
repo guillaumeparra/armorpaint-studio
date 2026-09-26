@@ -1,5 +1,5 @@
 // Banc de test du lot B1, hors de l'app, sous ASan/UBSan : lancé par run.sh.
-//   exr_test gen <dir>               génère les fichiers sources (tinyexr)
+//   exr_test gen <dir>               génère les fichiers sources (tinyexr) et les fichiers enc_* (studio_exr_encode)
 //   exr_test check <dir>             décode chaque cas et compare aux valeurs attendues
 //   exr_test fuzz <file> <n> <seed>  mutations aléatoires : décodage tinyexr, puis repli DWA s'il est accepté
 //   exr_test decode <file>           décode un seul fichier et imprime le résultat (rejouer un cas de fuzz)
@@ -155,6 +155,8 @@ static void gen(const char *dir, const char *file, exr_box2i dw, exr_box2i disp,
 #define U EXR_PIXEL_UINT
 #define N(a) (int)(sizeof(a) / sizeof(a[0]))
 
+static void gen_encoded(const char *dir);
+
 static void gen_all(const char *dir) {
 	const exr_box2i     w      = DEFAULT_WINDOW;
 	const exr_compression zip  = EXR_COMPRESSION_ZIP;
@@ -191,12 +193,19 @@ static void gen_all(const char *dir) {
 	gen(dir, "window_disjoint.exr", BOX(600, 600, 700, 700), w, rgba, N(rgba), zip);
 	gen(dir, "too_large.exr", BOX(0, 0, 16384, 0), BOX(0, 0, 16384, 0), y, N(y), zip);
 	gen(dir, "display_invalid.exr", w, BOX(0, 0, 99999, 99999), rgba, N(rgba), zip);
+	// dataWindow démesurée derrière une petite image : canal nul, donc quelques Ko une fois compressé.
+	channel_def_t zero[] = {{"Y", ROLE_ZERO, H, 1}};
+	gen(dir, "window_huge_area.exr", BOX(0, 0, 32767, 599), w, zero, N(zero), zip); // 19,7 M pixels > 4096²
+	gen(dir, "window_huge_side.exr", BOX(-20000, 0, 20000, 0), w, zero, N(zero), zip); // 40 001 > 2 * 16384
+	gen(dir, "window_overscan_ok.exr", BOX(-1000, -1000, 3095, 3095), BOX(0, 0, 2047, 2047), zero, N(zero), zip);
 
 	char path[1024];
 	snprintf(path, sizeof(path), "%s/garbage.exr", dir);
 	write_file(path, "this is not an exr file", 23);
 	snprintf(path, sizeof(path), "%s/empty.exr", dir);
 	write_file(path, "", 0);
+
+	gen_encoded(dir);
 }
 
 // ---- Vérifications ---------------------------------------------------------------------------------------------------
@@ -256,6 +265,135 @@ static void compare_pixels(const char *label, const void *pixels, bool is_half, 
 	CHECK(bad == 0, "%s: %d values off, first %s, max error %g", label, bad, first, max_err);
 	if (e->tolerance > 0) {
 		printf("  %-24s max error %.5f, mean %.6f\n", label, max_err, sum_err / ((double)w * h * 4));
+	}
+}
+
+// ---- Encodeur --------------------------------------------------------------------------------------------------------
+
+// Fichiers écrits par studio_exr_encode, pour chaque compression inscriptible, half et float, et chaque type
+// d'export_texture_write_texture(). run.sh les fait relire par OpenEXR (exrmetrics --convert -z none -> *_ref.exr) :
+// check_encoded() vérifie que la relecture OpenEXR, sans passer par le décodeur de tinyexr, rend nos valeurs.
+static const exr_compression encoded_compressions[] = {
+    EXR_COMPRESSION_NONE, EXR_COMPRESSION_RLE, EXR_COMPRESSION_ZIPS,     EXR_COMPRESSION_ZIP,     EXR_COMPRESSION_PIZ,
+    EXR_COMPRESSION_PXR24, EXR_COMPRESSION_B44, EXR_COMPRESSION_B44A, EXR_COMPRESSION_HTJ2K256, EXR_COMPRESSION_HTJ2K32};
+static const struct {
+	int         type, off;
+	int         role[4];
+	const char *label;
+} encoded_types[] = {{1, 0, {0, 1, 2, -1}, "rgb"}, {2, 1, {1, 1, 1, -1}, "y"}, {3, 0, {0, 1, 2, 3}, "rgba"}};
+#define ENC_W 257 // chunks incomplets pour tous les codecs
+#define ENC_H 131
+
+static void encoded_name(char *out, size_t size, const char *dir, int c, int bits, int t, const char *suffix) {
+	snprintf(out, size, "%s/enc_%s_%d_%s%s.exr", dir, studio_exr_compression_name(encoded_compressions[c]), bits,
+	         encoded_types[t].label, suffix);
+}
+
+static void gen_encoded(const char *dir) {
+	float    *pf = malloc((size_t)ENC_W * ENC_H * 4 * sizeof(float));
+	uint16_t *ph = malloc((size_t)ENC_W * ENC_H * 4 * sizeof(uint16_t));
+	for (int y = 0; y < ENC_H; y++) {
+		for (int x = 0; x < ENC_W; x++) {
+			for (int k = 0; k < 4; k++) {
+				pf[((size_t)y * ENC_W + x) * 4 + k] = pattern(k, x, y);
+			}
+		}
+	}
+	exr_float_to_half(pf, ph, (size_t)ENC_W * ENC_H * 4);
+	const char *names[]  = {"software", "asset"};
+	const char *values[] = {"exr_test", "chair_A"};
+	for (int c = 0; c < N(encoded_compressions); c++) {
+		for (int bits = 16; bits <= 32; bits += 16) {
+			for (int t = 0; t < N(encoded_types); t++) {
+				studio_exr_encode_t in = {.pixels      = bits == 16 ? (const void *)ph : (const void *)pf,
+				                          .pixels_size = (size_t)ENC_W * ENC_H * 4 * (bits / 8),
+				                          .width       = ENC_W,
+				                          .height      = ENC_H,
+				                          .bits        = bits,
+				                          .type        = encoded_types[t].type,
+				                          .off         = encoded_types[t].off,
+				                          .compression = encoded_compressions[c],
+				                          .attr_count  = 2,
+				                          .attr_names  = names,
+				                          .attr_values = values};
+				void      *out;
+				size_t     out_size;
+				exr_result r = studio_exr_encode(&in, &out, &out_size);
+				char       path[1024];
+				encoded_name(path, sizeof(path), dir, c, bits, t, "");
+				if (!EXR_OK(r)) {
+					printf("  FAIL encode %s: %s\n", path, exr_result_string(r));
+					failures++;
+					continue;
+				}
+				write_file(path, out, out_size);
+				free(out);
+			}
+		}
+	}
+	free(pf);
+	free(ph);
+}
+
+static bool decode_file(const char *path, studio_exr_image_t *img) {
+	size_t size;
+	void  *data = read_file(path, &size);
+	char   err[256];
+	exr_result r = data ? studio_exr_decode(data, size, img, err, sizeof(err)) : EXR_ERROR_IO;
+	CHECK(EXR_OK(r), "%s: %s", path, data ? err : "cannot read");
+	free(data);
+	return EXR_OK(r);
+}
+
+static void check_encoded(const char *dir) {
+	int files = 0, before = failures;
+	for (int c = 0; c < N(encoded_compressions); c++) {
+		exr_compression z = encoded_compressions[c];
+		for (int bits = 16; bits <= 32; bits += 16) {
+			// Pertes attendues : B44 sur les canaux half, PXR24 sur les canaux float (24 bits de mantisse).
+			bool lossy = (bits == 16 && (z == EXR_COMPRESSION_B44 || z == EXR_COMPRESSION_B44A)) ||
+			             (bits == 32 && z == EXR_COMPRESSION_PXR24);
+			for (int t = 0; t < N(encoded_types); t++) {
+				char path[1024], ref[1024], label[128];
+				encoded_name(path, sizeof(path), dir, c, bits, t, "");
+				encoded_name(ref, sizeof(ref), dir, c, bits, t, "_ref");
+				snprintf(label, sizeof(label), "enc %s %d %s", studio_exr_compression_name(z), bits, encoded_types[t].label);
+				studio_exr_image_t ours = {0}, theirs = {0};
+				if (decode_file(path, &ours) && decode_file(ref, &theirs)) {
+					files++;
+					CHECK(ours.compression == (int)z, "%s: compression %s", label, studio_exr_compression_name(ours.compression));
+					CHECK(ours.is_half == (bits == 16) && theirs.is_half == (bits == 16), "%s: pixel type", label);
+					// OpenEXR relit exactement ce que relit tinyexr, pertes comprises.
+					size_t bytes = (size_t)ENC_W * ENC_H * 4 * (bits / 8);
+					CHECK(ours.width == ENC_W && ours.height == ENC_H && theirs.width == ENC_W && theirs.height == ENC_H &&
+					          memcmp(ours.pixels, theirs.pixels, bytes) == 0,
+					      "%s: OpenEXR and tinyexr decode differently", label);
+					// Sans perte : les valeurs source, au bit près. Avec perte : une borne large, contre un canal vide ou décalé.
+					expect_t e = {"", EXR_SUCCESS,
+					              {encoded_types[t].role[0], encoded_types[t].role[1], encoded_types[t].role[2], encoded_types[t].role[3]},
+					              bits == 16 ? H : F, bits == 16, lossy ? 0.25f : 0.0f,
+					              BOX(0, 0, ENC_W - 1, ENC_H - 1), BOX(0, 0, ENC_W - 1, ENC_H - 1), NULL};
+					compare_pixels(label, theirs.pixels, theirs.is_half, &e);
+
+					size_t     size;
+					void      *data = read_file(path, &size);
+					exr_reader *rd   = NULL;
+					char        asset[64] = "";
+					if (data != NULL && EXR_OK(exr_reader_open_memory(data, size, NULL, &rd)) && EXR_OK(exr_reader_parse_header(rd))) {
+						exr_header_get_string_attribute(exr_reader_part_header(rd, 0), "asset", asset, sizeof(asset), NULL);
+					}
+					CHECK(strcmp(asset, "chair_A") == 0, "%s: asset attribute \"%s\"", label, asset);
+					exr_reader_close(rd);
+					free(data);
+				}
+				studio_exr_image_free(&ours);
+				studio_exr_image_free(&theirs);
+			}
+		}
+	}
+	if (failures == before) {
+		printf("  ok   encode: %d files (%d compressions x half/float x RGB/Y/RGBA) read back identically by OpenEXR\n", files,
+		       N(encoded_compressions));
 	}
 }
 
@@ -379,6 +517,9 @@ static void check_all(const char *dir) {
         {"window_disjoint.exr", EXR_SUCCESS, {0, 1, 2, 3}, H, true, 0, BOX(600, 600, 700, 700), w, NULL},
         {"display_invalid.exr", EXR_SUCCESS, {0, 1, 2, 3}, H, true, 0, w, w, "displayWindow ignored"},
         {"too_large.exr", EXR_ERROR_LIMIT_EXCEEDED},
+        {"window_huge_area.exr", EXR_ERROR_LIMIT_EXCEEDED},
+        {"window_huge_side.exr", EXR_ERROR_LIMIT_EXCEEDED},
+        {"window_overscan_ok.exr", EXR_SUCCESS, {-1, -1, -1, -1}, H, true, 0, BOX(-1000, -1000, 3095, 3095), BOX(0, 0, 2047, 2047), NULL},
         {"garbage.exr", EXR_ERROR_INVALID_FILE},
         {"empty.exr", EXR_ERROR_INVALID_FILE},
         // Convertis par OpenEXR (run.sh)
@@ -410,61 +551,7 @@ static void check_all(const char *dir) {
 	check_dwa(dir, "y_dwab", true);
 	check_dwa(dir, "rgba_dwaa", false); // alpha : io_exr_parse ne sait pas le décoder
 
-	// Encodeur : aller-retour exact par tinyexr pour chaque type d'export_texture_write_texture().
-	int      ew = 257, eh = 131;
-	uint16_t *px = malloc((size_t)ew * eh * 4 * 2);
-	for (int y = 0; y < eh; y++) {
-		for (int x = 0; x < ew; x++) {
-			for (int k = 0; k < 4; k++) {
-				float v = pattern(k, x, y);
-				exr_float_to_half(&v, px + ((size_t)y * ew + x) * 4 + k, 1);
-			}
-		}
-	}
-	const char *names[]  = {"software", "asset"};
-	const char *values[] = {"exr_test", "chair_A"};
-	struct {
-		int         type, off;
-		int         role[4];
-		const char *label;
-	} types[] = {{1, 0, {0, 1, 2, -1}, "encode type 1 (RGB)"},
-	             {2, 1, {1, 1, 1, -1}, "encode type 2 (Y = G)"},
-	             {3, 0, {0, 1, 2, 3}, "encode type 3 (RGBA)"}};
-	for (int t = 0; t < 3; t++) {
-		studio_exr_encode_t in = {.pixels = px, .pixels_size = (size_t)ew * eh * 8, .width = ew, .height = eh, .bits = 16,
-		                          .type = types[t].type, .off = types[t].off, .compression = EXR_COMPRESSION_PIZ,
-		                          .attr_count = 2, .attr_names = names, .attr_values = values};
-		void      *out;
-		size_t     out_size;
-		exr_result r = studio_exr_encode(&in, &out, &out_size);
-		CHECK(EXR_OK(r), "%s: %s", types[t].label, exr_result_string(r));
-		if (!EXR_OK(r)) {
-			continue;
-		}
-		studio_exr_image_t img;
-		char               err[256];
-		r = studio_exr_decode(out, out_size, &img, err, sizeof(err));
-		CHECK(EXR_OK(r) && img.compression == EXR_COMPRESSION_PIZ, "%s: decode %s", types[t].label, err);
-		expect_t e = {"", EXR_SUCCESS, {types[t].role[0], types[t].role[1], types[t].role[2], types[t].role[3]}, H, true, 0,
-		              BOX(0, 0, ew - 1, eh - 1), BOX(0, 0, ew - 1, eh - 1), NULL};
-		if (EXR_OK(r)) {
-			int before = failures;
-			compare_pixels(types[t].label, img.pixels, img.is_half, &e);
-			exr_reader *rd = NULL;
-			char        asset[64] = "";
-			exr_reader_open_memory(out, out_size, NULL, &rd);
-			exr_reader_parse_header(rd);
-			exr_header_get_string_attribute(exr_reader_part_header(rd, 0), "asset", asset, sizeof(asset), NULL);
-			CHECK(strcmp(asset, "chair_A") == 0, "%s: asset attribute \"%s\"", types[t].label, asset);
-			exr_reader_close(rd);
-			if (failures == before) {
-				printf("  ok   %s, %zu bytes\n", types[t].label, out_size);
-			}
-		}
-		studio_exr_image_free(&img);
-		free(out);
-	}
-	free(px);
+	check_encoded(dir);
 }
 
 // ---- Fuzz ------------------------------------------------------------------------------------------------------------

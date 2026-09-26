@@ -3,7 +3,8 @@
 # DWAA/DWAB vers le décodeur upstream (paint/plugins/io_exr/io_exr.c).
 #
 # Usage : .tests/run.sh [dossier de travail]     FUZZ=<n> : mutations par fichier (défaut 2000)
-# Requiert les outils OpenEXR (brew install openexr) : exrmetrics, exrmaketiled, exrmultipart.
+# Requiert les outils OpenEXR (brew install openexr) : exrmetrics, exrmaketiled, exrmultipart. Ils servent de
+# référence indépendante dans les deux sens : ils produisent des fichiers que nous lisons, et relisent ceux que nous écrivons.
 # Le dossier .tests/ commence par un point : amake ne le compile pas dans l'app.
 
 set -e
@@ -15,7 +16,7 @@ mkdir -p "$W"
 X="$W/exr_test"
 
 echo "== build ($W)"
-SAN="-fsanitize=address,undefined -fno-omit-frame-pointer"
+SAN="-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
 CFLAGS="-std=c11 -O1 -g $SAN -DWITH_COMPRESS -Wno-unused-function -I$T/stubs -I$BASE/sources -I$BASE/sources/libs"
 # io_exr.c lit l'en-tête EXR par cast de pointeur non aligné : UB signalé à chaque appel, sur tous les fichiers, y
 # compris valides. C'est du code upstream que le repli DWA appelle exprès, et l'alignement n'est pas ce qu'on teste
@@ -38,6 +39,11 @@ exrmaketiled -m "$W/rgba_half.exr" "$W/tiled_mip.exr"
 # tinyexr — plus strict — la refuserait). exrmetrics --convert réécrit le fichier avec une vraie table.
 exrmultipart -combine -i "$W/y_half.exr::luma" "$W/rgba_half.exr::color" -o "$W/multipart_raw.exr" > /dev/null
 exrmetrics --convert -z zip "$W/multipart_raw.exr" -o "$W/multipart.exr" > /dev/null
+# Fichiers écrits par studio_exr_encode (exr_test gen) : OpenEXR les décompresse, check compare à la source.
+for f in "$W"/enc_*.exr; do
+	case $f in *_ref.exr) continue ;; esac
+	exrmetrics --convert -z none "$f" -o "${f%.exr}_ref.exr" > /dev/null
+done
 for f in rgb y rgba; do
 	for z in dwaa dwab; do
 		exrmetrics --convert -z $z "$W/${f}_half.exr" -o "$W/${f}_$z.exr"
@@ -54,12 +60,13 @@ for f in rgba_half rgba_piz rgba_b44 rgba_htj2k32 tiled_mip multipart layers yc 
 done
 
 echo "== débordement de pile upstream"
-# io_exr_parse remplit channel_t channels[4] sans borne : ASan doit l'attraper sur many.exr (8 canaux), que
+# io_exr_parse remplit channel_t channels[4] sans borne : les sanitizers doivent l'attraper sur many.exr (8 canaux), que
 # studio_exr_decode lit correctement ci-dessus.
 if "$X" upstream "$W/many.exr" > "$W/upstream.log" 2>&1; then
 	echo "  FAIL io_exr_parse n'a pas débordé sur many.exr"
 	exit 1
 fi
-grep -q "stack-buffer-overflow" "$W/upstream.log"
-echo "  ok   io_exr_parse : stack-buffer-overflow sur many.exr (8 canaux), voir $W/upstream.log"
+# UBSan (contrôle d'index, fatal) l'arrête avant qu'ASan ne voie l'écriture hors pile : les deux signent le même bug.
+grep -qE "stack-buffer-overflow|index 4 out of bounds for type 'channel_t\[4\]'" "$W/upstream.log"
+echo "  ok   io_exr_parse : écriture hors de channels[4] sur many.exr (8 canaux), voir $W/upstream.log"
 echo "== OK"

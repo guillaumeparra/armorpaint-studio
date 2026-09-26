@@ -1,5 +1,5 @@
 diff --git a/base/sources/libs/sinfl.h b/base/sources/libs/sinfl.h
-index c18d688b..e456cdee 100644
+index c18d688b..5c1a138a 100644
 --- a/base/sources/libs/sinfl.h
 +++ b/base/sources/libs/sinfl.h
 @@ -122,6 +122,7 @@ extern "C" {
@@ -88,3 +88,13 @@ index c18d688b..e456cdee 100644
  					out = out + len;
  					if (sinfl_unlikely(out > oe))
  						return -2;
+@@ -655,7 +691,8 @@ extern int zsinflate(void *out, int cap, const void *mem, int size) {
+ 		if (n < 0)
+ 			return -2;
+ 		unsigned a = sinfl_adler32(1u, (unsigned char *)out, n);
+-		unsigned h = eob[0] << 24 | eob[1] << 16 | eob[2] << 8 | eob[3] << 0;
++		/* STUDIO-PATCH(sinfl-bounds): eob[0] << 24 overflowed int (undefined behavior) for bytes >= 0x80 */
++		unsigned h = (unsigned)eob[0] << 24 | (unsigned)eob[1] << 16 | (unsigned)eob[2] << 8 | (unsigned)eob[3] << 0;
+ 		return a == h ? n : -1;
+ 	}
+ 	else {

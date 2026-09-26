@@ -10,6 +10,10 @@
 
 // Dimension maximale d'une texture importée (limite GPU d'ArmorPaint).
 #define STUDIO_EXR_MAX_DIM 16384
+// Surface maximale de la dataWindow décodée à l'import : STUDIO_EXR_DW_FACTOR fois celle de l'image, au moins
+// STUDIO_EXR_DW_FLOOR pixels, et chaque côté au plus 2 * STUDIO_EXR_MAX_DIM.
+#define STUDIO_EXR_DW_FACTOR 4
+#define STUDIO_EXR_DW_FLOOR  (4096ull * 4096ull)
 
 typedef struct studio_exr_encode {
 	const void *pixels; // RGBA entrelacé, half (bits = 16) ou float (bits = 32), width * height pixels
@@ -43,7 +47,8 @@ typedef struct studio_exr_image {
 // - canaux R, G, B, A ; à défaut le premier calque qui en a ("diffuse.R"…) ; Y en niveaux de gris, Y/RY/BY
 //   reconstruit en couleur ; à défaut le premier canal en niveaux de gris. R, G ou B seul est lu en niveaux de gris,
 //   sinon R, G, B absents = 0. Alpha absent = 1 ;
-// - l'image couvre la fenêtre d'affichage (displayWindow), 0 hors dataWindow ;
+// - l'image couvre la fenêtre d'affichage (displayWindow), 0 hors dataWindow ; une dataWindow démesurée par rapport
+//   à elle est refusée (EXR_ERROR_LIMIT_EXCEEDED, voir STUDIO_EXR_DW_FACTOR) ;
 // - half si tous les canaux retenus sont half, float sinon.
 // DWAA/DWAB : EXR_ERROR_UNSUPPORTED, avec out->compression renseigné (voir studio_exr_dwa_legacy_safe).
 exr_result studio_exr_decode(const void *data, size_t size, studio_exr_image_t *out, char *err, size_t err_size);

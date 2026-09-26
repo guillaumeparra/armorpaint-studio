@@ -83,7 +83,7 @@ comportement en `--background` n'a pas été vérifié.
 | Fichier | `paint/sources/io/export_texture.c` (`export_texture_write_texture`) |
 | Commit studio | `37cfb0ec` sur la branche `studio` |
 | Validé contre | upstream `85f6cf1c` (2026-09-26) |
-| Injection | 5 lignes sous `#ifdef WITH_EXTERNAL` — l'app compile toujours sans `external/` |
+| Injection | 6 lignes sous `#ifdef WITH_EXTERNAL` — l'app compile toujours sans `external/` |
 | Import | **aucune injection** : `studio_exr_init()` remplace l'entrée `"exr"` de `import_texture_importers` |
 
 **Motif.** Le writer EXR upstream (`io/export_exr.c`, dérivé de miniexr) écrit un header octet par octet, sans
@@ -97,7 +97,7 @@ tableau `channels[4]` sans borne.
 ou si la profondeur n'est pas 16/32 bits. La lecture passe par tinyexr, avec repli sur le décodeur upstream pour
 DWAA/DWAB (que tinyexr ne lit pas) uniquement après validation du fichier, `STUDIO_EXR_MAX_DIM` et bornes comprises.
 
-**Test.** `.tests/run.sh` (ASan/UBSan, hors app : 41 cas de décodage, encodage, fuzz) et, dans l'app, sur un
+**Test.** `.tests/run.sh` (ASan/UBSan, hors app : cas de décodage, 60 fichiers écrits relus par OpenEXR, fuzz) et, dans l'app, sur un
 projet 2048² :
 
 ```bash
@@ -131,8 +131,8 @@ les refuse).
 
 | | |
 |---|---|
-| Fichier | `base/sources/libs/sinfl.h` (`sinfl_refill`, `sinfl_decompress`) |
-| Commit studio | `aca9d34d` sur la branche `studio` |
+| Fichier | `base/sources/libs/sinfl.h` (`sinfl_refill`, `sinfl_decompress`, `zsinflate`) |
+| Commits studio | `aca9d34d`, `4b966797` sur la branche `studio` |
 | Validé contre | upstream `85f6cf1c` (2026-09-26) |
 | Trouvé | 2026-09-26, par `.tests/run.sh` (fuzz DWAA/DWAB sous ASan) |
 
@@ -148,10 +148,14 @@ sur les chemins Huffman. `iron_inflate()` lui donne pourtant des données de fic
 3. `sinfl_refill()` lisait 8 octets à partir de `bitptr` sans jamais regarder la fin de l'entrée, et continuait
    au-delà : seul le chemin des blocs non compressés vérifiait `e`.
 
+S'y ajoute un comportement indéfini, sans conséquence observée mais signalé par UBSan dès qu'il est rendu fatal
+(`4b966797`) : `zsinflate()` assemble l'adler32 de fin de flux par `eob[0] << 24` sur un `int`, qui déborde pour
+un octet ≥ 0x80.
+
 **Correctif.** Une borne pour chacun. Pour l'entrée, `struct sinfl` gagne un `bitend` et `sinfl_refill()`
 alimente des octets nuls au-delà — `bitptr` dépasse légitimement `bitend` au dernier refill d'un flux valide,
 seule la lecture doit rester dans les bornes. Le décodage tourne alors sur des zéros jusqu'à échouer ou remplir
-la sortie, donc il s'arrête.
+la sortie, donc il s'arrête. Dans `zsinflate()`, chaque octet de l'adler32 est converti en `unsigned` avant décalage.
 
 **Test.** `.tests/run.sh` : 22 000 mutations sur 11 fichiers, dont 3 365 confiés au décodeur DWA upstream, sans
 erreur ASan. Non-régression sur données valides : EXR ZIPS et DWAA par le lecteur upstream

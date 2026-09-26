@@ -337,6 +337,21 @@ exr_result studio_exr_decode(const void *data, size_t size, studio_exr_image_t *
 		set_message(err, err_size, "image too large (%lldx%lld, max %d)", (long long)ow, (long long)oh, STUDIO_EXR_MAX_DIM);
 		goto done;
 	}
+	// Toute la dataWindow est décodée avant d'en recadrer la partie visible. Une fenêtre bien plus grande que l'image
+	// (overscan démesuré, fichier piégé de quelques octets) ferait décoder, jusqu'à max_image_bytes, des pixels jetés :
+	// on la borne à STUDIO_EXR_DW_FACTOR fois la surface affichée, avec un plancher pour les petites images.
+	int64_t  dww    = (int64_t)dw.max_x - dw.min_x + 1;
+	int64_t  dwh    = (int64_t)dw.max_y - dw.min_y + 1;
+	uint64_t dw_max = (uint64_t)ow * (uint64_t)oh * STUDIO_EXR_DW_FACTOR;
+	if (dw_max < STUDIO_EXR_DW_FLOOR) {
+		dw_max = STUDIO_EXR_DW_FLOOR;
+	}
+	if (dww < 1 || dwh < 1 || dww > 2 * STUDIO_EXR_MAX_DIM || dwh > 2 * STUDIO_EXR_MAX_DIM || (uint64_t)dww * (uint64_t)dwh > dw_max) {
+		r = EXR_ERROR_LIMIT_EXCEEDED;
+		set_message(err, err_size, "dataWindow %lldx%lld too large for a %lldx%lld image", (long long)dww, (long long)dwh,
+		            (long long)ow, (long long)oh);
+		goto done;
+	}
 	r = exr_reader_read_part(rd, pi, &part);
 	if (!EXR_OK(r)) {
 		set_message(err, err_size, "%s", exr_result_string(r));
