@@ -22,6 +22,10 @@ extern project_t *g_project;
 extern int        plugins_split_by; // paint/plugins/plugins.c : découpage lu par l'import FBX
 void              layers_set_object_mask(void);
 void              import_mesh_run(char *path, bool clear_layers, bool replace_existing, bool keep_camera);
+void              tab_meshes_sort_by_name(void);
+void              tab_meshes_sort_hierarchy(void);
+slot_layer_t     *layers_new_layer(bool clear, i32 position, slot_layer_t *parent);
+void              history_new_layer(void);
 
 #define DEFAULT_NAME "Atlas 1"
 #define MAX_NAME     64
@@ -364,6 +368,71 @@ static minic_val_t mn_studio_layer_set_atlas(minic_val_t *a, int n) {
 	return minic_val_int(studio_atlas_limit_layer((int)minic_arg_i(a, n, 0)) ? 1 : 0);
 }
 
+// Menu Edit > Sort de l'onglet Meshes : objets triés par nom (sous leurs parents). Pour les bancs.
+static minic_val_t mn_studio_meshes_sort(minic_val_t *a, int n) {
+	(void)a, (void)n;
+	tab_meshes_sort_by_name();
+	g_context->ddirty = 2;
+	return minic_val_int(1);
+}
+
+static mesh_object_t *find_object(const char *name) {
+	for (int i = 0; name != NULL && i < object_count(); ++i) {
+		mesh_object_t *o = g_project->_->paint_objects->buffer[i];
+		if (strcmp(o->base->name, name) == 0) {
+			return o;
+		}
+	}
+	return NULL;
+}
+
+// Champ Parent de l'onglet Meshes : objet child sous parent ("" : aucun), la liste est réordonnée. 1 si fait.
+static minic_val_t mn_studio_mesh_set_parent(minic_val_t *a, int n) {
+	mesh_object_t *child  = find_object(minic_arg_p(a, n, 0));
+	char          *name   = minic_arg_p(a, n, 1);
+	mesh_object_t *parent = name != NULL && name[0] != 0 ? find_object(name) : NULL;
+	if (child == NULL || child == parent || (name != NULL && name[0] != 0 && parent == NULL)) {
+		return minic_val_int(0);
+	}
+	object_set_parent(child->base, parent != NULL ? parent->base : NULL);
+	tab_meshes_sort_hierarchy();
+	g_project->mesh_parents = i32_array_create(0);
+	g_context->ddirty       = 2;
+	return minic_val_int(1);
+}
+
+// Nouveau calque de peinture, comme Layers > New > Paint Layer (limité comme le filtre de calques). 1 si fait.
+static minic_val_t mn_studio_layer_new(minic_val_t *a, int n) {
+	(void)a, (void)n;
+	gpu_texture_t *current = _draw_current;
+	bool           in_use  = gpu_in_use;
+	if (in_use) {
+		draw_end();
+	}
+	slot_layer_t *l = layers_new_layer(true, -1, NULL);
+	if (l != NULL) {
+		history_new_layer();
+	}
+	if (in_use) {
+		draw_begin(current, false, 0);
+	}
+	return minic_val_int(l != NULL ? 1 : 0);
+}
+
+// Masques d'objet des calques et filtre de calques : "Layer 1=0 Layer 2=5 filter=0". Pour les bancs.
+static minic_val_t mn_studio_layer_masks(minic_val_t *a, int n) {
+	(void)a, (void)n;
+	text_t                b      = {0};
+	slot_layer_t_array_t *layers = g_project->_->layers;
+	for (int i = 0; layers != NULL && i < (int)layers->length; ++i) {
+		put(&b, "%s=%d ", layers->buffer[i]->name, layers->buffer[i]->object_mask);
+	}
+	put(&b, "filter=%d", g_context->layer_filter);
+	char *s = string_copy(b.data != NULL ? b.data : "");
+	free(b.data);
+	return minic_val_ptr(s);
+}
+
 #endif
 
 void studio_atlas_init(void) {
@@ -373,5 +442,9 @@ void studio_atlas_init(void) {
 	minic_register("studio_import_mesh", "i(p,i)", mn_studio_import_mesh);
 	minic_register("studio_layer_set_atlas", "i(i)", mn_studio_layer_set_atlas);
 	minic_register("studio_layer_set_object", "i(i)", mn_studio_layer_set_object);
+	minic_register("studio_meshes_sort", "i()", mn_studio_meshes_sort);
+	minic_register("studio_mesh_set_parent", "i(p,p)", mn_studio_mesh_set_parent);
+	minic_register("studio_layer_new", "i()", mn_studio_layer_new);
+	minic_register("studio_layer_masks", "p()", mn_studio_layer_masks);
 #endif
 }

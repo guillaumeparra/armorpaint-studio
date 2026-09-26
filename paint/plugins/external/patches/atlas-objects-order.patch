@@ -1,0 +1,155 @@
+diff --git a/paint/sources/ui/tab_meshes.c b/paint/sources/ui/tab_meshes.c
+index 133ab884..19d94dc2 100644
+--- a/paint/sources/ui/tab_meshes.c
++++ b/paint/sources/ui/tab_meshes.c
+@@ -82,15 +82,47 @@ static void tab_meshes_collect_children(mesh_object_t_array_t *objects, mesh_obj
+ 	}
+ }
+ 
+-static i32 tab_meshes_remapped_mask(mesh_object_t **old_order, i32 length, i32 mask) {
+-	if (mask < 1 || mask > length) {
++// STUDIO-PATCH(atlas-objects-order): atlases used by the objects, in order of first use (project_get_used_atlases)
++static i32 tab_meshes_used_atlases(i32 *atlas_objects, i32 length, i32 *used) {
++	i32 count = 0;
++	for (i32 i = 0; i < length; ++i) {
++		i32 k = 0;
++		while (k < count && used[k] != atlas_objects[i]) {
++			++k;
++		}
++		if (k == count) {
++			used[count++] = atlas_objects[i];
++		}
++	}
++	return count;
++}
++
++// STUDIO-PATCH(atlas-objects-order): old_length objects in old_order, deleted ones included. A mask on a deleted object
++// or on an atlas no longer used becomes 0. Masks above the object count point into the used atlases (old_used before,
++// new_used after), which the reorder may shuffle.
++static i32 tab_meshes_remapped_mask(mesh_object_t **old_order, i32 old_length, i32 mask, i32 *old_used, i32 old_used_count, i32 *new_used, i32 new_used_count) {
++	i32 length = g_project->_->paint_objects->length;
++	if (mask < 1) {
+ 		return mask;
+ 	}
++	if (mask > old_length) {
++		i32 k = mask - old_length - 1;
++		if (old_used_count < 2 || k >= old_used_count) {
++			return mask - old_length + length;
++		}
++		for (i32 i = 0; new_used_count > 1 && i < new_used_count; ++i) {
++			if (new_used[i] == old_used[k]) {
++				return length + 1 + i;
++			}
++		}
++		return 0;
++	}
+ 	i32 index = array_index_of(g_project->_->paint_objects, old_order[mask - 1]);
+-	return index >= 0 ? index + 1 : mask;
++	return index >= 0 ? index + 1 : 0;
+ }
+ 
+-static void tab_meshes_sort_hierarchy_from(mesh_object_t **old_order) {
++// STUDIO-PATCH(atlas-objects-order): old_length > paint_objects->length when objects were removed from the list
++static void tab_meshes_sort_hierarchy_from(mesh_object_t **old_order, i32 old_length) {
+ 	mesh_object_t_array_t *objects = g_project->_->paint_objects;
+ 	i32                    length  = objects->length;
+ 	mesh_object_t        **sorted  = calloc(length, sizeof(mesh_object_t *));
+@@ -114,8 +146,8 @@ static void tab_meshes_sort_hierarchy_from(mesh_object_t **old_order) {
+ 	memcpy(objects->buffer, sorted, length * sizeof(mesh_object_t *));
+ 	free(sorted);
+ 
+-	bool changed = false;
+-	for (i32 i = 0; i < length; ++i) {
++	bool changed = old_length != length; // STUDIO-PATCH(atlas-objects-order)
++	for (i32 i = 0; i < length && !changed; ++i) {
+ 		if (old_order[i] != objects->buffer[i]) {
+ 			changed = true;
+ 			break;
+@@ -125,13 +157,36 @@ static void tab_meshes_sort_hierarchy_from(mesh_object_t **old_order) {
+ 		return;
+ 	}
+ 
++	// STUDIO-PATCH(atlas-objects-order): atlas_objects is indexed by object position, it follows the objects
++	i32_array_t *atlases        = g_project->atlas_objects;
++	i32          used_size      = (atlases != NULL && (i32)atlases->length > old_length ? (i32)atlases->length : old_length) + 1;
++	i32         *old_used       = malloc(used_size * sizeof(i32));
++	i32         *new_used       = malloc(used_size * sizeof(i32));
++	i32          old_used_count = atlases != NULL ? tab_meshes_used_atlases(atlases->buffer, atlases->length, old_used) : 0;
++	if (atlases != NULL && atlases->length == old_length) {
++		i32 *old_atlases = malloc(old_length * sizeof(i32));
++		memcpy(old_atlases, atlases->buffer, old_length * sizeof(i32));
++		for (i32 i = 0; i < length; ++i) {
++			i32 j = 0;
++			while (j < old_length && old_order[j] != objects->buffer[i]) {
++				++j;
++			}
++			atlases->buffer[i] = j < old_length ? old_atlases[j] : 0;
++		}
++		atlases->length = length;
++		free(old_atlases);
++	}
++	i32 new_used_count = atlases != NULL ? tab_meshes_used_atlases(atlases->buffer, atlases->length, new_used) : 0;
++
+ 	if (g_project->_->layers != NULL) {
+ 		for (i32 i = 0; i < g_project->_->layers->length; ++i) {
+ 			slot_layer_t *l = g_project->_->layers->buffer[i];
+-			l->object_mask  = tab_meshes_remapped_mask(old_order, length, l->object_mask);
++			l->object_mask  = tab_meshes_remapped_mask(old_order, old_length, l->object_mask, old_used, old_used_count, new_used, new_used_count);
+ 		}
+ 	}
+-	g_context->layer_filter = tab_meshes_remapped_mask(old_order, length, g_context->layer_filter);
++	g_context->layer_filter = tab_meshes_remapped_mask(old_order, old_length, g_context->layer_filter, old_used, old_used_count, new_used, new_used_count);
++	free(old_used);
++	free(new_used);
+ }
+ 
+ void tab_meshes_sort_hierarchy() {
+@@ -141,7 +196,7 @@ void tab_meshes_sort_hierarchy() {
+ 	}
+ 	mesh_object_t **old_order = malloc(objects->length * sizeof(mesh_object_t *));
+ 	memcpy(old_order, objects->buffer, objects->length * sizeof(mesh_object_t *));
+-	tab_meshes_sort_hierarchy_from(old_order);
++	tab_meshes_sort_hierarchy_from(old_order, objects->length); // STUDIO-PATCH(atlas-objects-order)
+ 	free(old_order);
+ }
+ 
+@@ -160,7 +215,7 @@ void tab_meshes_sort_by_name() {
+ 	memcpy(old_order, objects->buffer, objects->length * sizeof(mesh_object_t *));
+ 	// Siblings keep the sorted order when regrouped under parents
+ 	array_sort((any_array_t *)objects, &tab_meshes_sort_by_name_compare);
+-	tab_meshes_sort_hierarchy_from(old_order);
++	tab_meshes_sort_hierarchy_from(old_order, objects->length); // STUDIO-PATCH(atlas-objects-order)
+ 	free(old_order);
+ 	tab_timeline_sync();
+ 	ui_base_hwnds->buffer[TAB_AREA_SIDEBAR0]->redraws = 2;
+@@ -188,7 +243,7 @@ void tab_meshes_accept_mesh_drop(mesh_object_t *mesh) {
+ 	array_remove(objects, mesh);
+ 	i32 new_pos = dest > pos ? dest - 1 : dest;
+ 	array_insert(objects, new_pos, mesh);
+-	tab_meshes_sort_hierarchy_from(old_order);
++	tab_meshes_sort_hierarchy_from(old_order, objects->length); // STUDIO-PATCH(atlas-objects-order)
+ 	free(old_order);
+ 	tab_timeline_sync();
+ }
+@@ -461,6 +516,11 @@ void tab_meshes_draw_context_menu_delete(mesh_object_t *o) {
+ 		return;
+ 	}
+ 
++	// STUDIO-PATCH(atlas-objects-order): order before the removal, to drop the object's atlas and remap the masks
++	i32             old_length = g_project->_->paint_objects->length;
++	mesh_object_t **old_order  = malloc(old_length * sizeof(mesh_object_t *));
++	memcpy(old_order, g_project->_->paint_objects->buffer, old_length * sizeof(mesh_object_t *));
++
+ 	array_remove(g_project->_->paint_objects, o);
+ 	tab_timeline_on_mesh_deleted(mesh_name);
+ 
+@@ -471,7 +531,8 @@ void tab_meshes_draw_context_menu_delete(mesh_object_t *o) {
+ 	while (o->base->children->length > 0) {
+ 		tab_meshes_reparent_keep_world(o->base->children->buffer[0], new_root);
+ 	}
+-	tab_meshes_sort_hierarchy();
++	tab_meshes_sort_hierarchy_from(old_order, old_length); // STUDIO-PATCH(atlas-objects-order)
++	free(old_order);
+ 
+ 	sys_notify_on_next_frame(tab_meshes_draw_context_menu_delete_next_frame, o);
+ }
