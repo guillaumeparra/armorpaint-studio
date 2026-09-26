@@ -1,0 +1,24 @@
+diff --git a/paint/sources/args.c b/paint/sources/args.c
+index 4ecaa85a..c2a72ba2 100644
+--- a/paint/sources/args.c
++++ b/paint/sources/args.c
+@@ -103,6 +103,10 @@ void args_parse() {
+ 
+ void args_run_export_queue(void *_) {
+ 	export_texture_run(args_export_textures_path, false);
++	// STUDIO-PATCH(background-export): quit once the deferred export is done, see external/PATCHES.md
++	if (args_background && !args_api && !args_script) {
++		iron_stop();
++	}
+ }
+ 
+ void args_run_api(void *_) {
+@@ -219,7 +223,7 @@ void args_run_on_next_frame(void *_) {
+ 	else if (args_script) {
+ 		sys_notify_on_next_frame(&args_run_script, NULL);
+ 	}
+-	else if (args_background) {
++	else if (args_background && !args_export_textures) { // STUDIO-PATCH(background-export)
+ 		iron_stop();
+ 	}
+ }
