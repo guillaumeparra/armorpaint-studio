@@ -1,0 +1,12 @@
+coverage:
+  status:
+    project:
+      default:
+        # basic
+        threshold: 0.5%
+        base: auto
+        only_pulls: true
+    patch:
+      default:
+        # advisory only: report diff coverage without failing the check
+        informational: true

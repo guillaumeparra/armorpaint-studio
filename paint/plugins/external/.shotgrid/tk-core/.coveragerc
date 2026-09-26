@@ -1,0 +1,57 @@
+# Copyright (c) 2017 Shotgun Software Inc.
+#
+# CONFIDENTIAL AND PROPRIETARY
+#
+# This work is provided "AS IS" and subject to the Shotgun Pipeline Toolkit
+# Source Code License included in this distribution package. See LICENSE.
+# By accessing, using, copying or modifying this work you indicate your
+# agreement to the Shotgun Pipeline Toolkit Source Code License. All rights
+# not expressly granted therein are reserved by Shotgun Software Inc.
+#
+# coverage configuration - used by https://coveralls.io/ integration
+#
+#
+[run]
+# Get coverage from tank and nothing else.
+source=tank
+omit=
+    # We can't unit test our uis, so we're not going to put them inside the coverage
+    *tank/authentication/ui/*
+    *tank/authentication/sso_saml2/*
+    *tank/platform/qt5/*
+    *tank/bootstrap/manager.py
+    *tank/platform/engine.py
+    *tank/flowam/create.py
+    *tank/flowam/host.py
+    *tank/flowam/open.py
+    *tank/flowam/utils.py
+
+
+[paths]
+# This allows to merge coverage from different disk locations. This is
+# needed because when the integration tests run the core is copied
+# in many different locations and tank commands are run with them,
+# so we need to tell coverage how to match files with different file
+# paths.
+#
+# The first source needs to be a real file path, which in our case
+# is the path we get when we run the tests.
+# Then, *python/tank is used is to match coverage for all locations
+# that do not start with python/tank
+source=
+    python/tank
+    */python/tank
+
+[report]
+omit =
+    *tank/authentication/ui/*
+    *tank/authentication/sso_saml2/*
+    *tank/platform/qt5/*
+    *tank/bootstrap/manager.py
+    *tank/flowam/create.py
+    *tank/flowam/host.py
+    *tank/flowam/open.py
+    *tank/flowam/utils.py
+    *tank/platform/engine.py
+exclude_lines =
+    raise NotImplementedError

@@ -23,6 +23,9 @@ Ce dossier est compilé dans ArmorPaint par le hook upstream `paint/plugins/exte
   `external-project`. Le code studio lui-même ne peut pas en ajouter.
 - `.ocio/` : sources du shim C d'OpenColorIO (`studio_ocio_lib.cpp`, projet CMake), construit par
   `tools/build_ocio.sh` ; voir « Gestion couleur OCIO ».
+- `.shotgrid/` : sources de Toolkit (tk-core, Workfiles et ses frameworks) pour la démo ShotGrid et les tests ;
+  le venv PySide6 y est créé par `tools/setup_shotgrid.sh`, hors de git.
+- `tools/armorpaint.sh` : lance la version studio (build compris) ; `--shotgrid-demo` pour le site simulé.
 
 Modules, un par lot (voir `ARMORPAINT_LOTS.md` à la racine d'armorpaint) :
 
@@ -43,6 +46,14 @@ Modules, un par lot (voir `ARMORPAINT_LOTS.md` à la racine d'armorpaint) :
 
 Build : `../base/make --compile` depuis `paint/`. Le log de démarrage affiche `studio: external <version>
 loaded`, puis une ligne par module.
+
+Lancer la version studio, toujours à jour (construit libstudio_ocio si elle manque, recompile, lance le build
+Release détaché du terminal ; journal dans `$TMPDIR/armorpaint-studio.log`) :
+
+```sh
+tools/armorpaint.sh [projet.arm]
+tools/armorpaint.sh --shotgrid-demo [dossier]   # sur le site ShotGrid simulé, voir « Workfiles et menu ShotGrid (C3) »
+```
 
 ## Variables d'environnement
 
@@ -275,7 +286,9 @@ STUDIO_TEST_TK_CORE=<tk-core> STUDIO_TEST_TK_APPS=<clones> STUDIO_SG_PYTHON=<pyt
 ```
 
 (`STUDIO_TEST_TK_APPS` : tk-multi-workfiles2, tk-framework-shotgunutils et tk-framework-qtwidgets clonés depuis
-github.com/shotgunsoftware ; voir l'en-tête du script.)
+github.com/shotgunsoftware ; voir l'en-tête du script.) Ces sources sont versionnées dans `.shotgrid/` (tags dans
+`.shotgrid/README.md`) : `tools/armorpaint.sh --shotgrid-demo` lance la démo avec elles, et crée au besoin le python
+PySide6 (`.shotgrid/venv`, propre à la machine, par `tools/setup_shotgrid.sh`).
 
 ## Nommage des exports (B3)
 

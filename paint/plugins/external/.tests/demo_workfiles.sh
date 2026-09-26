@@ -64,7 +64,7 @@ int main() {
 	return 0;
 }
 EOF
-	"$APP" --background --script "$W/seed.c" 2>&1 | grep "seed" || true
+	"$APP" --background --script "$W/seed.c" -ApplePersistenceIgnoreState YES 2>&1 | grep "seed" || true
 }
 
 if [ ! -f "$W/.seeded" ]; then
@@ -79,4 +79,4 @@ fi
 echo "storage:"
 (cd "$W/storage" && find . -name "*.arm" | sort)
 
-STUDIO_SG_WORKFILES_ON_START=1 exec "$APP"
+STUDIO_SG_WORKFILES_ON_START=1 exec "$APP" -ApplePersistenceIgnoreState YES
