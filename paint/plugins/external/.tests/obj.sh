@@ -5,7 +5,8 @@
 # Usage : .tests/obj.sh [dossier de travail]     FUZZ=<n> : nombre de mutations (défaut 1000, ~3 min)
 #         STUDIO_ROOT=<armorpaint> pour tester une autre copie d'armorpaint
 #
-# 1. valid/  : l'arbre courant produit, part par part, octet pour octet, la même sortie que l'upstream (branche main).
+# 1. valid/  : l'arbre courant produit, part par part, octet pour octet, la même sortie que l'upstream (branche `upstream`).
+#    udim/   : une grille UDIM propre (pas de triangle à cheval) aussi ; les cas UDIM d'obj_udim.py (udim-import).
 # 2. shared/ : un OBJ dont les faces utilisent les v/vt/vn d'un objet précédent se lit comme sa version à données
 #    séparées (lue par l'upstream).
 # 3. bad/    : fichiers malformés, aucune erreur ASan/UBSan.
@@ -13,7 +14,7 @@
 #    sans exposant, 20 000 jetons décodés à l'identique de l'upstream (obj_float_test.c).
 # 5. exp/    : un OBJ écrit en notation scientifique se lit comme sa version décimale (lue par l'upstream).
 # 6. fuzz    : mutations de valid/, shared/ et exp/, lues par l'arbre courant et par l'upstream ; échec si l'arbre
-#    courant plante ou signale un UB (hors float-cast-overflow, voir plus bas).
+#    courant plante ou signale un UB (hors float-cast-overflow, voir plus bas). L'arbre courant les lit aussi en udim.
 # Le dossier .tests/ commence par un point : amake ne le compile pas dans l'app.
 
 set -e
@@ -32,13 +33,14 @@ CFLAGS="-std=c11 -O1 -g -w -fno-omit-frame-pointer -I$BASE"
 # float-cast-overflow : le packing int16 des positions / normales / uvs (code upstream, inchangé) convertit sans
 # borne ; sur arm64 la conversion sature. Ce banc teste les indices et les lectures, pas ce packing.
 # shellcheck disable=SC2086
-cc $CFLAGS -fsanitize=address,undefined -fno-sanitize=float-cast-overflow "$T/obj_test.c" "$BASE/iron_obj.c" $LIBS -o "$W/obj_test" -lm
+cc $CFLAGS -fsanitize=address,undefined -fno-sanitize=float-cast-overflow "$T/obj_test.c" "$BASE/iron_obj.c" "$BASE/iron_udim.c" $LIBS -o "$W/obj_test" -lm
 # shellcheck disable=SC2086
 cc $CFLAGS -fsanitize=address "$T/obj_test.c" "$W/up/iron_obj.c" $LIBS -o "$W/obj_test_up" -lm
 # shellcheck disable=SC2086
-cc $CFLAGS -fsanitize=address,undefined "$T/obj_float_test.c" $LIBS -o "$W/obj_float_test" -lm
+cc $CFLAGS -fsanitize=address,undefined "$T/obj_float_test.c" "$BASE/iron_udim.c" $LIBS -o "$W/obj_float_test" -lm
 # shellcheck disable=SC2086
-cc $CFLAGS -I"$W/up" -fsanitize=address "$T/obj_float_test.c" $LIBS -o "$W/obj_float_test_up" -lm
+# -I"$W/up" en tête : l'#include "iron_obj.c" doit trouver la copie upstream avant celle de base/sources
+cc -I"$W/up" $CFLAGS -fsanitize=address "$T/obj_float_test.c" $LIBS -o "$W/obj_float_test_up" -lm
 
 echo "== corpus"
 python3 "$T/obj_gen.py" corpus "$W"
@@ -54,9 +56,16 @@ for f in "$W"/valid/*.obj; do
 		fi
 	done
 done
-"$W/obj_test_up" "$W/valid/udim_grid.obj" o udim > "$W/up.txt" 2>&1
-"$W/obj_test" "$W/valid/udim_grid.obj" o udim > "$W/new.txt" 2>&1
-cmp -s "$W/up.txt" "$W/new.txt" || { echo "  ❌ udim_grid (udim)"; fail=1; }
+
+echo "== udim/ : grille UDIM propre identique à l'upstream, cas UDIM (udim-import, obj_udim.py)"
+"$W/obj_test_up" "$W/udim/udim_clean.obj" o udim > "$W/up.txt" 2>&1
+"$W/obj_test" "$W/udim/udim_clean.obj" o udim > "$W/new.txt" 2> "$W/err.txt" || true
+if cmp -s "$W/up.txt" "$W/new.txt" && [ ! -s "$W/err.txt" ]; then
+	echo "  ✅ udim_clean"
+else
+	echo "  ❌ udim_clean : $W/new.txt / $W/up.txt"; fail=1
+fi
+python3 "$T/obj_udim.py" "$W/udim" "$W/obj_test" "$W/obj_test_up" || fail=1
 
 echo "== shared/ : données d'objets précédents = version à données séparées"
 for f in "$W"/shared/*.ref.obj; do

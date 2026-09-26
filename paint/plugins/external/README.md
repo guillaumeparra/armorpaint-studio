@@ -517,12 +517,19 @@ les calques partagés vont dans chaque jeu. Sans calque propre à un objet, Per 
 matériau est alors le nom de l'objet : `<object>` (ArmorPaint ne garde pas d'affectation de shader par objet). Autre
 voie : un jeu de textures par matériau (Texture sets), export Visible, `<atlas>`.
 
-**UDIM.** À l'import, « Split By: UDIM Tile » fait un objet par tuile (`cube.1001`…). ArmorPaint peint toutes les
-tuiles dans chaque texture de calque, rangées en grille (côté : racine carrée du nombre de tuiles arrondie au-dessus,
-8 au plus, soit 64 tuiles) : une tuile a la résolution du projet divisée par ce côté (projet 4096, 6 tuiles → grille
-3 × 3 → 1365 pixels par tuile). Per UDIM Tile découpe la tuile et la remet à la résolution de la map : les fichiers
-ont la taille demandée (`<resolution>`), pas plus de détail. Pour des tuiles à 4096, un projet à 3 × 4096. En
-Visible, un maillage UDIM donne la grille entière (avertissement du préflight).
+**UDIM.** À l'import, « Split By: UDIM Tile » fait un objet par objet du fichier et par tuile (`body.1001`,
+`body.1002`…, patches udim-import et fbx-split). Un triangle à cheval sur deux tuiles est coupé le long de la frontière.
+Un fichier dont une uv sort des tuiles 1001-1990 (uv négative, u ≥ 10) ou qui a plus de 64 tuiles est refusé avec un
+message, et le projet garde son maillage. Un objet sans uv est importé sans tuile, avec un message : les calques UDIM
+ne le peignent pas. ArmorPaint peint toutes les tuiles dans chaque texture de calque, rangées en grille (côté : racine
+carrée du nombre de tuiles arrondie au-dessus, 8 au plus, soit 64 tuiles) : une tuile a la résolution du projet divisée
+par ce côté (projet 4096, 6 tuiles → grille 3 × 3 → 1365 pixels par tuile). Après l'import, la barre d'état le dit,
+avec la résolution de projet qu'il faut pour 2048 et 4096 pixels par tuile et la mémoire d'un calque
+(`studio_udim.c` ; dans la console seule si l'import a affiché un avertissement). Per UDIM Tile découpe la tuile et la
+remet à la résolution de la map : les fichiers ont la taille demandée (`<resolution>`), pas plus de détail. En
+Visible, un maillage UDIM donne la grille entière (avertissement du préflight). Au-delà de 64 tuiles (objets
+`nom.1xxx` ajoutés ou renommés), les suivantes ne sont ni peintes ni exportées : message, et le préflight bloque
+l'export studio (patch udim-tile-limit).
 
 L'onglet Presets (éditeur de presets upstream) et « Pack into project » de la boîte d'export ne sont plus
 accessibles ; l'onglet Atlases est remplacé par la section Texture sets. La résolution du projet (celle des calques) ne change pas : chaque map est mise à sa résolution
@@ -558,6 +565,8 @@ char *studio_set_atlases(char *json);                // {"names": [...], "object
 int   studio_layer_set_atlas(int atlas);             // limite le calque courant à un jeu ; -1 : partagé
 int   studio_layer_set_object(int index);            // limite le calque courant à un objet (ordre de studio_atlases) ; -1 : partagé
 int   studio_import_mesh(char *path, int split);     // remplace le maillage ; split : 0 objet, 1 matériau, 2 tuile UDIM ; fini au retour
+char *studio_dialog_title(void);                     // titre de la boîte ouverte (« Unwrap Mesh »...), "" sans boîte
+char *studio_status_message(void);                   // message de la barre d'état, "" s'il est effacé
 void  studio_export_window_show(void);               // ouvre la fenêtre d'export, ou la ramène devant
 int   studio_export_window_is_open(void);
 ```
@@ -721,9 +730,11 @@ char *studio_ocio_view_probe(int argb);          // diagnostic : 0xAARRGGBB pass
 ```sh
 .tests/run.sh [dossier de travail]     # EXR (B1) ; FUZZ=<n> pour le nombre de mutations
 .tests/proc.sh [dossier de travail]    # processus (C1)
-.tests/obj.sh [dossier de travail]     # import OBJ (patch obj-global-indices) ; FUZZ=<n> pour le nombre de mutations
+.tests/obj.sh [dossier de travail]     # import OBJ (patches obj-global-indices, obj-float-exponent, udim-import) ; FUZZ=<n> pour le nombre de mutations
+.tests/fbx.sh [dossier de travail]     # import FBX (patch fbx-split) : splits = upstream, UDIM, matériaux, fuzz ; FUZZ=<n>
+.tests/udim_app.sh [dossier]           # UDIM dans l'app (lot D0) : import OBJ/FBX, refus, ajout, 70 tuiles (atlas, peinture, export), conseil de résolution
 STUDIO_TEST_TK_CORE=<tk-core> .tests/sg.sh [dossier de travail]   # ShotGrid (C2), noms des exports (B3) ; STUDIO_TEST_TK_APPS pour le moteur (C3)
-.tests/export.sh [dossier de travail]  # export studio (B2, B4, B5) hors app : encodeurs relus par libpng/libtiff, expressions, presets, préflight ; FUZZ=<n>
+.tests/export.sh [dossier de travail]  # export studio (B2, B4, B5) hors app : encodeurs relus par libpng/libtiff, expressions, presets, préflight, conseil de résolution UDIM ; FUZZ=<n>
 .tests/export_app.sh [dossier]         # export studio dans l'app : scripts, --export-textures, pixels = upstream, manifeste, atomicité
 .tests/ocio.sh [dossier de travail]    # OCIO (A1) hors app : ABI, module, références PyOpenColorIO, threads, erreurs ; OCIO_TEST_CONFIGS=<configs>
 .tests/ocio_app.sh [dossier]           # OCIO dans l'app : configuration par défaut, $OCIO, $OCIO invalide, API de scripting

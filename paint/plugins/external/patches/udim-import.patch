@@ -1,0 +1,750 @@
+diff --git a/base/sources/iron_obj.c b/base/sources/iron_obj.c
+index b2ad7a65..c778001e 100644
+--- a/base/sources/iron_obj.c
++++ b/base/sources/iron_obj.c
+@@ -229,16 +229,129 @@ static void next_line() {
+ 	}
+ }
+ 
+-static int get_tile(int i1, int i2, int i3, i32_array_t *uv_indices, int tiles_u) {
+-	float u1     = uv_temp.buffer[uv_indices->buffer[i1] * 2];
+-	float v1     = uv_temp.buffer[uv_indices->buffer[i1] * 2 + 1];
+-	float u2     = uv_temp.buffer[uv_indices->buffer[i2] * 2];
+-	float v2     = uv_temp.buffer[uv_indices->buffer[i2] * 2 + 1];
+-	float u3     = uv_temp.buffer[uv_indices->buffer[i3] * 2];
+-	float v3     = uv_temp.buffer[uv_indices->buffer[i3] * 2 + 1];
+-	int   tile_u = (int)((u1 + u2 + u3) / 3);
+-	int   tile_v = (int)((v1 + v2 + v3) / 3);
+-	return tile_u + tile_v * tiles_u;
++// STUDIO-PATCH(udim-import): the tile of a triangle was the one of its uv barycenter, cast with (int): negative uvs
++// indexed num[] before its start, u >= 10 ran into the next row, and a triangle over two tiles was folded into one.
++// Now each triangle is cut along the tile borders (iron_udim.c), its corners get uvs local to their tile, and a uv
++// out of the tiles 1001-1990 is counted in obj_udim_invalid (the importer refuses the file). Include and globals here,
++// out of the lines of obj-global-indices and obj-float-exponent at the top of the file (context of their .patch).
++#include "iron_udim.h"
++
++int   obj_udim_invalid = 0;
++float obj_udim_invalid_uv[2];
++int   obj_udim_cut = 0;
++
++typedef struct {
++	i32_array_t  pos; // Corners after the cut, into pos_temp / uv_temp / nor_temp
++	i32_array_t  uv;
++	i32_array_t  nor;
++	i32_array_t *tiles; // Tile u + v * UDIM_TILES_U of each triangle
++	bool         has_nor;
++} obj_udim_t;
++
++static void obj_udim_push_uv(obj_udim_t *s, float u, float v) {
++	i32_array_push(&s->uv, uv_temp.length / 2);
++	f32_array_push(&uv_temp, u);
++	f32_array_push(&uv_temp, v);
++}
++
++// A part of a cut triangle: new corners, appended to the temp arrays until the part is packed
++static void obj_udim_emit(int tu, int tv, const udim_vert_t tri[3], void *user) {
++	obj_udim_t *s = user;
++	for (int k = 0; k < 3; ++k) {
++		i32_array_push(&s->pos, pos_temp.length / 3);
++		f32_array_push(&pos_temp, tri[k].pos[0]);
++		f32_array_push(&pos_temp, tri[k].pos[1]);
++		f32_array_push(&pos_temp, tri[k].pos[2]);
++		obj_udim_push_uv(s, tri[k].uv[0], tri[k].uv[1]);
++		if (s->has_nor) {
++			i32_array_push(&s->nor, nor_temp.length / 3);
++			f32_array_push(&nor_temp, tri[k].nor[0]);
++			f32_array_push(&nor_temp, tri[k].nor[1]);
++			f32_array_push(&nor_temp, tri[k].nor[2]);
++		}
++	}
++	i32_array_push(s->tiles, tu + tv * UDIM_TILES_U);
++}
++
++static void obj_udim_swap(i32_array_t *a, i32_array_t *b) {
++	i32_array_t t = *a;
++	*a            = *b;
++	*b            = t;
++}
++
++static void obj_udim_cut_triangles(i32_array_t *pos_indices, i32_array_t *uv_indices, i32_array_t *nor_indices, i32_array_t *tiles) {
++	obj_udim_t s = {.tiles = tiles, .has_nor = nor_indices->length > 0};
++	for (int i = 0; i + 2 < pos_indices->length; i += 3) {
++		udim_vert_t tri[3] = {0};
++		for (int k = 0; k < 3; ++k) {
++			memcpy(tri[k].pos, &pos_temp.buffer[pos_indices->buffer[i + k] * 3], sizeof(float) * 3);
++			memcpy(tri[k].uv, &uv_temp.buffer[uv_indices->buffer[i + k] * 2], sizeof(float) * 2);
++			if (s.has_nor) {
++				memcpy(tri[k].nor, &nor_temp.buffer[nor_indices->buffer[i + k] * 3], sizeof(float) * 3);
++			}
++		}
++		int tu0, tv0, tu1, tv1;
++		if (!udim_triangle_tiles(tri[0].uv, tri[1].uv, tri[2].uv, &tu0, &tv0, &tu1, &tv1)) {
++			if (obj_udim_invalid++ == 0) {
++				int k                  = udim_uv_valid(tri[0].uv[0], tri[0].uv[1]) ? udim_uv_valid(tri[1].uv[0], tri[1].uv[1]) ? 2 : 1 : 0;
++				obj_udim_invalid_uv[0] = tri[k].uv[0];
++				obj_udim_invalid_uv[1] = tri[k].uv[1];
++			}
++			continue;
++		}
++		if (tu0 == tu1 && tv0 == tv1) { // In one tile: same positions and normals, uvs made local
++			for (int k = 0; k < 3; ++k) {
++				i32_array_push(&s.pos, pos_indices->buffer[i + k]);
++				if (s.has_nor) {
++					i32_array_push(&s.nor, nor_indices->buffer[i + k]);
++				}
++				float u = tri[k].uv[0] - tu0;
++				float v = tri[k].uv[1] - tv0;
++				obj_udim_push_uv(&s, u < 0.0f ? 0.0f : u > 1.0f ? 1.0f : u, v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v);
++			}
++			i32_array_push(tiles, tu0 + tv0 * UDIM_TILES_U);
++		}
++		else if (udim_split_triangle(tri, obj_udim_emit, &s) > 1) {
++			obj_udim_cut++;
++		}
++	}
++	obj_udim_swap(pos_indices, &s.pos);
++	obj_udim_swap(uv_indices, &s.uv);
++	obj_udim_swap(nor_indices, &s.nor);
++	array_free(&s.pos);
++	array_free(&s.uv);
++	array_free(&s.nor);
++}
++
++// Indices of each tile, in a udims_u x udims_v grid as upstream. The corners are not shared (inda is the identity).
++static void obj_udim_tiles(i32_array_t *tiles) {
++	int tiles_u = 1;
++	int tiles_v = 1;
++	for (int i = 0; i < tiles->length; ++i) {
++		int tu  = tiles->buffer[i] % UDIM_TILES_U;
++		int tv  = tiles->buffer[i] / UDIM_TILES_U;
++		tiles_u = tu + 1 > tiles_u ? tu + 1 : tiles_u;
++		tiles_v = tv + 1 > tiles_v ? tv + 1 : tiles_v;
++	}
++	uint32_t *num = calloc(tiles_u * tiles_v, sizeof(uint32_t));
++	for (int i = 0; i < tiles->length; ++i) {
++		tiles->buffer[i] = tiles->buffer[i] % UDIM_TILES_U + tiles->buffer[i] / UDIM_TILES_U * tiles_u;
++		num[tiles->buffer[i]] += 3;
++	}
++	part->udims   = any_array_create(tiles_u * tiles_v);
++	part->udims_u = tiles_u;
++	part->udims_v = tiles_v;
++	for (int i = 0; i < tiles_u * tiles_v; ++i) {
++		part->udims->buffer[i] = u32_array_create(num[i]);
++		num[i]                 = 0;
++	}
++	for (int i = 0; i < tiles->length; ++i) {
++		u32_array_t *a = part->udims->buffer[tiles->buffer[i]];
++		for (int k = 0; k < 3; ++k) {
++			a->buffer[num[tiles->buffer[i]]++] = i * 3 + k;
++		}
++	}
++	free(num);
+ }
+ 
+ static bool pnpoly(float v0x, float v0y, float v1x, float v1y, float v2x, float v2y, float px, float py) {
+@@ -275,7 +388,12 @@ raw_mesh_t *obj_parse(buffer_t *file_bytes, char split_code, uint64_t start_pos,
+ 	part->pos       = start_pos;
+ 	part->udims_u   = 1;
+ 	part->udims_v   = 1;
+-	part->name      = string_copy(str);
++	if (start_pos == 0) { // STUDIO-PATCH(udim-import): no name left over from the previous file for a first object without "o"
++		str[0] = '\0';
++	}
++	obj_udim_invalid = 0; // STUDIO-PATCH(udim-import): counted per part
++	obj_udim_cut     = 0;
++	part->name       = string_copy(str);
+ 
+ 	i32_array_t pos_indices = {0};
+ 	i32_array_t uv_indices  = {0};
+@@ -438,9 +556,7 @@ raw_mesh_t *obj_parse(buffer_t *file_bytes, char split_code, uint64_t start_pos,
+ 				part->pos += 5; // "u"semtl
+ 			}
+ 			skip_whitespace();
+-			if (!udim) {
+-				reading_object = true;
+-			}
++			reading_object = true; // STUDIO-PATCH(udim-import): udim tiles are split per object too
+ 			free(part->name);
+ 			part->name = string_copy(read_string());
+ 		}
+@@ -494,6 +610,15 @@ raw_mesh_t *obj_parse(buffer_t *file_bytes, char split_code, uint64_t start_pos,
+ 	float inv = 32767 * (1 / part->scale_pos);
+ 
+ 	part->posa         = calloc(sizeof(i16_array_t), 1);
++	// STUDIO-PATCH(udim-import): corners cut along the tile borders, appended to the temp arrays for the packing below.
++	// Cut after the scale: the new corners lie between the old ones. Here, out of the lines of obj-global-indices.
++	i32_array_t udim_tiles   = {0};
++	uint32_t    udim_pos_len = pos_temp.length;
++	uint32_t    udim_uv_len  = uv_temp.length;
++	uint32_t    udim_nor_len = nor_temp.length;
++	if (udim && uv_indices.length > 0) {
++		obj_udim_cut_triangles(&pos_indices, &uv_indices, &nor_indices, &udim_tiles);
++	}
+ 	part->posa->length = part->posa->capacity = pos_indices.length * 4;
+ 	part->posa->buffer                        = malloc(part->posa->capacity * sizeof(int16_t));
+ 
+@@ -550,66 +675,8 @@ raw_mesh_t *obj_parse(buffer_t *file_bytes, char split_code, uint64_t start_pos,
+ 	}
+ 
+ 	if (uv_indices.length > 0) {
+-		if (udim) {
+-			// Find number of tiles
+-			int tiles_u = 1;
+-			int tiles_v = 1;
+-			for (int i = 0; i < (int)(uv_temp.length / 2); ++i) {
+-				while (uv_temp.buffer[i * 2] > tiles_u)
+-					tiles_u++;
+-				while (uv_temp.buffer[i * 2 + 1] > tiles_v)
+-					tiles_v++;
+-			}
+-
+-			// Amount of indices pre tile
+-			uint32_t *num = (uint32_t *)malloc(tiles_u * tiles_v * sizeof(uint32_t));
+-			memset(num, 0, tiles_u * tiles_v * sizeof(uint32_t));
+-			for (int i = 0; i < (int)(inda_length / 3); ++i) {
+-				int tile = get_tile(part->inda->buffer[i * 3], part->inda->buffer[i * 3 + 1], part->inda->buffer[i * 3 + 2], &uv_indices, tiles_u);
+-				num[tile] += 3;
+-			}
+-
+-			// Split indices per tile
+-			part->udims   = any_array_create(tiles_u * tiles_v);
+-			part->udims_u = tiles_u;
+-			part->udims_v = tiles_v;
+-			for (int i = 0; i < tiles_u * tiles_v; ++i) {
+-				part->udims->buffer[i] = u32_array_create(num[i]);
+-				num[i]                 = 0;
+-			}
+-
+-			for (int i = 0; i < (int)(inda_length / 3); ++i) {
+-				int          i1        = part->inda->buffer[i * 3];
+-				int          i2        = part->inda->buffer[i * 3 + 1];
+-				int          i3        = part->inda->buffer[i * 3 + 2];
+-				int          tile      = get_tile(i1, i2, i3, &uv_indices, tiles_u);
+-				u32_array_t *a         = part->udims->buffer[tile];
+-				a->buffer[num[tile]++] = i1;
+-				a->buffer[num[tile]++] = i2;
+-				a->buffer[num[tile]++] = i3;
+-			}
+-
+-			// Normalize uvs to 0-1 range
+-			int16_t *uvtiles = (int16_t *)malloc(uv_temp.length * sizeof(int16_t));
+-			for (int i = 0; i < (int)(inda_length / 3); ++i) { // TODO: merge loops
+-				int i1                                 = part->inda->buffer[i * 3];
+-				int i2                                 = part->inda->buffer[i * 3 + 1];
+-				int i3                                 = part->inda->buffer[i * 3 + 2];
+-				int tile                               = get_tile(i1, i2, i3, &uv_indices, tiles_u);
+-				int tile_u                             = tile % tiles_u;
+-				int tile_v                             = (int)(tile / tiles_u);
+-				uvtiles[uv_indices.buffer[i1] * 2]     = tile_u;
+-				uvtiles[uv_indices.buffer[i1] * 2 + 1] = tile_v;
+-				uvtiles[uv_indices.buffer[i2] * 2]     = tile_u;
+-				uvtiles[uv_indices.buffer[i2] * 2 + 1] = tile_v;
+-				uvtiles[uv_indices.buffer[i3] * 2]     = tile_u;
+-				uvtiles[uv_indices.buffer[i3] * 2 + 1] = tile_v;
+-			}
+-			for (int i = 0; i < uv_temp.length; ++i) {
+-				uv_temp.buffer[i] -= uvtiles[i];
+-			}
+-			free(uvtiles);
+-			free(num);
++		if (udim) { // STUDIO-PATCH(udim-import): see obj_udim_cut_triangles
++			obj_udim_tiles(&udim_tiles);
+ 		}
+ 
+ 		part->texa         = calloc(sizeof(i16_array_t), 1);
+@@ -630,6 +697,12 @@ raw_mesh_t *obj_parse(buffer_t *file_bytes, char split_code, uint64_t start_pos,
+ 		}
+ 	}
+ 
++	// STUDIO-PATCH(udim-import): the cut corners are dropped, the next part reads the file's own v / vt / vn
++	array_free(&udim_tiles);
++	pos_temp.length = udim_pos_len;
++	uv_temp.length  = udim_uv_len;
++	nor_temp.length = udim_nor_len;
++
+ 	bytes = NULL;
+ 	if (!part->has_next) {
+ 		array_free(&pos_temp);
+diff --git a/base/sources/iron_obj.h b/base/sources/iron_obj.h
+index a530945e..70b9cdd2 100644
+--- a/base/sources/iron_obj.h
++++ b/base/sources/iron_obj.h
+@@ -28,6 +28,10 @@ typedef struct raw_mesh {
+ } raw_mesh_t;
+ 
+ extern bool obj_parse_y_to_z_up;
++// STUDIO-PATCH(udim-import): udim split of the last obj_parse call, see paint/plugins/external/PATCHES.md
++extern int   obj_udim_invalid;       // Triangles left out: a uv out of the tiles 1001-1990 (negative, u > 10, v > 99, nan)
++extern float obj_udim_invalid_uv[2]; // The first of these uvs
++extern int   obj_udim_cut;           // Triangles cut along a tile border
+ 
+ raw_mesh_t *obj_parse(buffer_t *file_bytes, char split_code, uint64_t start_pos, bool udim);
+ void        obj_destroy(raw_mesh_t *part);
+diff --git a/base/sources/iron_udim.c b/base/sources/iron_udim.c
+new file mode 100644
+index 00000000..28931f97
+--- /dev/null
++++ b/base/sources/iron_udim.c
+@@ -0,0 +1,132 @@
++// STUDIO-PATCH(udim-import): see iron_udim.h and paint/plugins/external/PATCHES.md
++
++#include "iron_udim.h"
++
++#include <math.h>
++#include <string.h>
++
++#define UDIM_VERT_FLOATS (int)(sizeof(udim_vert_t) / sizeof(float))
++#define UDIM_POLY_MAX    16 // A triangle clipped by the 4 sides of a tile has 7 vertices at most
++
++int udim_tile_id(int tu, int tv) {
++	return 1001 + tu + tv * 10;
++}
++
++bool udim_uv_valid(float u, float v) {
++	// Written so that nan fails every test
++	return u >= -UDIM_EPS && u <= UDIM_TILES_U + UDIM_EPS && v >= -UDIM_EPS && v <= UDIM_TILES_V + UDIM_EPS;
++}
++
++// Tiles [t0, t1] covered by the interval [lo, hi]: a bound within UDIM_EPS of a border stays in the inner tile
++static void udim_range(float lo, float hi, int max, int *t0, int *t1) {
++	int a = (int)floorf(lo + UDIM_EPS);
++	int b = (int)ceilf(hi - UDIM_EPS) - 1;
++	if (b < a) { // Interval narrower than the tolerance, on a border: tile of its middle
++		a = b = (int)floorf((lo + hi) * 0.5f);
++	}
++	*t0 = a < 0 ? 0 : a >= max ? max - 1 : a;
++	*t1 = b < 0 ? 0 : b >= max ? max - 1 : b;
++}
++
++bool udim_triangle_tiles(const float *uv0, const float *uv1, const float *uv2, int *tu0, int *tv0, int *tu1, int *tv1) {
++	if (!udim_uv_valid(uv0[0], uv0[1]) || !udim_uv_valid(uv1[0], uv1[1]) || !udim_uv_valid(uv2[0], uv2[1])) {
++		return false;
++	}
++	udim_range(fminf(uv0[0], fminf(uv1[0], uv2[0])), fmaxf(uv0[0], fmaxf(uv1[0], uv2[0])), UDIM_TILES_U, tu0, tu1);
++	udim_range(fminf(uv0[1], fminf(uv1[1], uv2[1])), fmaxf(uv0[1], fmaxf(uv1[1], uv2[1])), UDIM_TILES_V, tv0, tv1);
++	return true;
++}
++
++static float udim_clamp01(float f) {
++	return f < 0.0f ? 0.0f : f > 1.0f ? 1.0f : f;
++}
++
++static void udim_emit_local(const udim_vert_t *a, const udim_vert_t *b, const udim_vert_t *c, int tu, int tv, bool renormalize, udim_emit_t emit, void *user) {
++	udim_vert_t tri[3] = {*a, *b, *c};
++	for (int k = 0; k < 3; ++k) {
++		tri[k].uv[0] = udim_clamp01(tri[k].uv[0] - tu);
++		tri[k].uv[1] = udim_clamp01(tri[k].uv[1] - tv);
++		if (renormalize) {
++			float *n = tri[k].nor;
++			float  l = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
++			if (l > 0.0f) {
++				n[0] /= l;
++				n[1] /= l;
++				n[2] /= l;
++			}
++		}
++	}
++	emit(tu, tv, tri, user);
++}
++
++// Sutherland-Hodgman: keeps the part of the polygon where side * (uv[axis] - bound) <= 0
++static int udim_clip(const udim_vert_t *in, int n, udim_vert_t *out, int axis, float bound, float side) {
++	int m = 0;
++	for (int i = 0; i < n; ++i) {
++		const udim_vert_t *a  = &in[i];
++		const udim_vert_t *b  = &in[(i + 1) % n];
++		float              da = side * (a->uv[axis] - bound);
++		float              db = side * (b->uv[axis] - bound);
++		if (da <= 0.0f) {
++			out[m++] = *a;
++		}
++		if ((da < 0.0f && db > 0.0f) || (da > 0.0f && db < 0.0f)) {
++			float        t  = da / (da - db);
++			float       *o  = (float *)&out[m++];
++			const float *pa = (const float *)a;
++			const float *pb = (const float *)b;
++			for (int k = 0; k < UDIM_VERT_FLOATS; ++k) {
++				o[k] = pa[k] + (pb[k] - pa[k]) * t;
++			}
++			out[m - 1].uv[axis] = bound; // Exactly on the border
++		}
++	}
++	return m;
++}
++
++static float udim_uv_area2(const udim_vert_t *a, const udim_vert_t *b, const udim_vert_t *c) {
++	return (b->uv[0] - a->uv[0]) * (c->uv[1] - a->uv[1]) - (c->uv[0] - a->uv[0]) * (b->uv[1] - a->uv[1]);
++}
++
++int udim_split_triangle(const udim_vert_t tri[3], udim_emit_t emit, void *user) {
++	int tu0, tv0, tu1, tv1;
++	if (!udim_triangle_tiles(tri[0].uv, tri[1].uv, tri[2].uv, &tu0, &tv0, &tu1, &tv1)) {
++		return 0;
++	}
++	// One tile, or no uv area to cut (collapsed uvs keep their geometry, in the tile of their middle)
++	float area = fabsf(udim_uv_area2(&tri[0], &tri[1], &tri[2]));
++	if ((tu0 == tu1 && tv0 == tv1) || area < 1e-12f) {
++		float u  = (tri[0].uv[0] + tri[1].uv[0] + tri[2].uv[0]) / 3.0f;
++		float v  = (tri[0].uv[1] + tri[1].uv[1] + tri[2].uv[1]) / 3.0f;
++		int   tu = tu0 == tu1 ? tu0 : (int)floorf(u);
++		int   tv = tv0 == tv1 ? tv0 : (int)floorf(v);
++		tu       = tu < tu0 ? tu0 : tu > tu1 ? tu1 : tu;
++		tv       = tv < tv0 ? tv0 : tv > tv1 ? tv1 : tv;
++		udim_emit_local(&tri[0], &tri[1], &tri[2], tu, tv, false, emit, user);
++		return 1;
++	}
++
++	int tiles = 0;
++	for (int tv = tv0; tv <= tv1; ++tv) {
++		for (int tu = tu0; tu <= tu1; ++tu) {
++			udim_vert_t a[UDIM_POLY_MAX];
++			udim_vert_t b[UDIM_POLY_MAX];
++			int         n = 3;
++			memcpy(a, tri, sizeof(udim_vert_t) * 3);
++			n            = udim_clip(a, n, b, 0, (float)tu, -1.0f);
++			n            = udim_clip(b, n, a, 0, (float)(tu + 1), 1.0f);
++			n            = udim_clip(a, n, b, 1, (float)tv, -1.0f);
++			n            = udim_clip(b, n, a, 1, (float)(tv + 1), 1.0f);
++			bool emitted = false;
++			for (int i = 2; i < n; ++i) { // Fan, same winding as the triangle
++				if (fabsf(udim_uv_area2(&a[0], &a[i - 1], &a[i])) <= area * 1e-6f) {
++					continue; // Sliver along a border
++				}
++				udim_emit_local(&a[0], &a[i - 1], &a[i], tu, tv, true, emit, user);
++				emitted = true;
++			}
++			tiles += emitted ? 1 : 0;
++		}
++	}
++	return tiles;
++}
+diff --git a/base/sources/iron_udim.h b/base/sources/iron_udim.h
+new file mode 100644
+index 00000000..2933416f
+--- /dev/null
++++ b/base/sources/iron_udim.h
+@@ -0,0 +1,34 @@
++#pragma once
++
++// STUDIO-PATCH(udim-import): udim tiles of the mesh importers (iron_obj.c, plugins/io_fbx), see
++// paint/plugins/external/PATCHES.md
++//
++// Tile (u, v) covers the uvs [u, u + 1] x [v, v + 1], its id is 1001 + u + 10 * v. The importers accept u in 0-9 and
++// v in 0-98 (ids 1001-1990, the ".1xxx" names read by util_mesh_udim_tile). A uv on a tile border, within UDIM_EPS,
++// belongs to the tile of its triangle. A triangle over several tiles is cut along the borders, one part per tile.
++
++#include <stdbool.h>
++
++#define UDIM_TILES_U   10
++#define UDIM_TILES_V   99
++#define UDIM_EPS       1e-4f
++#define UDIM_MAX_TILES 64 // Atlas slots of paint/sources/util/util_mesh.c (ATLAS_MAX_SLOTS)
++
++typedef struct udim_vert {
++	float pos[3];
++	float nor[3];
++	float uv[2];
++	float uv1[2];
++	float col[4];
++} udim_vert_t;
++
++// Receives one triangle of the split, its uvs local to tile (tu, tv), in [0, 1]
++typedef void (*udim_emit_t)(int tu, int tv, const udim_vert_t tri[3], void *user);
++
++int  udim_tile_id(int tu, int tv);
++bool udim_uv_valid(float u, float v);
++// Range of tiles covered by the triangle uvs, false when one of them is not valid
++bool udim_triangle_tiles(const float *uv0, const float *uv1, const float *uv2, int *tu0, int *tv0, int *tu1, int *tv1);
++// Cuts the triangle along the tile borders and emits its parts, normals renormalized. Returns the number of tiles it
++// was emitted in (1: not cut), 0 when a uv is not valid (nothing emitted).
++int udim_split_triangle(const udim_vert_t tri[3], udim_emit_t emit, void *user);
+diff --git a/paint/sources/io/import_mesh.c b/paint/sources/io/import_mesh.c
+index 8921b952..a33d96e1 100644
+--- a/paint/sources/io/import_mesh.c
++++ b/paint/sources/io/import_mesh.c
+@@ -30,6 +30,9 @@ void import_mesh_run(char *path, bool _clear_layers, bool replace_existing, bool
+ 	import_mesh_appended     = NULL;
+ 	g_context->layer_filter  = 0;
+ 
++	mesh_object_t_array_t *objects = g_project->_->paint_objects; // STUDIO-PATCH(udim-import)
++	i32                    count   = objects->length;
++
+ 	char *p        = to_lower_case(path);
+ 	bool  is_obj   = ends_with(p, ".obj");
+ 	bool  is_blend = ends_with(p, ".blend");
+@@ -67,6 +70,11 @@ void import_mesh_run(char *path, bool _clear_layers, bool replace_existing, bool
+ 		}
+ 	}
+ 
++	// STUDIO-PATCH(udim-import): nothing imported (udim file refused, no face, blender missing): the project keeps its mesh
++	if (g_project->_->paint_objects == objects && objects->length == count) {
++		return;
++	}
++
+ 	g_project->mesh_assets = any_array_create_from_raw(
+ 	    (void *[]){
+ 	        path,
+@@ -150,6 +158,11 @@ void import_mesh_finish_import(void *_) {
+ 	tab_meshes_reset_preview_map();
+ 	base_update_workflow();
+ 
++#ifdef WITH_EXTERNAL
++	void studio_udim_import_hint(void); // STUDIO-PATCH(udim-import): pixels per udim tile and project resolution advised, in external/
++	studio_udim_import_hint();
++#endif
++
+ 	if (import_mesh_needs_unwrap) {
+ 		import_mesh_needs_unwrap = false;
+ 		project_unwrap_mesh_box();
+@@ -174,11 +187,18 @@ bool _import_mesh_is_unique_name(char *s) {
+ 
+ char *_import_mesh_unique_name(char *name) {
+ 	// Returns the name or the next free .00X variant
++	// STUDIO-PATCH(udim-import): a udim tile suffix is kept, the .00X goes before it (body.1001 gave body.1002, another tile)
++	char *tile = "";
++	if (util_mesh_udim_tile(name) > 0) {
++		i32 len = string_length(name);
++		tile    = string_tmp("%s", name + len - 5);
++		name    = string_tmp("%.*s", len - 5, name);
++	}
+ 	char *base;
+ 	i32   i   = strings_split_number_ext(name, &base);
+-	char *res = i == 0 ? base : string_tmp("%s%s", base, strings_number_ext(i));
++	char *res = i == 0 ? string_tmp("%s%s", base, tile) : string_tmp("%s%s%s", base, strings_number_ext(i), tile);
+ 	while (!_import_mesh_is_unique_name(res)) {
+-		res = string_tmp("%s%s", base, strings_number_ext(++i));
++		res = string_tmp("%s%s%s", base, strings_number_ext(++i), tile);
+ 	}
+ 	return res;
+ }
+diff --git a/paint/sources/io/import_obj.c b/paint/sources/io/import_obj.c
+index 1b39ede6..d2dc3d03 100644
+--- a/paint/sources/io/import_obj.c
++++ b/paint/sources/io/import_obj.c
+@@ -1,5 +1,7 @@
+ 
+ #include "../global.h"
++// STUDIO-PATCH(udim-import)
++#include "iron_udim.h"
+ 
+ void import_obj_run(char *path, bool replace_existing) {
+ 	buffer_t *b = data_get_blob(path);
+@@ -11,55 +13,175 @@ void import_obj_run(char *path, bool replace_existing) {
+ 	data_delete_blob(path);
+ }
+ 
+-void import_obj_parse(buffer_t *b, bool replace_existing) {
+-	split_type_t i          = g_context->split_by;
+-	bool         is_udim    = i == SPLIT_TYPE_UDIM;
+-	i32          split_code = (i == SPLIT_TYPE_OBJECT || is_udim) ? 'o' : 'u'; // usemtl
++// STUDIO-PATCH(udim-import): udim split, see paint/plugins/external/PATCHES.md. Upstream read the file as a single
++// object and gave each tile a copy of all the vertices. Now each object is split in its tiles, with the vertices of the
++// tile only, and obj_parse cuts the triangles over several tiles. A uv out of the tiles 1001-1990, or more tiles than
++// the layer atlas holds, refuses the file with a message and imports nothing.
++static void _import_obj_udim_free(raw_mesh_t *part) {
++	if (part->udims != NULL) {
++		for (i32 i = 0; i < part->udims->length; ++i) {
++			u32_array_t *a = part->udims->buffer[i];
++			array_free(a);
++			free(a);
++		}
++		array_free(part->udims);
++		free(part->udims);
++	}
++	void *arrays[] = {part->posa, part->nora, part->texa, part->inda};
++	for (i32 i = 0; i < 4; ++i) {
++		if (arrays[i] != NULL) {
++			array_free(arrays[i]);
++			free(arrays[i]);
++		}
++	}
++	free(part->name);
++	free(part);
++}
+ 
+-	if (is_udim) {
+-		raw_mesh_t  *part      = obj_parse(b, split_code, 0, is_udim);
+-		char        *name      = part->name;
+-		u32_array_t *inda_full = part->inda;
+-		bool         first     = true;
+-		if (part->udims != NULL) {
+-			for (i32 i = 0; i < part->udims->length; ++i) {
+-				u32_array_t *a = part->udims->buffer[i];
+-				if (a->length == 0) {
+-					array_free(a);
+-					free(a);
+-					continue;
+-				}
+-				i32 u      = i % part->udims_u;
+-				i32 v      = math_floor(i / (float)part->udims_u);
+-				i32 id     = (1000 + v * 10 + u + 1);
+-				part->name = string("%s.%s", name, i32_to_string(id));
+-				part->inda = a;
+-				if (first) {
+-					first = false;
+-					if (replace_existing) {
+-						import_mesh_make_mesh(part);
+-					}
+-					else {
+-						import_mesh_add_mesh(part);
+-					}
+-				}
+-				else {
+-					part->posa = i16_array_create_from_array(part->posa);
+-					part->nora = i16_array_create_from_array(part->nora);
+-					if (part->texa != NULL) {
+-						part->texa = i16_array_create_from_array(part->texa);
++// The triangles of one tile, with their own vertices (obj_parse never shares the corners of its triangles)
++static raw_mesh_t *_import_obj_udim_tile(raw_mesh_t *part, u32_array_t *inda, char *name) {
++	raw_mesh_t *mesh = calloc(1, sizeof(raw_mesh_t));
++	mesh->name       = name;
++	mesh->scale_pos  = part->scale_pos;
++	mesh->scale_tex  = part->scale_tex;
++	mesh->posa       = i16_array_create(inda->length * 4);
++	mesh->nora       = i16_array_create(inda->length * 2);
++	mesh->texa       = i16_array_create(inda->length * 2);
++	mesh->inda       = u32_array_create(inda->length);
++	for (i32 i = 0; i < inda->length; ++i) {
++		u32 k = inda->buffer[i];
++		memcpy(&mesh->posa->buffer[i * 4], &part->posa->buffer[k * 4], sizeof(i16) * 4);
++		memcpy(&mesh->nora->buffer[i * 2], &part->nora->buffer[k * 2], sizeof(i16) * 2);
++		memcpy(&mesh->texa->buffer[i * 2], &part->texa->buffer[k * 2], sizeof(i16) * 2);
++		mesh->inda->buffer[i] = i;
++	}
++	mesh->vertex_count = mesh->index_count = inda->length;
++	return mesh;
++}
++
++static void _import_obj_udim_add(raw_mesh_t *mesh, bool *first, bool replace_existing) {
++	if (*first && replace_existing) {
++		import_mesh_make_mesh(mesh);
++	}
++	else {
++		import_mesh_add_mesh(mesh);
++	}
++	*first = false;
++	free(mesh); // The arrays and the name now belong to the mesh object
++}
++
++static void _import_obj_udim(buffer_t *b, bool replace_existing) {
++	bool used[UDIM_TILES_U * UDIM_TILES_V] = {0}; // Tile u + 10 v
++
++	raw_mesh_t_array_t *parts         = any_array_create_from_raw((void *[]){}, 0);
++	i32                 tiles         = 0;
++	i32                 cut           = 0;
++	i32                 invalid       = 0;
++	f32                 invalid_uv[2] = {0};
++	char               *invalid_name  = NULL;
++	i32                 no_uvs        = 0;
++	char               *no_uvs_name   = NULL;
++	u64                 pos           = 0;
++	bool                has_next      = true;
++	while (has_next) {
++		raw_mesh_t *part = obj_parse(b, 'o', pos, true);
++		pos              = part->pos;
++		has_next         = part->has_next;
++		if (string_equals(part->name, "")) {
++			free(part->name);
++			part->name = string_copy("Object");
++		}
++		if (obj_udim_invalid > 0 && invalid == 0) {
++			invalid_name  = string_copy(part->name);
++			invalid_uv[0] = obj_udim_invalid_uv[0];
++			invalid_uv[1] = obj_udim_invalid_uv[1];
++		}
++		invalid += obj_udim_invalid;
++		cut += obj_udim_cut;
++		if (part->inda->length == 0) { // No face, or only faces with invalid uvs
++			_import_obj_udim_free(part);
++			continue;
++		}
++		if (part->udims == NULL && no_uvs++ == 0) {
++			no_uvs_name = string_copy(part->name);
++		}
++		for (i32 i = 0; part->udims != NULL && i < part->udims->length; ++i) {
++			u32_array_t *a    = part->udims->buffer[i];
++			i32          tile = udim_tile_id(i % part->udims_u, i / part->udims_u) - 1001;
++			if (a->length > 0 && !used[tile]) {
++				used[tile] = true;
++				tiles++;
++			}
++		}
++		any_array_push(parts, part);
++	}
++
++	char *error = NULL;
++	if (invalid > 0) {
++		error = string("UDIM import refused: uvs outside the tiles 1001-1990 in \"%s\" (%d triangles, first uv %g %g).", invalid_name, invalid, invalid_uv[0],
++		               invalid_uv[1]);
++	}
++	else if (tiles > UDIM_MAX_TILES) {
++		error = string("UDIM import refused: %d tiles, the layers hold %d at most.", tiles, UDIM_MAX_TILES);
++	}
++	else if (parts->length == 0) {
++		error = strings_failed_to_read_mesh_data();
++	}
++
++	// The parts with uvs first: a first part without uvs makes ArmorPaint offer to unwrap the whole mesh, udim uvs included
++	bool first   = true;
++	i32  objects = 0;
++	for (i32 pass = 0; pass < 2; ++pass) {
++		for (i32 i = 0; i < parts->length; ++i) {
++			raw_mesh_t *part = parts->buffer[i];
++			if (part == NULL || (part->udims == NULL) != (pass == 1)) {
++				continue;
++			}
++			parts->buffer[i] = NULL; // Freed or handed to the mesh object below, the second pass must not read it
++			if (error != NULL) {
++				_import_obj_udim_free(part);
++			}
++			else if (part->udims == NULL) { // No uvs: imported as is, without a tile
++				_import_obj_udim_add(part, &first, replace_existing);
++				objects++;
++			}
++			else {
++				for (i32 j = 0; j < part->udims->length; ++j) {
++					u32_array_t *a = part->udims->buffer[j];
++					if (a->length > 0) {
++						char *name = string("%s.%d", part->name, udim_tile_id(j % part->udims_u, j / part->udims_u));
++						_import_obj_udim_add(_import_obj_udim_tile(part, a, name), &first, replace_existing);
++						objects++;
+ 					}
+-					import_mesh_add_mesh(part);
+ 				}
++				_import_obj_udim_free(part);
+ 			}
+-			array_free(inda_full);
+-			free(inda_full);
+-			array_free(part->udims);
+-			free(part->udims);
+-			free(name);
+-			free(part);
+ 		}
+ 	}
++	array_free(parts);
++	free(parts);
++
++	if (error != NULL) {
++		console_error(error);
++	}
++	else {
++		console_log(string("UDIM import: %d objects in %d tiles, %d triangles cut along the tile borders.", objects, tiles, cut));
++		if (no_uvs > 0) {
++			console_info(string("UDIM import: %d objects without uvs imported without a tile, first \"%s\".", no_uvs, no_uvs_name));
++		}
++	}
++	free(invalid_name);
++	free(no_uvs_name);
++}
++
++void import_obj_parse(buffer_t *b, bool replace_existing) {
++	split_type_t i          = g_context->split_by;
++	bool         is_udim    = i == SPLIT_TYPE_UDIM;
++	i32          split_code = (i == SPLIT_TYPE_OBJECT || is_udim) ? 'o' : 'u'; // usemtl
++
++	if (is_udim) { // STUDIO-PATCH(udim-import)
++		_import_obj_udim(b, replace_existing);
++	}
+ 	else {
+ 		raw_mesh_t_array_t *parts     = any_array_create_from_raw((void *[]){}, 0);
+ 		raw_mesh_t_array_t *discarded = any_array_create_from_raw((void *[]){}, 0);

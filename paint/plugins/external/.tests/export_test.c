@@ -1,5 +1,5 @@
 // Banc des lots B4/B5 hors de l'app (studio_expr, studio_preset, studio_naming_format, studio_preflight, studio_sha256,
-// studio_fs), sous ASan/UBSan. Lancé par .tests/export.sh.
+// studio_fs) et du conseil de résolution UDIM (studio_udim, lot D0), sous ASan/UBSan. Lancé par .tests/export.sh.
 //
 // export_test unit <dossier de travail> <dossier des presets livrés>
 // export_test sha <fichier>...     empreintes, comparées à shasum -a 256 par export.sh
@@ -12,6 +12,7 @@
 #include "../studio_preflight.h"
 #include "../studio_preset.h"
 #include "../studio_sha256.h"
+#include "../studio_udim.h"
 #include <dirent.h>
 #include <math.h>
 #include <stdio.h>
@@ -767,6 +768,19 @@ static void test_preflight(const char *work) {
 	studio_preflight_run(&plan, &r);
 	CHECK(r.blocking == 0, "clean plan: %d blocking (%s)", r.blocking, r.count > 0 ? r.issues[0].message : "");
 	studio_report_free(&r);
+	// Tuiles sans case dans l'atlas des calques (patch udim-tile-limit) : bloquant, même hors export par tuile.
+	plan.tiles_without_slot = 6;
+	plan.first_without_slot = "1065";
+	studio_preflight_run(&plan, &r);
+	const char *limit = NULL;
+	for (int i = 0; i < r.count; ++i) {
+		limit = strcmp(r.issues[i].code, "udim_tile_limit") == 0 ? r.issues[i].message : limit;
+	}
+	CHECK(has_issue(&r, "udim_tile_limit", true) && r.blocking == 1 && strstr(limit, "6 UDIM tiles") != NULL && strstr(limit, "from 1065 on") != NULL,
+	      "tiles without slot: %s", limit != NULL ? limit : "(none)");
+	studio_report_free(&r);
+	plan.tiles_without_slot = 0;
+	plan.first_without_slot = NULL;
 	plan.layer_count = 0;
 	studio_preflight_run(&plan, &r);
 	CHECK(has_issue(&r, "no_layers", true), "no layers");
@@ -796,6 +810,42 @@ static void test_preflight(const char *work) {
 	free(dn);
 }
 
+// ---- Conseil de résolution UDIM (lot D0) -----------------------------------------------------------------------------
+
+static void check_hint(int tiles, int stride, int rx, int ry, int bits, const char *want) {
+	char *got = studio_udim_hint(tiles, stride, rx, ry, bits);
+	CHECK(want == NULL ? got == NULL : got != NULL && strcmp(got, want) == 0, "udim hint %d %d %dx%d %d:\n    got  %s\n    want %s", tiles, stride, rx, ry,
+	      bits, got != NULL ? got : "NULL", want != NULL ? want : "NULL");
+	free(got);
+}
+
+static void test_udim_hint(void) {
+	// ARMORPAINT_UDIM.md §3 : 5-9 tuiles en grille 3×3, 6K pour 2K par tuile, 12K et 3,6 Go le calque 16 bits pour 4K
+	check_hint(6, 3, 4096, 4096, 16,
+	           "UDIM: 6 tiles, 3x3 grid in the 4096 px layers: 1365 px per tile. For 2048 px per tile: project at 6144 px (custom, 906 MB per 16 bit "
+	           "layer). For 4096 px per tile: project at 12288 px (custom, 3.6 GB per 16 bit layer, 1 undo step).");
+	check_hint(2, 2, 4096, 4096, 8,
+	           "UDIM: 2 tiles, 2x2 grid in the 4096 px layers: 2048 px per tile. For 4096 px per tile: project at 8192 px (805 MB per 8 bit layer, 4 "
+	           "undo steps).");
+	check_hint(4, 2, 16384, 16384, 32, "UDIM: 4 tiles, 2x2 grid in the 16384 px layers: 8192 px per tile.");
+	check_hint(64, 8, 4096, 4096, 8,
+	           "UDIM: 64 tiles, 8x8 grid in the 4096 px layers: 512 px per tile. For 2048 px per tile: project at 16384 px (3.2 GB per 8 bit layer, 1 "
+	           "undo step). For 4096 px per tile: out of reach, 2048 px at most (project at 16384 px).");
+	check_hint(5, 3, 4096, 2048, 8,
+	           "UDIM: 5 tiles, 3x3 grid in the 4096x2048 px layers: 1365x682 px per tile. For 2048 px per tile: project at 6144 px (custom, 453 MB per 8 "
+	           "bit layer). For 4096 px per tile: project at 12288 px (custom, 1.8 GB per 8 bit layer, 1 undo step).");
+	check_hint(3, 2, 2048, 2048, 8,
+	           "UDIM: 3 tiles, 2x2 grid in the 2048 px layers: 1024 px per tile. For 2048 px per tile: project at 4096 px (201 MB per 8 bit layer). For "
+	           "4096 px per tile: project at 8192 px (805 MB per 8 bit layer, 4 undo steps).");
+	check_hint(1, 1, 4096, 4096, 8, NULL);   // Une tuile : pas d'UDIM actif
+	check_hint(10, 3, 4096, 4096, 8, NULL);  // Plus de tuiles que de cases
+	check_hint(4, 2, 4096, 4096, 12, NULL);  // Bits inconnus
+	check_hint(4, 2, 0, 4096, 8, NULL);      // Résolution nulle
+	check_hint(4, 2, 20000, 4096, 8, NULL);  // Au-delà de 16384
+	check_hint(4, 65, 4096, 4096, 8, NULL);  // Grille absurde
+	check_hint(-3, -2, 4096, 4096, 8, NULL); // Valeurs négatives
+}
+
 int main(int argc, char **argv) {
 	if (argc >= 3 && strcmp(argv[1], "sha") == 0) {
 		for (int i = 2; i < argc; ++i) {
@@ -820,6 +870,7 @@ int main(int argc, char **argv) {
 	test_naming();
 	test_presets(argv[3]);
 	test_preflight(argv[2]);
+	test_udim_hint();
 	printf("  %d checks, %d failures\n", checks, failures);
 	return failures != 0;
 }

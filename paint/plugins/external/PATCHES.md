@@ -458,7 +458,8 @@ les n-gones donnent les mêmes objets, avec les mêmes nombres d'indices, qu'ava
   saturé sur arm64) n'est pas traité : il relève de la lecture des flottants, hors du périmètre des indices.
 - `import_obj_parse()` pousse la première part même sans face (fichier dont le premier objet n'a pas de face
   valide) : l'import aboutit (rc 0) avec un objet vide, comportement upstream inchangé.
-- Le split UDIM (`obj_parse(…, udim)`) n'a été vérifié qu'hors app, le mode ne se règle que dans l'UI.
+- Le split UDIM (`obj_parse(…, udim)`) : repris par [udim-import](#udim-import), vérifié dans l'app par
+  `.tests/udim_app.sh`.
 
 ---
 
@@ -497,9 +498,9 @@ Sans exposant, le résultat est inchangé (étape 4 du banc : 20 000 jetons iden
 1 : sortie identique octet pour octet). La mantisse reste limitée à 9 caractères par `buf`, comme sans exposant :
 `-1.234567e-05` (sortie `%e` par défaut) tient ; au-delà, les chiffres de droite sont perdus.
 
-Deux patches touchent `iron_obj.c` : `obj-global-indices.patch` (`upstream` → `252f9fc3`) puis
-`obj-float-exponent.patch` (`252f9fc3` → `70cece4b`). Les réappliquer dans cet ordre. Pour régénérer celui-ci :
-`git diff <commit studio d'obj-global-indices> studio -- base/sources/iron_obj.c`.
+Trois patches touchent `iron_obj.c` : `obj-global-indices.patch` (`upstream` → `252f9fc3`), celui-ci
+(`252f9fc3` → `70cece4b`), puis `udim-import.patch` (`70cece4b` → `4c1ca6cb`). Les réappliquer dans cet ordre.
+Pour régénérer celui-ci : `git diff 252f9fc3 70cece4b -- base/sources/iron_obj.c` (ou les commits qui l'ont refait).
 
 **Test.** `.tests/obj.sh` (hors app, ASan/UBSan ; `STUDIO_ROOT=<armorpaint>` si ce dépôt est lancé depuis un
 worktree) :
@@ -507,8 +508,11 @@ worktree) :
   comparés à `strtod` borné à ±`FLT_MAX`, à 1 ulp près, fin de jeton comprise : `1.5e-3`, `-0.5e-2`, `1E+2`,
   `1e-45` (dénormal), `1e999` et `-1e999` (±`FLT_MAX`), `1e-999` et `0e999` (0), `1e2147483648`, `1e`, `1e+`,
   `1.5e-3x`... Tous passent ; 3 sont à 1 ulp de `strtod` (`6.02e23`, `3.4e38`, `7.450581e-09` : mantisse
-  arrondie en float avant la multiplication). L'upstream en rate 25 sur 30. Puis 20 000 jetons décimaux sans
-  exposant, sortie identique à l'upstream ;
+  arrondie en float avant la multiplication). L'upstream en rate 22 sur 30. Puis 20 000 jetons décimaux sans
+  exposant, sortie identique à l'upstream. Jusqu'au 2026-09-27, `obj_float_test_up` incluait notre `iron_obj.c` au
+  lieu de la copie upstream (`-I$BASE` passait avant elle) : cette comparaison ne comparait rien et le décompte de
+  l'upstream noté ici (25 sur 30) était faux. Corrigé dans `obj.sh` avec udim-import ; les 20 000 jetons restent
+  identiques ;
 - étape 5, `exp/` : grille à deux objets en `%.6e`, la même en `E` majuscule, et un quad à coordonnées et normale
   minuscules (`1.0e-30`, `3.2e-12`, `1E+0`) : sortie identique, splits objet et matériau, à leur version décimale
   lue par l'upstream. Avant le patch (studio `252f9fc3`), les deux fichiers sortent différents ;
@@ -609,8 +613,8 @@ generic out` relatif écrit les 5 mêmes PNG dans `./out` qu'avant le patch.
 | | |
 |---|---|
 | Fichier | `paint/sources/io/import_mesh.c` (`import_mesh_run`), `paint/sources/io/import_obj.c` (`import_obj_run`), `paint/sources/io/import_texture.c` (`import_texture_run`), `paint/plugins/io_fbx/io_fbx.c` (`io_fbx_parse`) |
-| Commit studio | `33bd8667` sur la branche `studio` |
-| Validé contre | upstream `85f6cf1c` (2026-09-26) |
+| Commit studio | `33bd8667`, puis `6d7fac34` (message de l'importeur gardé) sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-27) |
 | Trouvé | 2026-09-26, même commande qu'[args-cwd-paths](#args-cwd-paths) : `obj_parse` (`iron_obj.c:269`) ← `import_obj_parse` ← `import_mesh_run` ← `import_asset_run` ← `args_run_on_next_frame` |
 
 **Bug.** `data_get_blob()` rend NULL pour un fichier absent ou illisible, et la plupart des importeurs
@@ -633,7 +637,9 @@ cannot read »), `.blend` (vérifie l'OBJ exporté par Blender), l'API de script
   importeurs de script compris, et tous les appelants (`import_asset_run`, boîte d'import, `project_reimport_mesh`
   sur un mesh déplacé).
 - `import_mesh_run()` affiche « Could not import file <path>. » si l'importeur rend NULL pour la première part ;
-  `io_fbx_parse()` rend NULL quand `ufbx_load_memory()` échoue.
+  `io_fbx_parse()` rend NULL quand `ufbx_load_memory()` échoue. Depuis `6d7fac34`, seulement si l'importeur n'a pas
+  déjà affiché sa propre erreur (`console_message` inchangé) : le refus d'un FBX UDIM par [fbx-split](#fbx-split)
+  (« UDIM import refused: … ») reste lisible.
 - `import_obj_run()` vérifie son blob (appelé aussi par l'import `.blend`).
 - `import_texture_run()` fait la même vérification avant d'appeler un importeur de plugin (pas pour l'importeur
   par défaut ni pour une texture déjà en cache, ce qui garde les calques PSD, mis en cache sous un chemin fictif).
@@ -643,7 +649,8 @@ cannot read »), `.blend` (vérifie l'OBJ exporté par Blender), l'API de script
 import file », rc 0 ; non-régression : `grid.obj`, `tri.gltf`, `tri.glb`, `quad.fbx` (FBX ASCII) donnent les
 mêmes objets et nombres d'indices, `red.png` / `.svg` / `.tiff` / `.psd` (générés par `sips`) « Texture imported ».
 Au 2026-09-26 : tout passe ; le même script sur le build d'avant les deux patches (`70cece4b`) : 14 échecs, tous en
-rc 139, et la section de non-régression identique.
+rc 139, et la section de non-régression identique. Le message gardé : `.tests/udim_app.sh`, « FBX refusé (uv
+négatives) : son message reste ».
 
 **Signes que l'upstream l'a corrigé.** `import_obj_run()` ou les importeurs de `paint/plugins/plugins.c` testent
 `b == NULL`, ou `data_get_blob()` ne rend plus NULL (blob vide, erreur remontée). Rejouer `.tests/import_app.sh`
@@ -762,3 +769,182 @@ layers, pack, padding) : voir s'il faut l'ajouter à la fenêtre.
 
 **Non couvert.** Les onglets Presets (éditeur de presets upstream) et Atlases, et « Pack into project », ne sont plus
 accessibles. La boîte d'export de bake (`box_export_show_bake_material`) et l'export de maillage ne sont pas touchés.
+
+---
+
+## udim-import
+
+| | |
+|---|---|
+| Fichiers | `base/sources/iron_udim.c` et `.h` (nouveaux), `base/sources/iron_obj.c` (`obj_parse`, nouveaux `obj_udim_*`) et `.h`, `paint/sources/io/import_obj.c` (`import_obj_parse`, nouveau `_import_obj_udim`), `paint/sources/io/import_mesh.c` (`import_mesh_run`, `import_mesh_finish_import`, `_import_mesh_unique_name`) |
+| Commit studio | `4c1ca6cb` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-27) |
+| Trouvé | 2026-09-26, analyse des UDIM (`ARMORPAINT_UDIM.md` §3, L11 à L13) ; L12 confirmé sous ASan : `heap-buffer-overflow` sur `num[tile] += 3` |
+
+**Bug.** En `Split By: UDIM Tile`, `obj_parse()` rangeait chaque triangle dans la tuile du barycentre de ses uv,
+converti par `(int)` :
+- uv négatives : `(int)` tronque vers 0. u = -0,3 part dans 1001 ; u = -1,5 donne l'index -1, et `num[tile] += 3`
+  écrit 4 octets avant le tableau (L12) ;
+- u ≥ 10 : la tuile `1000 + v·10 + u + 1` n'est jamais bornée, u = 10 donne 1011, qui est la tuile (0, 1) (L11) ;
+- triangle à cheval sur plusieurs tuiles : rangé entier dans une seule, puis ramené en `uv - tuile` sommet par
+  sommet. Un `vt` partagé par des triangles de tuiles différentes prend le décalage du dernier écrit (L13). Triangles
+  étirés, sans avertissement ;
+- uv énorme (`vt 1e9 0`) : la boucle `while (u > tiles_u) tiles_u++` ne finit pas ;
+- tout le fichier formait un seul objet : chaque tuile recevait une copie de tous les sommets, et les noms d'objets
+  étaient perdus.
+
+Deux défauts voisins, trouvés par les bancs :
+- un premier objet sans `o` prenait le nom laissé par le fichier précédent (`str` statique jamais remis à zéro) ;
+- ajouter le même fichier renommait `body.1001` en un autre nom de tuile (`body.1003` dans le banc) :
+  `_import_mesh_unique_name()` incrémente le dernier nombre du nom.
+
+**Correctif.**
+- `iron_udim.c`, sans dépendance : la tuile (u, v) couvre [u, u + 1] × [v, v + 1], son id est 1001 + u + 10 v ; les
+  importeurs acceptent u de 0 à 9 et v de 0 à 98 (tuiles 1001-1990). `udim_split_triangle()` découpe un triangle
+  le long des bords de tuile (Sutherland-Hodgman dans chaque case couverte, puis éventail) et interpole positions,
+  normales (renormalisées), uv, second jeu d'uv et couleurs. Une uv à moins de `UDIM_EPS` (1e-4) d'un bord reste dans
+  la tuile de son triangle ; un triangle sans aire en uv garde sa géométrie, dans la tuile de son milieu.
+- `obj_parse(…, udim)` découpe chaque triangle (`obj_udim_cut_triangles`) : les coins coupés sont ajoutés aux
+  tableaux temporaires le temps du packing, puis retirés (les indices des parts suivantes restent ceux du fichier).
+  Les uv hors des tuiles sont comptées (`obj_udim_invalid`, première uv dans `obj_udim_invalid_uv`), leurs triangles
+  écartés. Le split par objet (`o`) vaut aussi en UDIM.
+- `import_obj_parse()` en UDIM (`_import_obj_udim`) : un objet par objet du fichier et par tuile
+  (`<objet>.<tuile>`), avec ses seuls sommets. Une uv hors des tuiles, ou plus de tuiles que l'atlas des calques
+  n'en tient (64), fait refuser le fichier (« UDIM import refused: … ») : rien n'est importé et le projet garde son
+  maillage (`import_mesh_run` s'arrête si aucun objet n'a été ajouté). Les objets sans uv sont importés sans tuile,
+  **après** les autres : un premier objet sans uv fait proposer un dépliage de tout le maillage, qui écraserait les
+  uv UDIM.
+- `obj_parse()` vide le nom au début de chaque fichier ; `_import_mesh_unique_name()` garde le suffixe de tuile et
+  met le `.00X` devant (`body.001.1001`).
+- `import_mesh_finish_import()` appelle `studio_udim_import_hint()` (`external/studio_udim.c`) : pixels par tuile
+  dans la grille de l'atlas, et résolution de projet pour 2048 et 4096 px par tuile.
+
+L'include et les globales d'`iron_obj.c` sont placés hors des lignes d'obj-global-indices et d'obj-float-exponent
+(contexte de leurs `.patch`), et le découpage juste après la dernière ligne de contexte d'obj-global-indices. Chaîne
+d'`iron_obj.c` : voir [obj-float-exponent](#obj-float-exponent). Pour régénérer celui-ci :
+`git diff 4c1ca6cb^ 4c1ca6cb` (ou les commits qui l'ont refait).
+
+**Test.** `.tests/obj.sh` (hors app, ASan/UBSan), section `udim/` :
+- `udim_clean` : grille UDIM sans triangle à cheval, sortie identique octet pour octet à l'upstream ;
+- 14 cas d'`obj_udim.py`, relus par `obj_test` : objets et tuiles attendus, triangles écartés et coupés, uv locales
+  dans [0, 1], pas de déformation (chaque sommet produit, remis en uv globale, retombe sur un triangle d'origine à
+  la position 3D que ce triangle donne à cette uv), surfaces 3D et uv conservées. L'upstream échoue sur les 8 cas de
+  bug : `neg` (plantage), `u10` (tuiles 1010 et 1011), `straddle`, `straddle_v`, `straddle4`, `long` (une seule
+  tuile au lieu de 2 à 4), `huge` (boucle sans fin), `shared_vt` (sommet déformé) ;
+- fuzz : les mutations sont aussi lues en UDIM par l'arbre courant. Au 2026-09-27, 1 000 mutations : **0 plantage**
+  sur 3 000 lectures, contre 1 393 pour l'upstream sur 2 000.
+
+Dans l'app, `.tests/udim_app.sh` (OBJ) : `body.1001`, `body.1002`, `body.1011` et `cap` sans tuile ; un triangle
+coupé, signalé ; `cap` sans uv en tête du fichier : pas de dépliage proposé ; fichiers refusés (uv négatives,
+70 tuiles) : message, maillage gardé ; le même fichier ajouté : `body.001.1001` ; conseil de résolution. Au
+2026-09-27 : tout passe. Pendant le développement, ce banc a trouvé un use-after-free dans la boucle en deux passes
+de `_import_obj_udim` (part libérée sans vider sa case), corrigé avant le commit.
+
+**Signes que l'upstream l'a corrigé.** `get_tile()` disparaît ou arrondit par `floorf`, `num[tile]` est borné, ou
+`reading_object` n'est plus conditionné par `!udim`. Rejouer la section `udim/` d'`.tests/obj.sh` contre l'upstream
+sans le patch : les cas de bug doivent passer.
+
+**Non couvert.**
+- Split UDIM et split par matériau restent exclusifs (un seul `split_by`) : phase D1.
+- Les uv vues par les matériaux restent celles de la case de l'atlas (L8) : phase D1.
+- L'identité de la tuile vient toujours du nom de l'objet (L4) : renommer `body.1001` dans l'onglet Meshes change sa
+  tuile.
+- glTF / GLB : pas de split UDIM, comme l'upstream. FBX : voir [fbx-split](#fbx-split).
+- Un triangle coupé devient plusieurs triangles : le nombre de sommets exporté par `--export-mesh` change.
+
+---
+
+## fbx-split
+
+| | |
+|---|---|
+| Fichier | `paint/plugins/io_fbx/io_fbx.c` (`io_fbx_parse`, splits par matériau et par tuile) |
+| Commit studio | `de0ba0c5` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-27) |
+| Trouvé | 2026-09-26, analyse des UDIM (`ARMORPAINT_UDIM.md` §3, L14), puis banc `.tests/fbx.sh` |
+
+**Bug.** Dans l'importeur FBX :
+- split par matériau plafonné à 64 matériaux (`MAT_SPLIT_MAX`), split UDIM à 100 tuiles (`MAX_UDIM_TILES`) : les
+  faces au-delà étaient perdues sans message ;
+- en UDIM, tous les nœuds d'une tuile étaient fusionnés en un seul mesh, la tuile d'un triangle était celle du
+  barycentre de ses uv convertie par `(int)` (mêmes défauts que l'OBJ : u = -0,5 dans 1001, u ≥ 10 dans la rangée
+  suivante, triangle à cheval étiré) ;
+- un nœud dont seules certaines faces ont des uv faisait lire le tableau d'uv au-delà de sa fin ; le second jeu
+  d'uv et les couleurs n'étaient pas repris par les splits ;
+- un fichier sans aucun triangle faisait lire le tableau des meshes au-delà de sa fin.
+
+**Correctif.**
+- Tableaux des splits alloués à la demande, sans plafond.
+- UDIM : un mesh par nœud et par tuile (`<nœud>.<tuile>`), triangles à cheval coupés par `iron_udim.c` (voir
+  [udim-import](#udim-import)). Une uv hors des tuiles 1001-1990, ou plus de 64 tuiles, fait refuser le fichier avec
+  un message (`console_error`) ; `io_fbx_parse()` rend alors NULL, et `import_mesh_run()` garde ce message
+  ([import-null-guards](#import-null-guards)). Les nœuds sans uv gardent leur mesh, sans tuile, après les autres
+  (pas de dépliage proposé).
+- Uv pour toutes les faces ou aucune (`mixed_uvs`), second jeu d'uv et couleurs repris comme dans le split par objet.
+- Aucun triangle : NULL au lieu d'une lecture hors du tableau.
+
+Sans UDIM ni bug connu, la sortie est identique à l'upstream, octet pour octet. Pour régénérer :
+`git diff de0ba0c5^ de0ba0c5` (le hunk `ufbx_load_memory` d'`io_fbx_parse` appartient à import-null-guards).
+
+**Test.** `.tests/fbx.sh` (hors app, ASan/UBSan ; `fbx_test.c` lit le FBX comme `import_mesh_run`) :
+- `same/` : 8 fichiers (nœuds avec et sans uv, uv mêlées, second jeu d'uv et couleurs, uv hors [0, 1], jusqu'à
+  64 matériaux), splits par objet et par matériau : sortie identique à l'upstream (15 comparaisons) ;
+- `udim/` : 21 cas de `fbx_udim.py` (ceux de l'OBJ sauf `shared_vt`, plus `tiles110`, uv mêlées, nœud sans uv en
+  tête, second jeu d'uv et couleurs, fichier vide, 70 matériaux) ; l'upstream échoue sur 16 d'entre eux (plantages,
+  tuiles fausses, nœuds fusionnés, 100 tuiles sur 110, 64 meshes sur 70) ;
+- fuzz : au 2026-09-27, 300 mutations lues en split 0, 1 et 2 : **0 plantage** sur 900 lectures, contre 508 pour
+  l'upstream.
+
+Dans l'app, `.tests/udim_app.sh` (FBX) : `body.1001`, `body.1002`, `body.1011`, `cap` sans tuile, un triangle coupé ;
+`cap` sans uv en tête : pas de dépliage proposé ; uv négatives : refusé, son message reste, maillage gardé.
+
+**Signes que l'upstream l'a corrigé.** `MAT_SPLIT_MAX` ou `MAX_UDIM_TILES` disparaissent, ou le split UDIM ne
+fusionne plus les nœuds. Rejouer `.tests/fbx.sh` contre l'upstream sans le patch.
+
+**Non couvert.**
+- Mêmes limites que l'OBJ ([udim-import](#udim-import)) : split UDIM et par matériau exclusifs, uv des matériaux
+  dans l'espace de la case.
+- Seul le premier jeu d'uv décide de la tuile ; le second est interpolé sans être découpé à ses propres bords.
+
+---
+
+## udim-tile-limit
+
+| | |
+|---|---|
+| Fichiers | `paint/sources/util/util_mesh.c` (`_util_mesh_udim_build_tiles`, `util_mesh_udim_slot`, `util_mesh_atlas_slot`, `util_mesh_build_merged_data`), `paint/sources/uniforms.c` (`_atlas_transform`), `paint/sources/util/util_layer.c` (`layers_udim_tile_slot`, `layers_flatten`), `paint/sources/io/export_texture.c` (`export_texture_run_layers`) |
+| Commit studio | `a34a70d5` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-27) |
+| Trouvé | 2026-09-26, analyse des UDIM (`ARMORPAINT_UDIM.md` §3, L3) |
+
+**Bug.** Les textures de calque tiennent au plus 64 tuiles (grille 8 × 8). Au-delà, l'upstream gardait les 64
+premières tuiles rencontrées et donnait aux autres la case 63, sans message : leur peinture recouvrait la 64e tuile,
+et l'export par tuile la réécrivait sous leurs noms. Un objet sans tuile, dans un maillage UDIM, recevait la case 0 :
+peindre dessus peignait la 1001.
+
+**Correctif.**
+- Les 64 plus petites tuiles ont une case, les autres aucune (`util_mesh_udim_slot` rend -1), avec un message
+  (« UDIM: 70 tiles, the layers hold 64: the tiles from 1065 on are not painted nor exported. ») ; dans un maillage
+  à plusieurs tuiles, les objets sans tuile sont signalés aussi. Un message par changement de maillage, pas à chaque
+  reconstruction.
+- Un objet sans case a toutes ses uv sur un texel hors de l'atlas (`util_mesh_build_merged_data`, et
+  `_atlas_transform` pour le rendu par objet) : rien n'est peint, aucune tuile touchée.
+- `layers_udim_tile_slot()` rend -2 pour un calque de tuile sans case : `layers_flatten()` le saute.
+- Export par tuile : pas de fichier pour une tuile sans case, avec un message ; muet pendant la passe à blanc du
+  préflight studio (`studio_export_planning()`, qui signale déjà ces tuiles et bloque l'export).
+
+Pour régénérer : `git diff a34a70d5^ a34a70d5`.
+
+**Test.** `.tests/udim_app.sh`, section « 70 tuiles » (import par objet de `p.1001` … `p.1070`) : message ; les 64
+premières dans l'atlas, chacune dans sa case, `p.1065` à `p.1070` hors de l'atlas ; peindre `p.1065` ne touche aucune
+tuile (l'upstream peignait la case de la 1064) ; témoin : peindre `p.1063` peint la 1063, elle seule ; export par
+tuile : 1001 à 1064, 5 maps chacune, 1065 à 1070 écartées avec un message ; preset studio : bloqué par le préflight,
+rien d'écrit. Au 2026-09-27 : tout passe.
+
+**Signes que l'upstream l'a corrigé.** `util_mesh_udim_tiles_spent` disparaît, ou `util_mesh_udim_slot()` ne rend
+plus `ATLAS_MAX_SLOTS - 1`. Rejouer la section « 70 tuiles » d'`.tests/udim_app.sh` sur l'upstream sans le patch.
+
+**Non couvert.**
+- Les tuiles au-delà de 64 ne sont pas peignables : la limite elle-même disparaît avec la phase D2 (un jeu de
+  textures par tuile).
+- Un calque de tuile sans case est gardé dans le projet mais n'apparaît dans aucun export.

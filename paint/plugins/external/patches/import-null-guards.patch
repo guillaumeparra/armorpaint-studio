@@ -13,7 +13,7 @@ index 04eed473..4c3dabaf 100644
  		for (size_t i = 0; i < active_eval_scene->nodes.count; ++i) {
  			ufbx_node *n = active_eval_scene->nodes.data[i];
 diff --git a/paint/sources/io/import_mesh.c b/paint/sources/io/import_mesh.c
-index cdebffa0..8921b952 100644
+index cdebffa0..8d0d520f 100644
 --- a/paint/sources/io/import_mesh.c
 +++ b/paint/sources/io/import_mesh.c
 @@ -18,6 +18,12 @@ void import_mesh_run(char *path, bool _clear_layers, bool replace_existing, bool
@@ -29,12 +29,17 @@ index cdebffa0..8921b952 100644
  	import_mesh_clear_layers = _clear_layers;
  	import_mesh_no_reset     = keep_camera;
  	import_mesh_append       = !replace_existing;
-@@ -40,6 +46,10 @@ void import_mesh_run(char *path, bool _clear_layers, bool replace_existing, bool
+@@ -38,8 +44,15 @@ void import_mesh_run(char *path, bool _clear_layers, bool replace_existing, bool
+ 	else {
+ 		char *ext                           = string_tmp("%s", path + string_last_index_of(path, ".") + 1);
  		raw_mesh_t *(*importer)(char *path) = any_map_get(import_mesh_importers, ext);
++		char *message                       = console_message; // STUDIO-PATCH(import-null-guards)
  
  		raw_mesh_t *mesh = importer(path);
-+		if (mesh == NULL) { // STUDIO-PATCH(import-null-guards)
-+			console_error(string("Could not import file %s.", path));
++		if (mesh == NULL) {                   // STUDIO-PATCH(import-null-guards)
++			if (console_message == message) { // The importer's own error stays shown (io_fbx: geometry it cannot read)
++				console_error(string("Could not import file %s.", path));
++			}
 +			return;
 +		}
  		if (string_equals(mesh->name, "")) {

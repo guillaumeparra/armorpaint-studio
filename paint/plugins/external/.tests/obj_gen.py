@@ -114,7 +114,7 @@ def quads(f1, f2, vn2=""):
 
 
 def corpus(d):
-    for sub in ("valid", "shared", "bad", "exp"):
+    for sub in ("valid", "shared", "bad", "exp", "udim"):
         os.makedirs(os.path.join(d, sub), exist_ok=True)
     p = lambda *a: os.path.join(d, *a)
 
@@ -139,6 +139,17 @@ def corpus(d):
             a = j * 4 + i
             qs.append((a, a + 1, a + 5, a + 4))
     write(p("valid", "udim_grid.obj"), [("grid", vs, vts, vns, qs)])
+    # udim-import : grille UDIM propre (chaque quad dans sa tuile, ses propres vt), lue en udim comme l'upstream
+    vs, vts, vns, qs = [], [], [], []
+    for j in range(2):
+        for i in range(3):
+            a = len(vs)
+            for (du, dv) in ((0.1, 0.1), (0.9, 0.1), (0.9, 0.9), (0.1, 0.9)):
+                vs.append((i + du, j + dv, 0))
+                vts.append((i + du, j + dv))
+                vns.append((0, 0, 1))
+            qs.append((a, a + 1, a + 2, a + 3))
+    write(p("udim", "udim_clean.obj"), [("clean", vs, vts, vns, qs)])
 
     # Le cas du bug : triangles de l'objet 2 sur le vn 1 de l'objet 1
     tris1 = "f 1/1/1 2/2/1 3/3/1\nf 1/1/1 3/3/1 4/4/1"
@@ -232,9 +243,10 @@ def fuzz(d, n, exes):
                     data = data[:at]
             path = os.path.join(d, "fuzz.obj")
             open(path, "wb").write(data)
-            for split in "ou":
+            # udim-import : aussi en udim, pour l'arbre courant seulement (l'upstream boucle sur les uv énormes)
+            for split in ["o", "u"] + (["o udim"] if e == 0 else []):
                 try:
-                    r = subprocess.run([exe, path, split], capture_output=True, timeout=20)
+                    r = subprocess.run([exe, path] + split.split(), capture_output=True, timeout=20)
                     err = r.stderr.decode(errors="replace")
                     kind = None
                     if "AddressSanitizer" in err:
@@ -249,9 +261,9 @@ def fuzz(d, n, exes):
                 if kind:
                     stats[kind] = stats.get(kind, 0) + 1
                     if e == 0 and not kind.startswith("UB"):
-                        open(os.path.join(fails, "%d_%s.obj" % (k, split)), "wb").write(data)
+                        open(os.path.join(fails, "%d_%s.obj" % (k, split.replace(" ", "_"))), "wb").write(data)
         crashes = sum(v for k, v in stats.items() if not k.startswith("UB"))
-        print("%s : %d lectures, %d plantages %s" % (os.path.basename(exe), 2 * n, crashes, stats))
+        print("%s : %d lectures, %d plantages %s" % (os.path.basename(exe), (3 if e == 0 else 2) * n, crashes, stats))
 
 
 if __name__ == "__main__":

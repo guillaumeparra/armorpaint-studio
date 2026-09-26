@@ -1,7 +1,8 @@
 #!/bin/sh
 # Banc des lots B2, B4 et B5 hors de l'app, sous ASan/UBSan :
 #  - encodeurs PNG/TIFF (studio_image.c), relus par libpng et libtiff, et le patch sdefl-bound ;
-#  - expressions, presets (dont les 5 livrés), nommage, préflight, SHA-256 (comparé à shasum).
+#  - expressions, presets (dont les 5 livrés), nommage, préflight, SHA-256 (comparé à shasum) ;
+#  - conseil de résolution après un import UDIM (studio_udim.c, lot D0).
 #
 # Usage : .tests/export.sh [dossier de travail]     FUZZ=<n> : expressions aléatoires (défaut 200000)
 # Requiert libpng et libtiff (brew install libpng libtiff), et tiffinfo.
@@ -18,7 +19,7 @@ echo "== build ($W)"
 SAN="-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
 CFLAGS="-std=c11 -O1 -g $SAN -DWITH_COMPRESS -I$T/stubs -I$BASE/sources -I$BASE/sources/libs"
 WARN="-Wall -Wextra -Wno-unused-parameter -Werror"
-MODULES="studio_image studio_expr studio_preset studio_preflight studio_naming studio_json studio_sha256 studio_fs"
+MODULES="studio_image studio_expr studio_preset studio_preflight studio_naming studio_json studio_sha256 studio_fs studio_udim"
 OBJS=""
 for m in $MODULES; do
 	# shellcheck disable=SC2086
