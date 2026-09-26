@@ -1,0 +1,13 @@
+--- a/exr_jph.c
++++ b/exr_jph.c
+@@ -5280,6 +5280,10 @@
+         uint32_t row_off, col_off;
+         JphPlaneD *plane = &st->planes[seg->comp];
+         int64_t *dst;
++        /* STUDIO-VENDOR-PATCH(jph-d64-null): planes hold either d32 or d64 (jph_alloc_component_planes), and
++           the i32 branch above is skipped when missing_msbs >= 30 or kmax > 30. On an i32 plane that lands
++           here with d64 == NULL, dst was computed from NULL and written through. */
++        if (!plane->d64) return EXR_ERROR_CORRUPT;
+         rc = jph_subband_origin(seg, band, plane,
+                                 st->jp->num_decomps, &row_off, &col_off);
+         if (rc != EXR_SUCCESS) return rc;
