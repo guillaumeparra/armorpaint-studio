@@ -30,6 +30,9 @@ void import_mesh_run(char *path, bool _clear_layers, bool replace_existing, bool
 	import_mesh_appended     = NULL;
 	g_context->layer_filter  = 0;
 
+	mesh_object_t_array_t *objects = g_project->_->paint_objects; // STUDIO-PATCH(udim-import)
+	i32                    count   = objects->length;
+
 	char *p        = to_lower_case(path);
 	bool  is_obj   = ends_with(p, ".obj");
 	bool  is_blend = ends_with(p, ".blend");
@@ -65,6 +68,11 @@ void import_mesh_run(char *path, bool _clear_layers, bool replace_existing, bool
 			has_next = mesh->has_next;
 			import_mesh_add_mesh(mesh);
 		}
+	}
+
+	// STUDIO-PATCH(udim-import): nothing imported (udim file refused, no face, blender missing): the project keeps its mesh
+	if (g_project->_->paint_objects == objects && objects->length == count) {
+		return;
 	}
 
 	g_project->mesh_assets = any_array_create_from_raw(
@@ -150,6 +158,11 @@ void import_mesh_finish_import(void *_) {
 	tab_meshes_reset_preview_map();
 	base_update_workflow();
 
+#ifdef WITH_EXTERNAL
+	void studio_udim_import_hint(void); // STUDIO-PATCH(udim-import): pixels per udim tile and project resolution advised, in external/
+	studio_udim_import_hint();
+#endif
+
 	if (import_mesh_needs_unwrap) {
 		import_mesh_needs_unwrap = false;
 		project_unwrap_mesh_box();
@@ -174,11 +187,18 @@ bool _import_mesh_is_unique_name(char *s) {
 
 char *_import_mesh_unique_name(char *name) {
 	// Returns the name or the next free .00X variant
+	// STUDIO-PATCH(udim-import): a udim tile suffix is kept, the .00X goes before it (body.1001 gave body.1002, another tile)
+	char *tile = "";
+	if (util_mesh_udim_tile(name) > 0) {
+		i32 len = string_length(name);
+		tile    = string_tmp("%s", name + len - 5);
+		name    = string_tmp("%.*s", len - 5, name);
+	}
 	char *base;
 	i32   i   = strings_split_number_ext(name, &base);
-	char *res = i == 0 ? base : string_tmp("%s%s", base, strings_number_ext(i));
+	char *res = i == 0 ? string_tmp("%s%s", base, tile) : string_tmp("%s%s%s", base, strings_number_ext(i), tile);
 	while (!_import_mesh_is_unique_name(res)) {
-		res = string_tmp("%s%s", base, strings_number_ext(++i));
+		res = string_tmp("%s%s%s", base, strings_number_ext(++i), tile);
 	}
 	return res;
 }

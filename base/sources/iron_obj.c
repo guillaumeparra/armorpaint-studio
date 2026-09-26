@@ -229,16 +229,129 @@ static void next_line() {
 	}
 }
 
-static int get_tile(int i1, int i2, int i3, i32_array_t *uv_indices, int tiles_u) {
-	float u1     = uv_temp.buffer[uv_indices->buffer[i1] * 2];
-	float v1     = uv_temp.buffer[uv_indices->buffer[i1] * 2 + 1];
-	float u2     = uv_temp.buffer[uv_indices->buffer[i2] * 2];
-	float v2     = uv_temp.buffer[uv_indices->buffer[i2] * 2 + 1];
-	float u3     = uv_temp.buffer[uv_indices->buffer[i3] * 2];
-	float v3     = uv_temp.buffer[uv_indices->buffer[i3] * 2 + 1];
-	int   tile_u = (int)((u1 + u2 + u3) / 3);
-	int   tile_v = (int)((v1 + v2 + v3) / 3);
-	return tile_u + tile_v * tiles_u;
+// STUDIO-PATCH(udim-import): the tile of a triangle was the one of its uv barycenter, cast with (int): negative uvs
+// indexed num[] before its start, u >= 10 ran into the next row, and a triangle over two tiles was folded into one.
+// Now each triangle is cut along the tile borders (iron_udim.c), its corners get uvs local to their tile, and a uv
+// out of the tiles 1001-1990 is counted in obj_udim_invalid (the importer refuses the file). Include and globals here,
+// out of the lines of obj-global-indices and obj-float-exponent at the top of the file (context of their .patch).
+#include "iron_udim.h"
+
+int   obj_udim_invalid = 0;
+float obj_udim_invalid_uv[2];
+int   obj_udim_cut = 0;
+
+typedef struct {
+	i32_array_t  pos; // Corners after the cut, into pos_temp / uv_temp / nor_temp
+	i32_array_t  uv;
+	i32_array_t  nor;
+	i32_array_t *tiles; // Tile u + v * UDIM_TILES_U of each triangle
+	bool         has_nor;
+} obj_udim_t;
+
+static void obj_udim_push_uv(obj_udim_t *s, float u, float v) {
+	i32_array_push(&s->uv, uv_temp.length / 2);
+	f32_array_push(&uv_temp, u);
+	f32_array_push(&uv_temp, v);
+}
+
+// A part of a cut triangle: new corners, appended to the temp arrays until the part is packed
+static void obj_udim_emit(int tu, int tv, const udim_vert_t tri[3], void *user) {
+	obj_udim_t *s = user;
+	for (int k = 0; k < 3; ++k) {
+		i32_array_push(&s->pos, pos_temp.length / 3);
+		f32_array_push(&pos_temp, tri[k].pos[0]);
+		f32_array_push(&pos_temp, tri[k].pos[1]);
+		f32_array_push(&pos_temp, tri[k].pos[2]);
+		obj_udim_push_uv(s, tri[k].uv[0], tri[k].uv[1]);
+		if (s->has_nor) {
+			i32_array_push(&s->nor, nor_temp.length / 3);
+			f32_array_push(&nor_temp, tri[k].nor[0]);
+			f32_array_push(&nor_temp, tri[k].nor[1]);
+			f32_array_push(&nor_temp, tri[k].nor[2]);
+		}
+	}
+	i32_array_push(s->tiles, tu + tv * UDIM_TILES_U);
+}
+
+static void obj_udim_swap(i32_array_t *a, i32_array_t *b) {
+	i32_array_t t = *a;
+	*a            = *b;
+	*b            = t;
+}
+
+static void obj_udim_cut_triangles(i32_array_t *pos_indices, i32_array_t *uv_indices, i32_array_t *nor_indices, i32_array_t *tiles) {
+	obj_udim_t s = {.tiles = tiles, .has_nor = nor_indices->length > 0};
+	for (int i = 0; i + 2 < pos_indices->length; i += 3) {
+		udim_vert_t tri[3] = {0};
+		for (int k = 0; k < 3; ++k) {
+			memcpy(tri[k].pos, &pos_temp.buffer[pos_indices->buffer[i + k] * 3], sizeof(float) * 3);
+			memcpy(tri[k].uv, &uv_temp.buffer[uv_indices->buffer[i + k] * 2], sizeof(float) * 2);
+			if (s.has_nor) {
+				memcpy(tri[k].nor, &nor_temp.buffer[nor_indices->buffer[i + k] * 3], sizeof(float) * 3);
+			}
+		}
+		int tu0, tv0, tu1, tv1;
+		if (!udim_triangle_tiles(tri[0].uv, tri[1].uv, tri[2].uv, &tu0, &tv0, &tu1, &tv1)) {
+			if (obj_udim_invalid++ == 0) {
+				int k                  = udim_uv_valid(tri[0].uv[0], tri[0].uv[1]) ? udim_uv_valid(tri[1].uv[0], tri[1].uv[1]) ? 2 : 1 : 0;
+				obj_udim_invalid_uv[0] = tri[k].uv[0];
+				obj_udim_invalid_uv[1] = tri[k].uv[1];
+			}
+			continue;
+		}
+		if (tu0 == tu1 && tv0 == tv1) { // In one tile: same positions and normals, uvs made local
+			for (int k = 0; k < 3; ++k) {
+				i32_array_push(&s.pos, pos_indices->buffer[i + k]);
+				if (s.has_nor) {
+					i32_array_push(&s.nor, nor_indices->buffer[i + k]);
+				}
+				float u = tri[k].uv[0] - tu0;
+				float v = tri[k].uv[1] - tv0;
+				obj_udim_push_uv(&s, u < 0.0f ? 0.0f : u > 1.0f ? 1.0f : u, v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v);
+			}
+			i32_array_push(tiles, tu0 + tv0 * UDIM_TILES_U);
+		}
+		else if (udim_split_triangle(tri, obj_udim_emit, &s) > 1) {
+			obj_udim_cut++;
+		}
+	}
+	obj_udim_swap(pos_indices, &s.pos);
+	obj_udim_swap(uv_indices, &s.uv);
+	obj_udim_swap(nor_indices, &s.nor);
+	array_free(&s.pos);
+	array_free(&s.uv);
+	array_free(&s.nor);
+}
+
+// Indices of each tile, in a udims_u x udims_v grid as upstream. The corners are not shared (inda is the identity).
+static void obj_udim_tiles(i32_array_t *tiles) {
+	int tiles_u = 1;
+	int tiles_v = 1;
+	for (int i = 0; i < tiles->length; ++i) {
+		int tu  = tiles->buffer[i] % UDIM_TILES_U;
+		int tv  = tiles->buffer[i] / UDIM_TILES_U;
+		tiles_u = tu + 1 > tiles_u ? tu + 1 : tiles_u;
+		tiles_v = tv + 1 > tiles_v ? tv + 1 : tiles_v;
+	}
+	uint32_t *num = calloc(tiles_u * tiles_v, sizeof(uint32_t));
+	for (int i = 0; i < tiles->length; ++i) {
+		tiles->buffer[i] = tiles->buffer[i] % UDIM_TILES_U + tiles->buffer[i] / UDIM_TILES_U * tiles_u;
+		num[tiles->buffer[i]] += 3;
+	}
+	part->udims   = any_array_create(tiles_u * tiles_v);
+	part->udims_u = tiles_u;
+	part->udims_v = tiles_v;
+	for (int i = 0; i < tiles_u * tiles_v; ++i) {
+		part->udims->buffer[i] = u32_array_create(num[i]);
+		num[i]                 = 0;
+	}
+	for (int i = 0; i < tiles->length; ++i) {
+		u32_array_t *a = part->udims->buffer[tiles->buffer[i]];
+		for (int k = 0; k < 3; ++k) {
+			a->buffer[num[tiles->buffer[i]]++] = i * 3 + k;
+		}
+	}
+	free(num);
 }
 
 static bool pnpoly(float v0x, float v0y, float v1x, float v1y, float v2x, float v2y, float px, float py) {
@@ -275,7 +388,12 @@ raw_mesh_t *obj_parse(buffer_t *file_bytes, char split_code, uint64_t start_pos,
 	part->pos       = start_pos;
 	part->udims_u   = 1;
 	part->udims_v   = 1;
-	part->name      = string_copy(str);
+	if (start_pos == 0) { // STUDIO-PATCH(udim-import): no name left over from the previous file for a first object without "o"
+		str[0] = '\0';
+	}
+	obj_udim_invalid = 0; // STUDIO-PATCH(udim-import): counted per part
+	obj_udim_cut     = 0;
+	part->name       = string_copy(str);
 
 	i32_array_t pos_indices = {0};
 	i32_array_t uv_indices  = {0};
@@ -438,9 +556,7 @@ raw_mesh_t *obj_parse(buffer_t *file_bytes, char split_code, uint64_t start_pos,
 				part->pos += 5; // "u"semtl
 			}
 			skip_whitespace();
-			if (!udim) {
-				reading_object = true;
-			}
+			reading_object = true; // STUDIO-PATCH(udim-import): udim tiles are split per object too
 			free(part->name);
 			part->name = string_copy(read_string());
 		}
@@ -494,6 +610,15 @@ raw_mesh_t *obj_parse(buffer_t *file_bytes, char split_code, uint64_t start_pos,
 	float inv = 32767 * (1 / part->scale_pos);
 
 	part->posa         = calloc(sizeof(i16_array_t), 1);
+	// STUDIO-PATCH(udim-import): corners cut along the tile borders, appended to the temp arrays for the packing below.
+	// Cut after the scale: the new corners lie between the old ones. Here, out of the lines of obj-global-indices.
+	i32_array_t udim_tiles   = {0};
+	uint32_t    udim_pos_len = pos_temp.length;
+	uint32_t    udim_uv_len  = uv_temp.length;
+	uint32_t    udim_nor_len = nor_temp.length;
+	if (udim && uv_indices.length > 0) {
+		obj_udim_cut_triangles(&pos_indices, &uv_indices, &nor_indices, &udim_tiles);
+	}
 	part->posa->length = part->posa->capacity = pos_indices.length * 4;
 	part->posa->buffer                        = malloc(part->posa->capacity * sizeof(int16_t));
 
@@ -550,66 +675,8 @@ raw_mesh_t *obj_parse(buffer_t *file_bytes, char split_code, uint64_t start_pos,
 	}
 
 	if (uv_indices.length > 0) {
-		if (udim) {
-			// Find number of tiles
-			int tiles_u = 1;
-			int tiles_v = 1;
-			for (int i = 0; i < (int)(uv_temp.length / 2); ++i) {
-				while (uv_temp.buffer[i * 2] > tiles_u)
-					tiles_u++;
-				while (uv_temp.buffer[i * 2 + 1] > tiles_v)
-					tiles_v++;
-			}
-
-			// Amount of indices pre tile
-			uint32_t *num = (uint32_t *)malloc(tiles_u * tiles_v * sizeof(uint32_t));
-			memset(num, 0, tiles_u * tiles_v * sizeof(uint32_t));
-			for (int i = 0; i < (int)(inda_length / 3); ++i) {
-				int tile = get_tile(part->inda->buffer[i * 3], part->inda->buffer[i * 3 + 1], part->inda->buffer[i * 3 + 2], &uv_indices, tiles_u);
-				num[tile] += 3;
-			}
-
-			// Split indices per tile
-			part->udims   = any_array_create(tiles_u * tiles_v);
-			part->udims_u = tiles_u;
-			part->udims_v = tiles_v;
-			for (int i = 0; i < tiles_u * tiles_v; ++i) {
-				part->udims->buffer[i] = u32_array_create(num[i]);
-				num[i]                 = 0;
-			}
-
-			for (int i = 0; i < (int)(inda_length / 3); ++i) {
-				int          i1        = part->inda->buffer[i * 3];
-				int          i2        = part->inda->buffer[i * 3 + 1];
-				int          i3        = part->inda->buffer[i * 3 + 2];
-				int          tile      = get_tile(i1, i2, i3, &uv_indices, tiles_u);
-				u32_array_t *a         = part->udims->buffer[tile];
-				a->buffer[num[tile]++] = i1;
-				a->buffer[num[tile]++] = i2;
-				a->buffer[num[tile]++] = i3;
-			}
-
-			// Normalize uvs to 0-1 range
-			int16_t *uvtiles = (int16_t *)malloc(uv_temp.length * sizeof(int16_t));
-			for (int i = 0; i < (int)(inda_length / 3); ++i) { // TODO: merge loops
-				int i1                                 = part->inda->buffer[i * 3];
-				int i2                                 = part->inda->buffer[i * 3 + 1];
-				int i3                                 = part->inda->buffer[i * 3 + 2];
-				int tile                               = get_tile(i1, i2, i3, &uv_indices, tiles_u);
-				int tile_u                             = tile % tiles_u;
-				int tile_v                             = (int)(tile / tiles_u);
-				uvtiles[uv_indices.buffer[i1] * 2]     = tile_u;
-				uvtiles[uv_indices.buffer[i1] * 2 + 1] = tile_v;
-				uvtiles[uv_indices.buffer[i2] * 2]     = tile_u;
-				uvtiles[uv_indices.buffer[i2] * 2 + 1] = tile_v;
-				uvtiles[uv_indices.buffer[i3] * 2]     = tile_u;
-				uvtiles[uv_indices.buffer[i3] * 2 + 1] = tile_v;
-			}
-			for (int i = 0; i < uv_temp.length; ++i) {
-				uv_temp.buffer[i] -= uvtiles[i];
-			}
-			free(uvtiles);
-			free(num);
+		if (udim) { // STUDIO-PATCH(udim-import): see obj_udim_cut_triangles
+			obj_udim_tiles(&udim_tiles);
 		}
 
 		part->texa         = calloc(sizeof(i16_array_t), 1);
@@ -629,6 +696,12 @@ raw_mesh_t *obj_parse(buffer_t *file_bytes, char split_code, uint64_t start_pos,
 			part->texa->buffer[i * 2 + 1] = (int)((1.0 - uvy) * 32767);
 		}
 	}
+
+	// STUDIO-PATCH(udim-import): the cut corners are dropped, the next part reads the file's own v / vt / vn
+	array_free(&udim_tiles);
+	pos_temp.length = udim_pos_len;
+	uv_temp.length  = udim_uv_len;
+	nor_temp.length = udim_nor_len;
 
 	bytes = NULL;
 	if (!part->has_next) {

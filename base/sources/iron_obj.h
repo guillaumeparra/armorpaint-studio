@@ -28,6 +28,10 @@ typedef struct raw_mesh {
 } raw_mesh_t;
 
 extern bool obj_parse_y_to_z_up;
+// STUDIO-PATCH(udim-import): udim split of the last obj_parse call, see paint/plugins/external/PATCHES.md
+extern int   obj_udim_invalid;       // Triangles left out: a uv out of the tiles 1001-1990 (negative, u > 10, v > 99, nan)
+extern float obj_udim_invalid_uv[2]; // The first of these uvs
+extern int   obj_udim_cut;           // Triangles cut along a tile border
 
 raw_mesh_t *obj_parse(buffer_t *file_bytes, char split_code, uint64_t start_pos, bool udim);
 void        obj_destroy(raw_mesh_t *part);

@@ -1,5 +1,7 @@
 
 #include "../global.h"
+// STUDIO-PATCH(udim-import)
+#include "iron_udim.h"
 
 void import_obj_run(char *path, bool replace_existing) {
 	buffer_t *b = data_get_blob(path);
@@ -11,54 +13,174 @@ void import_obj_run(char *path, bool replace_existing) {
 	data_delete_blob(path);
 }
 
+// STUDIO-PATCH(udim-import): udim split, see paint/plugins/external/PATCHES.md. Upstream read the file as a single
+// object and gave each tile a copy of all the vertices. Now each object is split in its tiles, with the vertices of the
+// tile only, and obj_parse cuts the triangles over several tiles. A uv out of the tiles 1001-1990, or more tiles than
+// the layer atlas holds, refuses the file with a message and imports nothing.
+static void _import_obj_udim_free(raw_mesh_t *part) {
+	if (part->udims != NULL) {
+		for (i32 i = 0; i < part->udims->length; ++i) {
+			u32_array_t *a = part->udims->buffer[i];
+			array_free(a);
+			free(a);
+		}
+		array_free(part->udims);
+		free(part->udims);
+	}
+	void *arrays[] = {part->posa, part->nora, part->texa, part->inda};
+	for (i32 i = 0; i < 4; ++i) {
+		if (arrays[i] != NULL) {
+			array_free(arrays[i]);
+			free(arrays[i]);
+		}
+	}
+	free(part->name);
+	free(part);
+}
+
+// The triangles of one tile, with their own vertices (obj_parse never shares the corners of its triangles)
+static raw_mesh_t *_import_obj_udim_tile(raw_mesh_t *part, u32_array_t *inda, char *name) {
+	raw_mesh_t *mesh = calloc(1, sizeof(raw_mesh_t));
+	mesh->name       = name;
+	mesh->scale_pos  = part->scale_pos;
+	mesh->scale_tex  = part->scale_tex;
+	mesh->posa       = i16_array_create(inda->length * 4);
+	mesh->nora       = i16_array_create(inda->length * 2);
+	mesh->texa       = i16_array_create(inda->length * 2);
+	mesh->inda       = u32_array_create(inda->length);
+	for (i32 i = 0; i < inda->length; ++i) {
+		u32 k = inda->buffer[i];
+		memcpy(&mesh->posa->buffer[i * 4], &part->posa->buffer[k * 4], sizeof(i16) * 4);
+		memcpy(&mesh->nora->buffer[i * 2], &part->nora->buffer[k * 2], sizeof(i16) * 2);
+		memcpy(&mesh->texa->buffer[i * 2], &part->texa->buffer[k * 2], sizeof(i16) * 2);
+		mesh->inda->buffer[i] = i;
+	}
+	mesh->vertex_count = mesh->index_count = inda->length;
+	return mesh;
+}
+
+static void _import_obj_udim_add(raw_mesh_t *mesh, bool *first, bool replace_existing) {
+	if (*first && replace_existing) {
+		import_mesh_make_mesh(mesh);
+	}
+	else {
+		import_mesh_add_mesh(mesh);
+	}
+	*first = false;
+	free(mesh); // The arrays and the name now belong to the mesh object
+}
+
+static void _import_obj_udim(buffer_t *b, bool replace_existing) {
+	bool used[UDIM_TILES_U * UDIM_TILES_V] = {0}; // Tile u + 10 v
+
+	raw_mesh_t_array_t *parts         = any_array_create_from_raw((void *[]){}, 0);
+	i32                 tiles         = 0;
+	i32                 cut           = 0;
+	i32                 invalid       = 0;
+	f32                 invalid_uv[2] = {0};
+	char               *invalid_name  = NULL;
+	i32                 no_uvs        = 0;
+	char               *no_uvs_name   = NULL;
+	u64                 pos           = 0;
+	bool                has_next      = true;
+	while (has_next) {
+		raw_mesh_t *part = obj_parse(b, 'o', pos, true);
+		pos              = part->pos;
+		has_next         = part->has_next;
+		if (string_equals(part->name, "")) {
+			free(part->name);
+			part->name = string_copy("Object");
+		}
+		if (obj_udim_invalid > 0 && invalid == 0) {
+			invalid_name  = string_copy(part->name);
+			invalid_uv[0] = obj_udim_invalid_uv[0];
+			invalid_uv[1] = obj_udim_invalid_uv[1];
+		}
+		invalid += obj_udim_invalid;
+		cut += obj_udim_cut;
+		if (part->inda->length == 0) { // No face, or only faces with invalid uvs
+			_import_obj_udim_free(part);
+			continue;
+		}
+		if (part->udims == NULL && no_uvs++ == 0) {
+			no_uvs_name = string_copy(part->name);
+		}
+		for (i32 i = 0; part->udims != NULL && i < part->udims->length; ++i) {
+			u32_array_t *a    = part->udims->buffer[i];
+			i32          tile = udim_tile_id(i % part->udims_u, i / part->udims_u) - 1001;
+			if (a->length > 0 && !used[tile]) {
+				used[tile] = true;
+				tiles++;
+			}
+		}
+		any_array_push(parts, part);
+	}
+
+	char *error = NULL;
+	if (invalid > 0) {
+		error = string("UDIM import refused: uvs outside the tiles 1001-1990 in \"%s\" (%d triangles, first uv %g %g).", invalid_name, invalid, invalid_uv[0],
+		               invalid_uv[1]);
+	}
+	else if (tiles > UDIM_MAX_TILES) {
+		error = string("UDIM import refused: %d tiles, the layers hold %d at most.", tiles, UDIM_MAX_TILES);
+	}
+	else if (parts->length == 0) {
+		error = strings_failed_to_read_mesh_data();
+	}
+
+	// The parts with uvs first: a first part without uvs makes ArmorPaint offer to unwrap the whole mesh, udim uvs included
+	bool first   = true;
+	i32  objects = 0;
+	for (i32 pass = 0; pass < 2; ++pass) {
+		for (i32 i = 0; i < parts->length; ++i) {
+			raw_mesh_t *part = parts->buffer[i];
+			if (part == NULL || (part->udims == NULL) != (pass == 1)) {
+				continue;
+			}
+			parts->buffer[i] = NULL; // Freed or handed to the mesh object below, the second pass must not read it
+			if (error != NULL) {
+				_import_obj_udim_free(part);
+			}
+			else if (part->udims == NULL) { // No uvs: imported as is, without a tile
+				_import_obj_udim_add(part, &first, replace_existing);
+				objects++;
+			}
+			else {
+				for (i32 j = 0; j < part->udims->length; ++j) {
+					u32_array_t *a = part->udims->buffer[j];
+					if (a->length > 0) {
+						char *name = string("%s.%d", part->name, udim_tile_id(j % part->udims_u, j / part->udims_u));
+						_import_obj_udim_add(_import_obj_udim_tile(part, a, name), &first, replace_existing);
+						objects++;
+					}
+				}
+				_import_obj_udim_free(part);
+			}
+		}
+	}
+	array_free(parts);
+	free(parts);
+
+	if (error != NULL) {
+		console_error(error);
+	}
+	else {
+		console_log(string("UDIM import: %d objects in %d tiles, %d triangles cut along the tile borders.", objects, tiles, cut));
+		if (no_uvs > 0) {
+			console_info(string("UDIM import: %d objects without uvs imported without a tile, first \"%s\".", no_uvs, no_uvs_name));
+		}
+	}
+	free(invalid_name);
+	free(no_uvs_name);
+}
+
 void import_obj_parse(buffer_t *b, bool replace_existing) {
 	split_type_t i          = g_context->split_by;
 	bool         is_udim    = i == SPLIT_TYPE_UDIM;
 	i32          split_code = (i == SPLIT_TYPE_OBJECT || is_udim) ? 'o' : 'u'; // usemtl
 
-	if (is_udim) {
-		raw_mesh_t  *part      = obj_parse(b, split_code, 0, is_udim);
-		char        *name      = part->name;
-		u32_array_t *inda_full = part->inda;
-		bool         first     = true;
-		if (part->udims != NULL) {
-			for (i32 i = 0; i < part->udims->length; ++i) {
-				u32_array_t *a = part->udims->buffer[i];
-				if (a->length == 0) {
-					array_free(a);
-					free(a);
-					continue;
-				}
-				i32 u      = i % part->udims_u;
-				i32 v      = math_floor(i / (float)part->udims_u);
-				i32 id     = (1000 + v * 10 + u + 1);
-				part->name = string("%s.%s", name, i32_to_string(id));
-				part->inda = a;
-				if (first) {
-					first = false;
-					if (replace_existing) {
-						import_mesh_make_mesh(part);
-					}
-					else {
-						import_mesh_add_mesh(part);
-					}
-				}
-				else {
-					part->posa = i16_array_create_from_array(part->posa);
-					part->nora = i16_array_create_from_array(part->nora);
-					if (part->texa != NULL) {
-						part->texa = i16_array_create_from_array(part->texa);
-					}
-					import_mesh_add_mesh(part);
-				}
-			}
-			array_free(inda_full);
-			free(inda_full);
-			array_free(part->udims);
-			free(part->udims);
-			free(name);
-			free(part);
-		}
+	if (is_udim) { // STUDIO-PATCH(udim-import)
+		_import_obj_udim(b, replace_existing);
 	}
 	else {
 		raw_mesh_t_array_t *parts     = any_array_create_from_raw((void *[]){}, 0);
