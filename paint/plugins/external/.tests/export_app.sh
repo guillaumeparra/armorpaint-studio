@@ -65,7 +65,7 @@ int main() {
 	console_log(string("t: deep_again=%d", studio_export_run("$W/out_deep", "deep", 0)));
 	console_log(string("t: ro=%s", studio_export_preflight("$W/ro", "arnold", 0)));
 	console_log(string("t: dry=%s", studio_export_preflight("$W/out_dry", "karma", 0)));
-	console_log(string("t: studio=%d generic=%d", studio_export_is_studio_preset("vray"), studio_export_is_studio_preset("generic")));
+	console_log(string("t: studio=%d generic=%d", studio_export_is_studio_preset("cycles"), studio_export_is_studio_preset("generic")));
 	project_filepath_set("$W/p.arm");
 	project_save(false);
 	return 0;
@@ -100,8 +100,8 @@ check "tiffinfo sans avertissement" '[ -z "$(tiffinfo -D "$W/out_deep/untitled/b
 
 # 3. Ligne de commande : --export-textures avec un preset studio, puis l'export upstream (generic) pour comparer.
 mkdir -p "$W/out_cli" "$W/out_generic" "$W/out_raw2"
-"$APP" "$W/p.arm" --background --export-textures exr16 redshift "$W/out_cli" > "$W/cli.log" 2>&1 || true
-check "--export-textures redshift" '[ $(ls "$W/out_cli"/p_*.exr 2>/dev/null | wc -l) -eq 7 ] && [ -f "$W/out_cli/p.export.json" ]'
+"$APP" "$W/p.arm" --background --export-textures exr16 karma "$W/out_cli" > "$W/cli.log" 2>&1 || true
+check "--export-textures karma" '[ $(ls "$W/out_cli"/p_*.exr 2>/dev/null | wc -l) -eq 7 ] && [ -f "$W/out_cli/p.export.json" ]'
 "$APP" "$W/p.arm" --background --export-textures png generic "$W/out_generic" > "$W/generic.log" 2>&1 || true
 "$APP" "$W/p.arm" --background --export-textures png rawpng "$W/out_raw2" > "$W/raw2.log" 2>&1 || true
 check "raw 8 bits = generic upstream (base, rough)" 'python3 - "$W" <<PY

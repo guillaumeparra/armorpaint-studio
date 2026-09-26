@@ -728,3 +728,37 @@ vérifie dans `paint/build/out/data/compositor_pass.vert.metal`.
 **Non couvert.** Les sphères d'environnement (`render_envsphere.c`, `render_pathsphere.c`, désactivées par défaut)
 gardent leur propre tonemap filmique. Les aperçus de matériaux qui passent par le compositeur en mode Lit suivent
 la vue OCIO, comme le viewport.
+
+---
+
+## export-window
+
+| | |
+|---|---|
+| Fichier | `paint/sources/ui/box_export.c` (`box_export_show_textures`) |
+| Commit studio | `8f5e0900` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-26) |
+| Injection | 4 lignes sous `#ifdef WITH_EXTERNAL` : l'appel upstream passe dans le `#else` — l'app compile toujours sans `external/` |
+
+**Motif.** Le lot B6 remplace la boîte d'export de textures d'ArmorPaint par la fenêtre Qt du studio
+(`external/studio_export_window.c`, `assets/studio_export_window.py`) : presets studio seulement, espace OCIO,
+préflight en direct. Chaque entrée d'export doit l'ouvrir : File > Export > Textures (`ui_menubar.c`), l'icône
+d'export de la barre d'outils, Export du menu d'un calque (`tab_layers.c`, mode Selected), les raccourcis
+(`util_shortcut.c`). Tous passent par `box_export_show_textures()`.
+
+**Correctif.** Avec `WITH_EXTERNAL`, `box_export_show_textures()` appelle `studio_export_window_show()` au lieu
+d'ouvrir la boîte. Le mode d'export posé par l'appelant (`layers_export`) est repris par la fenêtre. Un export abouti
+devient l'export courant (dossier, preset, mode, marge) : `Ctrl+E` (`box_export_show_textures` n'est pas appelé)
+le refait par `export_texture_run` sans rouvrir de fenêtre.
+
+**Test.** `.tests/export_window_app.sh` : un script appelle `studio_export_window_show()`, la fenêtre tourne sans
+intervention (Qt offscreen) et exporte. Pour vérifier le menu lui-même : lancer l'app, File > Export > Textures ouvre
+la fenêtre Qt. Sans le patch, la boîte upstream s'ouvre.
+
+**Signes que l'upstream l'a changé.** `box_export_show_textures` renommé, découpé, ou qui ne sert plus à toutes les
+entrées d'export (une nouvelle entrée qui appelle directement `ui_box_show_custom(&box_export_show_textures_box…)`) :
+la rediriger aussi. Une nouvelle option dans l'onglet Export de la boîte (autre que format, résolution, preset,
+layers, pack, padding) : voir s'il faut l'ajouter à la fenêtre.
+
+**Non couvert.** Les onglets Presets (éditeur de presets upstream) et Atlases, et « Pack into project », ne sont plus
+accessibles. La boîte d'export de bake (`box_export_show_bake_material`) et l'export de maillage ne sont pas touchés.

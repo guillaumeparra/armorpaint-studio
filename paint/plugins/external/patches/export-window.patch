@@ -1,0 +1,17 @@
+diff --git a/paint/sources/ui/box_export.c b/paint/sources/ui/box_export.c
+index 101c3e26..f7fb9256 100644
+--- a/paint/sources/ui/box_export.c
++++ b/paint/sources/ui/box_export.c
+@@ -498,7 +498,12 @@ void box_export_show_textures_box() {
+ }
+ 
+ void box_export_show_textures() {
++#ifdef WITH_EXTERNAL // STUDIO-PATCH(export-window): texture export in the studio window (Qt) instead of this box, see external/PATCHES.md
++	void studio_export_window_show(void);
++	studio_export_window_show();
++#else
+ 	ui_box_show_custom(&box_export_show_textures_box, 600, 400, NULL, true, tr("Export"));
++#endif
+ }
+ 
+ void box_export_show_bake_material_box() {

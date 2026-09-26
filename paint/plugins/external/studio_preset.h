@@ -90,6 +90,13 @@ const char *studio_format_ext(studio_format_t format);
 const char *studio_color_name(studio_color_t color); // "raw", "linear", "srgb", "ocio"
 // Valeur de color_space de la texture : le mot-clé, ou le nom OCIO.
 const char *studio_preset_color(const studio_preset_texture_t *t);
+// Espace colorimétrique imposé à l'export (boîte d'export, STUDIO_EXPORT_COLOR_SPACE, script) : les textures de
+// couleur du preset passent à l'espace OCIO cs (nom, alias ou rôle). Une texture est de couleur si son color_space est
+// linear, srgb, ou un espace OCIO que is_data ne dit pas de donnée (is_data : 1 donnée, 0 couleur, -1 inconnu, comme
+// studio_ocio_is_data ; NULL : tout espace OCIO est de couleur). raw et les espaces de donnée restent tels quels.
+// Rend le nombre de textures changées, -1 si la mémoire manque.
+bool studio_preset_texture_is_color(const studio_preset_texture_t *t, int (*is_data)(const char *colorspace));
+int  studio_preset_override_color(studio_preset_t *p, const char *cs, int (*is_data)(const char *colorspace));
 // Niveau sdefl (0-8) d'une compression PNG ou TIFF deflate.
 int studio_preset_deflate_level(const char *compression);
 

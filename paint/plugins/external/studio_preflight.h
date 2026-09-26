@@ -40,6 +40,7 @@ typedef struct {
 	const char            *naming_error;     // échec du nommage (template ShotGrid...), bloquant
 	const char            *manifest_path;    // NULL sans manifeste
 	const char            *destination;      // dossier choisi par l'utilisateur
+	const char            *color_override;   // espace imposé aux textures de couleur (déjà appliqué) ; NULL sinon
 } studio_plan_t;
 
 typedef struct {

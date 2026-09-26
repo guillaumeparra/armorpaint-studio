@@ -25,7 +25,8 @@ Ce dossier est compilé dans ArmorPaint par le hook upstream `paint/plugins/exte
   `tools/build_ocio.sh` ; voir « Gestion couleur OCIO ».
 - `.shotgrid/` : sources de Toolkit (tk-core, Workfiles et ses frameworks) pour la démo ShotGrid et les tests ;
   le venv PySide6 y est créé par `tools/setup_shotgrid.sh`, hors de git.
-- `tools/armorpaint.sh` : lance la version studio (build compris) ; `--shotgrid-demo` pour le site simulé.
+- `tools/armorpaint.sh` : lance la version studio (build compris) ; `--shotgrid-demo` pour le site simulé. Sans
+  `STUDIO_PYTHON`, il prend le venv PySide6 de `.shotgrid/` (créé au besoin) pour la fenêtre d'export.
 
 Modules, un par lot (voir `ARMORPAINT_LOTS.md` à la racine d'armorpaint) :
 
@@ -42,7 +43,7 @@ Modules, un par lot (voir `ARMORPAINT_LOTS.md` à la racine d'armorpaint) :
 | `studio_sg`, `studio_shotgrid`, `studio_json`, `assets/studio_sg_*.py` | C2 | ✅ sidecar ShotGrid (Toolkit), superviseur, API de scripting (macOS ; validé sur site simulé) |
 | `studio_workfiles`, `tk-armorpaint/` | C3 | ✅ Workfiles (tk-multi-workfiles2) et menu ShotGrid, par le moteur Toolkit tk-armorpaint (macOS ; validé sur site simulé) |
 | `studio_shotgrid` (UI) | C4-C5 | à faire |
-| `studio_ui` | B6/C3 | à faire |
+| `studio_export_window`, `assets/studio_export_window.py` | B6 | ✅ fenêtre d'export Qt (PySide6) à la place de la boîte d'export : presets studio, espace OCIO, préflight en direct (macOS) |
 
 Build : `../base/make --compile` depuis `paint/`. Le log de démarrage affiche `studio: external <version>
 loaded`, puis une ligne par module.
@@ -68,6 +69,9 @@ upstream sans rebuild ; les réglages destinés aux artistes passeront par l'UI 
 | `STUDIO_EXR_THREADS` | nombre de threads de codec (défaut : cœurs matériels) |
 | `STUDIO_SG_*`, `STUDIO_SGTK_PATH` | sidecar ShotGrid, voir « ShotGrid (C2) » |
 | `STUDIO_EXPORT_PRESETS` | presets d'export studio : dossiers ou fichiers `.json`, séparés par `:` (`;` sous Windows), prioritaires sur les presets livrés |
+| `STUDIO_EXPORT_COLOR_SPACE` | espace OCIO imposé aux textures de couleur des exports studio au démarrage (vide : celui du preset) ; voir « Fenêtre d'export (B6) » |
+| `STUDIO_PYTHON` | interpréteur Python 3 avec PySide6 de la fenêtre d'export (défaut : `STUDIO_SG_PYTHON`, puis `python3`) |
+| `STUDIO_EXPORT_WINDOW` | script de la fenêtre d'export à la place de `data/studio_export_window.py` |
 | `STUDIO_EXPORT_THREADS` | threads de composition et d'encodage des exports studio (défaut : cœurs matériels) |
 | `OCIO` | configuration OpenColorIO (fichier `.ocio`, archive `.ocioz` ou URI `ocio://`) ; défaut : `ocio://studio-config-latest` |
 | `STUDIO_OCIO_WORKING_SPACE` | espace de travail d'ArmorPaint dans la configuration OCIO (nom, alias ou rôle), quand elle n'en a pas de reconnaissable ; voir « Gestion couleur OCIO » |
@@ -295,7 +299,7 @@ PySide6 (`.shotgrid/venv`, propre à la machine, par `tools/setup_shotgrid.sh`).
 Quand le projet ouvert est un fichier de travail ShotGrid, les textures exportées prennent le chemin du template
 Toolkit des textures, rempli avec les champs du fichier : entité, étape, nom, version. Pour `robot.v003.arm`, la
 texture `base` du preset va dans `…/work/armorpaint/textures/v003/robot_base.png`. Chaque version du projet a donc
-ses textures, et le dossier choisi dans la boîte d'export est ignoré. La console l'indique à la première texture :
+ses textures, et le dossier choisi dans la fenêtre d'export est ignoré. La console l'indique à la première texture :
 « Textures named by ShotGrid template … ».
 
 ```yaml
@@ -340,14 +344,20 @@ Un **preset studio** est un preset d'export plus riche que ceux d'ArmorPaint. Po
 la profondeur, la compression, l'espace colorimétrique, le nom de fichier et des canaux calculés. L'export vérifie
 tout avant d'écrire, écrit de façon atomique et laisse un manifeste.
 
-**Presets livrés** (`assets/studio_preset_<nom>.json`, copiés dans `data/`) : `arnold`, `karma`, `renderman`,
-`vray` et `redshift`. Suffixes des paramètres du shader de chaque moteur. Cartes de couleur en EXR half linéaire,
-données brutes, hauteur en float 32 bits. `STUDIO_EXPORT_PRESETS` en ajoute ou en remplace : le nom du preset est
+**Presets livrés** (`assets/studio_preset_<nom>.json`, copiés dans `data/`) :
+- `basic` : tous les canaux d'ArmorPaint, une carte chacun, noms génériques, pour un moteur sans preset ;
+- `arnold` et `karma` : suffixes des paramètres du shader (aiStandardSurface, MaterialX Standard Surface) ;
+- `cycles` : Principled BSDF, suffixes reconnus par Node Wrangler (Ctrl+Shift+T) ;
+- `unreal_engine` : préfixe `T_`, PNG 8 bits, couleur en sRGB, ORM groupé, normales DirectX (`unreal` est déjà un
+  preset d'ArmorPaint).
+
+Sauf `unreal_engine`, les cartes de couleur sont en EXR half linéaire, les données brutes, la hauteur en float
+32 bits et les normales OpenGL. `STUDIO_EXPORT_PRESETS` en ajoute ou en remplace : le nom du preset est
 celui du fichier, et le premier trouvé l'emporte.
 
 **Installation.** Au démarrage, chaque preset studio valide reçoit un preset upstream du même nom dans
-`data/export_presets/`, avec les 4 canaux et le `color_space` les plus proches. Il apparaît ainsi dans la boîte
-d'export et en ligne de commande. Le registre `data/studio_presets_generated.txt` note ces fichiers et leur
+`data/export_presets/`, avec les 4 canaux et le `color_space` les plus proches. Il est ainsi connu de la ligne de
+commande et de Ctrl+E (refaire le dernier export). Le registre `data/studio_presets_generated.txt` note ces fichiers et leur
 empreinte.
 - Un preset upstream du même nom n'est jamais écrasé : le preset studio n'est pas installé et la console le dit.
 - Un fichier que le studio a écrit est retiré quand son preset disparaît, sauf s'il a été modifié depuis.
@@ -431,6 +441,35 @@ PNG et TIFF sont écrits par `studio_image.c` : filtres adaptatifs, deflate et L
 (flottant pour 32 bits). L'EXR passe par tinyexr (B1), et le JPG par stb. Le mode « pack into project » garde
 l'écriture upstream.
 
+### Fenêtre d'export (B6)
+
+File > Export > Textures, l'icône d'export de la barre d'outils, Export du menu d'un calque et les raccourcis ouvrent
+une fenêtre Qt à la place de la boîte d'export d'ArmorPaint (patch `export-window`). C'est un processus Python à part
+(`assets/studio_export_window.py`, PySide6) : l'environnement Python est fourni par le déploiement (rez).
+
+- **Preset** : les presets studio seulement, ceux de `STUDIO_EXPORT_PRESETS` d'abord, puis les presets livrés.
+- **Color space** : « From preset », ou un espace OCIO imposé aux textures de couleur ; les données restent brutes.
+- **Layers** : Visible, Selected, Per Object, Per UDIM Tile, et la marge (padding) de l'upstream.
+- **Destination** : dossier ; défaut : celui du dernier export, sinon celui du projet.
+- **Files** : le préflight, recalculé à chaque changement, sans rien écrire : fichiers, formats, espaces, tailles
+  (un fichier existant est en orange), puis les problèmes, regroupés. Un problème bloquant désactive Export.
+
+Un export abouti devient l'export courant d'ArmorPaint (dossier, preset, mode, marge, espace) : Ctrl+E le refait
+sans rouvrir la fenêtre. Cancel ne change rien. Rouvrir la fenêtre pendant qu'elle est ouverte la ramène devant. Elle
+se ferme quand ArmorPaint quitte. Sa taille suit l'échelle de l'interface d'ArmorPaint (`STUDIO_UI_SCALE`, transmis
+par l'app). Si elle ne démarre pas (Python sans PySide6), ArmorPaint le dit, avec la fin de la sortie d'erreur.
+
+L'onglet Presets (éditeur de presets upstream), l'onglet Atlases et « Pack into project » de la boîte d'export ne
+sont plus accessibles. La résolution et la profondeur sont affichées, pas modifiables : elles restent celles du
+projet. Pas encore sous Windows (`studio_proc`).
+
+**Protocole**, une ligne JSON par message sur stdin et stdout de la fenêtre (détail dans `studio_export_window.h`) :
+requêtes `state`, `preflight` et `export` (`args` : `preset`, `color_space`, `dir`, `mode`, `padding`), réponses
+`{"id", "ok", "data" | "error"}`, évènement `{"event": "raise", "mode"}`. Un autre outil peut remplacer la fenêtre
+par `STUDIO_EXPORT_WINDOW`. `STUDIO_EXPORT_WINDOW_TEST=<choix.json>` la fait tourner sans intervention (bancs).
+
+L'espace imposé est noté `color_space_override` dans le manifeste (`preset`) et dans le rapport du préflight.
+
 ### Scripts (minic)
 
 ```c
@@ -438,9 +477,13 @@ int   studio_export_run(char *dir, char *preset, int mode);        // 1 si écri
 char *studio_export_preflight(char *dir, char *preset, int mode);  // rapport JSON, sans rien écrire
 char *studio_export_last_report(void);                              // rapport JSON du dernier export
 int   studio_export_is_studio_preset(char *name);
+char *studio_export_color_space(void);              // espace imposé aux couleurs ; "" : celui du preset
+int   studio_export_set_color_space(char *name);     // "" : celui du preset ; 0 si inconnu d'OCIO (gardé, l'export sera bloqué)
+void  studio_export_window_show(void);               // ouvre la fenêtre d'export, ou la ramène devant
+int   studio_export_window_is_open(void);
 ```
 
-Le rapport JSON contient `ok`, `preset`, `destination`, la résolution, `total_size`, `manifest`, `files[]` (chemin,
+Le rapport JSON contient `ok`, `preset`, `color_space_override`, `destination`, la résolution, `total_size`, `manifest`, `files[]` (chemin,
 texture, format, profondeur, compression, taille estimée, `exists`) et `issues[]` (`level`, `code`, `message`). En
 ligne de commande, `ArmorPaint projet.arm --background --export-textures exr16 arnold <dossier>` utilise le preset
 studio. Chaque texture garde son propre format. Le type fixe seulement la profondeur de travail des calques
@@ -606,6 +649,7 @@ STUDIO_TEST_TK_CORE=<tk-core> .tests/sg.sh [dossier de travail]   # ShotGrid (C2
 .tests/ocio_app.sh [dossier]           # OCIO dans l'app : configuration par défaut, $OCIO, $OCIO invalide, API de scripting
 .tests/ocio_export_app.sh [dossier]    # export OCIO (A3) dans l'app : pixels = PyOpenColorIO, préflight, manifeste, cas bloquants
 .tests/ocio_view_app.sh [dossier]      # viewport OCIO (A2) dans l'app : compositeur = PyOpenColorIO, menu (API), rechargement, variables
+.tests/export_window_app.sh [dossier]  # fenêtre d'export (B6) dans l'app, Qt offscreen : état, préflight, export, blocage, réouverture ; PY=<python PySide6>
 ```
 
 `ocio.sh` compare au bit près à PyOpenColorIO, la roue officielle à la même version, installée dans `.ocio/venv`

@@ -1,0 +1,14 @@
+{
+	"version": 1,
+	"description": "Unreal Engine 5 (default lit): T_ prefix, 8-bit PNG, base colour and emissive in sRGB, packed ORM (occlusion, roughness, metallic) and DirectX normals to import with sRGB off, height in 16-bit PNG.",
+	"naming": "T_<file>[_<variant>]_<channel>[.<UDIM>].<ext>",
+	"defaults": { "format": "png", "bits": 8, "color_space": "raw" },
+	"textures": [
+		{ "name": "BC", "channels": ["base_r", "base_g", "base_b"], "color_space": "srgb" },
+		{ "name": "N", "channels": ["nor_r", "nor_g_directx", "nor_b"] },
+		{ "name": "ORM", "channels": ["occ", "rough", "metal"] },
+		{ "name": "E", "channels": ["base_r * emis", "base_g * emis", "base_b * emis"], "color_space": "srgb" },
+		{ "name": "Opacity", "channels": ["opac"] },
+		{ "name": "H", "channels": ["height"], "bits": 16 }
+	]
+}

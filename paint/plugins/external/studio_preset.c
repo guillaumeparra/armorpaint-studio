@@ -125,6 +125,32 @@ const char *studio_preset_color(const studio_preset_texture_t *t) {
 	return t->color == STUDIO_COLOR_OCIO ? t->color_space : studio_color_name(t->color);
 }
 
+bool studio_preset_texture_is_color(const studio_preset_texture_t *t, int (*is_data)(const char *colorspace)) {
+	if (t->color == STUDIO_COLOR_RAW) {
+		return false;
+	}
+	return t->color != STUDIO_COLOR_OCIO || is_data == NULL || is_data(t->color_space) != 1;
+}
+
+int studio_preset_override_color(studio_preset_t *p, const char *cs, int (*is_data)(const char *colorspace)) {
+	int changed = 0;
+	for (int i = 0; i < p->texture_count; ++i) {
+		studio_preset_texture_t *t = &p->textures[i];
+		if (!studio_preset_texture_is_color(t, is_data)) {
+			continue;
+		}
+		char *name = strdup(cs);
+		if (name == NULL) {
+			return -1;
+		}
+		free(t->color_space);
+		t->color_space = name;
+		t->color       = STUDIO_COLOR_OCIO;
+		changed++;
+	}
+	return changed;
+}
+
 int studio_preset_deflate_level(const char *compression) {
 	if (compression != NULL && strcmp(compression, "fast") == 0) {
 		return 1;

@@ -1,8 +1,8 @@
 #pragma once
 
 // Lots B2, B4, B5 : export de textures par preset studio (studio_preset.h). Chaque preset studio valide est installé
-// dans la liste d'export d'ArmorPaint sous forme d'un preset upstream (stub) ; quand il est choisi (boîte d'export,
-// --export-textures, studio_export_run), l'export passe par ici :
+// dans la liste d'export d'ArmorPaint sous forme d'un preset upstream (stub) ; quand il est choisi (fenêtre d'export,
+// studio_export_window.h ; --export-textures ; studio_export_run ; Ctrl+E), l'export passe par ici :
 //   1. passe à blanc d'export_texture_run : l'upstream parcourt objets, atlas et tuiles, studio_export_layers note les
 //      fichiers qu'il écrirait (plan) ;
 //   2. préflight (studio_preflight.h) : bloquant -> rien n'est écrit, rapport affiché ;
@@ -13,6 +13,7 @@
 //
 // STUDIO_EXPORT_PRESETS : dossiers ou fichiers .json de presets studio (séparés par ':' , ';' sous Windows), prioritaires
 // sur les presets livrés (data/studio_preset_<nom>.json). STUDIO_EXPORT_THREADS : threads d'encodage (défaut : tous).
+// STUDIO_EXPORT_COLOR_SPACE : espace OCIO des textures de couleur (studio_export_set_color_space).
 
 #include <stdbool.h>
 
@@ -32,3 +33,19 @@ bool studio_export_end(void);
 // Rapport JSON du dernier préflight ("" si aucun).
 const char *studio_export_last_report(void);
 bool        studio_export_is_studio_preset(const char *name);
+const char *studio_export_preset_path(const char *name); // fichier du preset studio ; NULL si preset upstream
+bool        studio_export_preset_shipped(const char *name); // livré avec l'app (data/), pas de STUDIO_EXPORT_PRESETS
+int         studio_export_preset_count(void);               // presets studio de la liste d'export
+const char *studio_export_preset_name(int index);           // NULL hors limites
+
+// Export ou préflight seul (preflight_only) avec ce preset et ce mode (EXPORT_MODE_*, -1 : celui d'ArmorPaint), sans
+// boîte de message d'ArmorPaint : l'appelant affiche studio_export_last_report() et studio_export_last_error(). Rend
+// true si l'export a abouti (préflight seul : s'il n'est pas bloquant). Thread principal, hors du dessin.
+bool        studio_export_request(const char *dir, const char *preset, int mode, bool preflight_only);
+const char *studio_export_last_error(void); // "titre\ntexte" du dernier échec, "" sinon
+
+// Espace colorimétrique imposé aux textures de couleur des presets studio (studio_preset_override_color) : "" ou
+// NULL rend l'espace du preset. Rend false si le nom n'est pas un espace, alias ou rôle de la configuration OCIO
+// chargée ; il est gardé quand même, et l'export sera bloqué avec la raison. Défaut : STUDIO_EXPORT_COLOR_SPACE.
+const char *studio_export_color_space(void); // "" : celui du preset
+bool        studio_export_set_color_space(const char *name);

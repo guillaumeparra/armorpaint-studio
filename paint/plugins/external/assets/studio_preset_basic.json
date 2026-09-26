@@ -1,0 +1,17 @@
+{
+	"version": 1,
+	"description": "Every ArmorPaint channel, one map each, generic names: colour maps as linear half EXR, data maps raw, height in 32-bit float, OpenGL normals. For a renderer without its own preset.",
+	"naming": "<file>[_<variant>]_<channel>[.<UDIM>].<ext>",
+	"defaults": { "format": "exr", "bits": 16, "color_space": "raw" },
+	"textures": [
+		{ "name": "base_color", "channels": ["base_r", "base_g", "base_b"], "color_space": "linear" },
+		{ "name": "opacity", "channels": ["opac"] },
+		{ "name": "normal", "channels": ["nor_r", "nor_g", "nor_b"] },
+		{ "name": "occlusion", "channels": ["occ"] },
+		{ "name": "roughness", "channels": ["rough"] },
+		{ "name": "metallic", "channels": ["metal"] },
+		{ "name": "height", "channels": ["height"], "bits": 32 },
+		{ "name": "emission", "channels": ["base_r * emis", "base_g * emis", "base_b * emis"], "color_space": "linear" },
+		{ "name": "subsurface", "channels": ["subs"] }
+	]
+}

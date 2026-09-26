@@ -1,0 +1,15 @@
+{
+	"version": 1,
+	"description": "Blender Cycles, Principled BSDF: colour maps as linear half EXR (Linear Rec.709 in Blender), data maps raw (Non-Color), height in 32-bit float, OpenGL normals. Suffixes are recognised by Node Wrangler's Principled Texture Setup (Ctrl+Shift+T).",
+	"naming": "<file>[_<variant>]_<channel>[.<UDIM>].<ext>",
+	"defaults": { "format": "exr", "bits": 16, "color_space": "raw" },
+	"textures": [
+		{ "name": "BaseColor", "channels": ["base_r", "base_g", "base_b"], "color_space": "linear" },
+		{ "name": "Roughness", "channels": ["rough"] },
+		{ "name": "Metallic", "channels": ["metal"] },
+		{ "name": "Normal", "channels": ["nor_r", "nor_g", "nor_b"] },
+		{ "name": "Displacement", "channels": ["height"], "bits": 32 },
+		{ "name": "Alpha", "channels": ["opac"] },
+		{ "name": "Emission", "channels": ["base_r * emis", "base_g * emis", "base_b * emis"], "color_space": "linear" }
+	]
+}

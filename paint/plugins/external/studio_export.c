@@ -100,6 +100,10 @@ static void report(bool error, const char *format, ...) {
 	}
 }
 
+// Export piloté par la fenêtre d'export (studio_export_request) : elle affiche elle-même rapport et erreur.
+static bool quiet;
+static char last_error[2048];
+
 // Texte long (rapport) : dans le log en entier, ligne par ligne, puis en boîte de dialogue hors --background.
 static void show_text(const char *title, const char *text, bool error) {
 	const char *p = text;
@@ -110,7 +114,10 @@ static void show_text(const char *title, const char *text, bool error) {
 		p += len + (nl != NULL ? 1 : 0);
 	}
 	report(error, "%s", title);
-	if (!args_background) {
+	if (error) {
+		snprintf(last_error, sizeof(last_error), "%s\n%s", title, text);
+	}
+	if (!args_background && !quiet) {
 		ui_box_show_message((char *)title, (char *)text, true);
 	}
 }
@@ -121,6 +128,7 @@ typedef struct {
 	char *name;
 	char *path;
 	bool  installed; // stub présent dans export_presets : le preset figure dans la liste d'export
+	bool  shipped;   // livré avec l'app (data/studio_preset_<nom>.json) : remplacé à chaque build
 } entry_t;
 
 static entry_t *entries     = NULL;
@@ -150,7 +158,7 @@ static bool ends_with_nocase(const char *s, const char *suffix) {
 	return true;
 }
 
-static void add_entry(const char *name, const char *path) {
+static void add_entry(const char *name, const char *path, bool shipped) {
 	if (name[0] == 0 || find_entry(name) != NULL) { // le premier trouvé l'emporte
 		return;
 	}
@@ -174,7 +182,7 @@ static void add_entry(const char *name, const char *path) {
 			break;
 		}
 	}
-	entries[entry_count++] = (entry_t){.name = strdup(name), .path = clean};
+	entries[entry_count++] = (entry_t){.name = strdup(name), .path = clean, .shipped = shipped};
 }
 
 // Nom de fichier sans dossier ni ".json".
@@ -203,7 +211,7 @@ static void scan_dir(const char *dir, const char *prefix) {
 		char *path = string_tmp("%s%s%s", dir, SEP, f);
 		char *name = stem(f + strlen(prefix));
 		if (name != NULL) {
-			add_entry(name, path);
+			add_entry(name, path, prefix[0] != 0);
 		}
 		free(name);
 	}
@@ -341,7 +349,7 @@ static void load_registry(void) {
 			}
 			else if (ends_with_nocase(item, ".json") && studio_fs_exists(item)) {
 				char *name = stem(item);
-				add_entry(name, item);
+				add_entry(name, item, false);
 				free(name);
 			}
 			else if (item[0] != 0) {
@@ -401,6 +409,10 @@ static struct {
 	char *last_report; // JSON du dernier préflight
 	bool  last_ok;
 } ex;
+
+// Espace imposé aux textures de couleur des presets studio (fenêtre d'export, STUDIO_EXPORT_COLOR_SPACE, script) ; NULL :
+// celui du preset. Gardé pour la session : les préférences le porteront au lot A5.
+static char *color_override = NULL;
 
 static void add_note(const char *format, ...) {
 	char    message[512];
@@ -1190,7 +1202,14 @@ static char *manifest_json(const char *dir, const studio_report_t *r) {
 	put_quoted(&b, p->name);
 	put(&b, ", \"path\": ");
 	put_quoted(&b, p->path);
-	put(&b, ", \"sha256\": \"%s\"},\n", p->sha256);
+	put(&b, ", \"sha256\": \"%s\", \"color_space_override\": ", p->sha256);
+	if (color_override != NULL) {
+		put_quoted(&b, color_override);
+	}
+	else {
+		put(&b, "null");
+	}
+	put(&b, "},\n");
 	put(&b, "  \"resolution\": [%d, %d],\n  \"source_bits\": %d,\n  \"mode\": \"%s\",\n", config_get_texture_res_x(),
 	    config_get_texture_res_y(), ex.source_bits, mode_name());
 	const char *tmpl = studio_export_naming_template();
@@ -1555,6 +1574,12 @@ bool studio_export_begin(char *path, bool bake_material) {
 		show_text("Texture export: invalid studio preset", err, true);
 		return false;
 	}
+	if (color_override != NULL &&
+	    studio_preset_override_color(preset, color_override, studio_ocio_ready() ? studio_ocio_is_data : NULL) < 0) {
+		studio_preset_free(preset);
+		show_text("Texture export failed", "out of memory", true);
+		return false;
+	}
 	reset_plan();
 	ex.preset      = preset;
 	ex.dir         = strdup(path);
@@ -1569,21 +1594,22 @@ bool studio_export_begin(char *path, bool bake_material) {
 	collect_tiles();
 
 	studio_plan_t plan = {
-	    .preset        = ex.preset,
-	    .files         = ex.files,
-	    .file_count    = ex.file_count,
-	    .width         = config_get_texture_res_x(),
-	    .height        = config_get_texture_res_y(),
-	    .source_bits   = ex.source_bits,
-	    .mode          = bake_material ? "bake material" : mode_name(),
-	    .udim_mesh     = util_mesh_udim_active() || ex.tile_count > 0,
-	    .per_tile      = g_context->layers_export == EXPORT_MODE_PER_UDIM_TILE && !bake_material,
-	    .tiles         = (const char *const *)ex.tiles,
-	    .tile_count    = ex.tile_count,
-	    .layer_count   = bake_material ? 1 : ex.layer_count,
-	    .hidden_layers = bake_material ? 0 : ex.hidden_layers,
-	    .naming_error  = ex.naming_error,
-	    .destination   = path,
+	    .preset         = ex.preset,
+	    .files          = ex.files,
+	    .file_count     = ex.file_count,
+	    .width          = config_get_texture_res_x(),
+	    .height         = config_get_texture_res_y(),
+	    .source_bits    = ex.source_bits,
+	    .mode           = bake_material ? "bake material" : mode_name(),
+	    .udim_mesh      = util_mesh_udim_active() || ex.tile_count > 0,
+	    .per_tile       = g_context->layers_export == EXPORT_MODE_PER_UDIM_TILE && !bake_material,
+	    .tiles          = (const char *const *)ex.tiles,
+	    .tile_count     = ex.tile_count,
+	    .layer_count    = bake_material ? 1 : ex.layer_count,
+	    .hidden_layers  = bake_material ? 0 : ex.hidden_layers,
+	    .naming_error   = ex.naming_error,
+	    .destination    = path,
+	    .color_override = color_override,
 	};
 	char *manifest = NULL;
 	if (ex.preset->manifest && ex.file_count > 0) {
@@ -1696,8 +1722,58 @@ static void run(char *dir, char *preset, int mode, bool preflight_only) {
 	ex.override = NULL;
 }
 
+bool studio_export_request(const char *dir, const char *preset, int mode, bool preflight_only) {
+	last_error[0] = 0;
+	quiet         = true;
+	run((char *)dir, (char *)preset, mode, preflight_only);
+	quiet = false;
+	return ex.last_ok;
+}
+
+const char *studio_export_last_error(void) {
+	return last_error;
+}
+
+int studio_export_preset_count(void) {
+	int n = 0;
+	for (int i = 0; i < entry_count; ++i) {
+		n += entries[i].installed;
+	}
+	return n;
+}
+
+const char *studio_export_preset_name(int index) {
+	for (int i = 0; i < entry_count; ++i) {
+		if (entries[i].installed && index-- == 0) {
+			return entries[i].name;
+		}
+	}
+	return NULL;
+}
+
 const char *studio_export_last_report(void) {
 	return ex.last_report != NULL ? ex.last_report : "";
+}
+
+const char *studio_export_preset_path(const char *name) {
+	entry_t *e = find_entry(name);
+	return e != NULL && e->installed ? e->path : NULL;
+}
+
+bool studio_export_preset_shipped(const char *name) {
+	entry_t *e = find_entry(name);
+	return e != NULL && e->installed && e->shipped;
+}
+
+const char *studio_export_color_space(void) {
+	return color_override != NULL ? color_override : "";
+}
+
+bool studio_export_set_color_space(const char *name) {
+	char *copy = name != NULL && name[0] != 0 ? strdup(name) : NULL;
+	free(color_override);
+	color_override = copy;
+	return color_override == NULL || studio_ocio_resolve(color_override) != NULL;
 }
 
 bool studio_export_is_studio_preset(const char *name) {
@@ -1729,15 +1805,33 @@ static minic_val_t mn_studio_export_is_studio_preset(minic_val_t *a, int n) {
 	return minic_val_int(studio_export_is_studio_preset(minic_arg_p(a, n, 0)) ? 1 : 0);
 }
 
+static minic_val_t mn_studio_export_color_space(minic_val_t *a, int n) {
+	(void)a;
+	(void)n;
+	return minic_val_ptr((void *)studio_export_color_space());
+}
+
+static minic_val_t mn_studio_export_set_color_space(minic_val_t *a, int n) {
+	return minic_val_int(studio_export_set_color_space(minic_arg_p(a, n, 0)) ? 1 : 0);
+}
+
 #endif
 
 void studio_export_init(void) {
 	init_tables();
 	load_registry();
+	const char *cs = getenv("STUDIO_EXPORT_COLOR_SPACE");
+	if (cs != NULL && cs[0] != 0 && !studio_export_set_color_space(cs)) {
+		// Gardé : l'export sera bloqué avec la raison (ocio_unknown_colorspace), plutôt que fait dans le mauvais espace.
+		iron_log("studio: STUDIO_EXPORT_COLOR_SPACE '%s' is unknown to the OCIO config (%s): exports will be blocked", cs,
+		         studio_ocio_status());
+	}
 #ifdef WITH_EVAL
 	minic_register("studio_export_run", "i(p,p,i)", mn_studio_export_run);
 	minic_register("studio_export_preflight", "p(p,p,i)", mn_studio_export_preflight);
 	minic_register("studio_export_last_report", "p()", mn_studio_export_last_report);
 	minic_register("studio_export_is_studio_preset", "i(p)", mn_studio_export_is_studio_preset);
+	minic_register("studio_export_color_space", "p()", mn_studio_export_color_space);
+	minic_register("studio_export_set_color_space", "i(p)", mn_studio_export_set_color_space);
 #endif
 }

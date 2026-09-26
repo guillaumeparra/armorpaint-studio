@@ -378,6 +378,11 @@ static void expect_error(const char *json, const char *fragment) {
 	studio_preset_free(p);
 }
 
+// is_data de studio_ocio pour les tests : "Raw" est le seul espace de donnée.
+static int fake_is_data(const char *cs) {
+	return cs != NULL && strcmp(cs, "Raw") == 0;
+}
+
 static void test_presets(const char *shipped_dir) {
 	char             err[512] = "";
 	studio_preset_t *p        = parse("{\"version\": 1, \"description\": \"t\", \"naming\": \"<file>_<channel>.<ext>\","
@@ -460,6 +465,32 @@ static void test_presets(const char *shipped_dir) {
 		CHECK(stub != NULL && studio_json_skip(stub, NULL) != NULL && strstr(stub, "srgb") == NULL, "stub OCIO -> linear: %s",
 		      stub);
 		free(stub);
+	}
+	studio_preset_free(p);
+	// Espace imposé à l'export : les textures de couleur seulement (linear, srgb, OCIO hors donnée).
+	p = parse("{\"defaults\": {\"format\": \"exr\"}, \"textures\": ["
+	          " {\"name\": \"lin\", \"channels\": [\"base_r\", \"base_g\", \"base_b\"], \"color_space\": \"linear\"},"
+	          " {\"name\": \"rough\", \"channels\": [\"rough\"], \"color_space\": \"raw\"},"
+	          " {\"name\": \"srgb\", \"channels\": [\"base_r\", \"base_g\", \"base_b\"], \"format\": \"png\","
+	          "  \"color_space\": \"srgb\"},"
+	          " {\"name\": \"cg\", \"channels\": [\"base_r\", \"base_g\", \"base_b\"], \"color_space\": \"ACEScg\"},"
+	          " {\"name\": \"data\", \"channels\": [\"nor_r\", \"nor_g\", \"nor_b\"], \"color_space\": \"Raw\"}]}",
+	          err, sizeof(err));
+	CHECK(p != NULL, "override preset: %s", err);
+	if (p != NULL) {
+		studio_preset_texture_t *t = p->textures;
+		CHECK(studio_preset_texture_is_color(&t[4], NULL) && !studio_preset_texture_is_color(&t[4], fake_is_data) &&
+		          !studio_preset_texture_is_color(&t[1], NULL) && studio_preset_texture_is_color(&t[3], fake_is_data),
+		      "colour textures: linear, srgb and OCIO colour spaces, not raw nor OCIO data");
+		int n = studio_preset_override_color(p, "Linear P3-D65", fake_is_data);
+		CHECK(n == 3, "override: 3 colour textures changed, got %d", n);
+		CHECK(t[0].color == STUDIO_COLOR_OCIO && strcmp(t[0].color_space, "Linear P3-D65") == 0 &&
+		          t[2].color == STUDIO_COLOR_OCIO && strcmp(t[2].color_space, "Linear P3-D65") == 0 &&
+		          strcmp(t[3].color_space, "Linear P3-D65") == 0,
+		      "override: linear, srgb and ACEScg -> Linear P3-D65");
+		CHECK(t[1].color == STUDIO_COLOR_RAW && t[1].color_space == NULL && strcmp(t[4].color_space, "Raw") == 0,
+		      "override: raw and data colorspace unchanged");
+		CHECK(t[2].format == STUDIO_FORMAT_PNG && t[2].bits == 8, "override: format and depth unchanged");
 	}
 	studio_preset_free(p);
 	expect_error("{\"textures\": [{\"name\": \"a\", \"channels\": [\"occ\"], \"format\": \"png\", "

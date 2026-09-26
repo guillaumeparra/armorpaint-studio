@@ -296,7 +296,7 @@ que la production maintient déjà dans `templates.yml`. On n'ajoute ni langage 
   garde la priorité.
 - ✅ **Canaux par expression** (`external/studio_expr.c`) : `+ - * /`, `abs sqrt min max pow step clamp mix`, sur
   les 21 canaux upstream. Constantes repliées à la compilation, évaluation vectorisée par ligne, fuzzée.
-- ✅ **Presets livrés** : Arnold, Karma, RenderMan, V-Ray, Redshift, avec les noms de paramètres de chaque shader.
+- ✅ **Presets livrés** : basic (tous les canaux), Arnold, Karma, Cycles, Unreal Engine, avec les noms de paramètres de chaque shader. RenderMan, V-Ray et Redshift retirés le 2026-09-26 (même contenu qu'Arnold aux noms près : un studio les ajoute par `STUDIO_EXPORT_PRESETS`).
 - ✅ Intégrés à la liste d'export existante (boîte, `--export-textures`) par un preset upstream généré. Un preset
   upstream homonyme n'est jamais écrasé. `STUDIO_EXPORT_PRESETS` pour les presets du studio ou du show.
 - ✅ Injection upstream `studio-export` : 18 lignes, 3 blocs dans `export_texture.c`. Les boucles upstream (objets,
@@ -338,6 +338,7 @@ Ce qui distingue un exporter studio d'un bouton « Export ».
 - Nouvelle boîte de dialogue « Studio Export », pilotée depuis `external`, plutôt que d'étendre `box_export.c` (fichier chaud, 14 commits/an)
 - Sélection preset / template / version / destination, prévisualisation, rapport de preflight
 - Un bouton dans le menubar → injection de **2 lignes** dans `ui_menubar.c`
+- ✅ **Fait le 2026-09-26** (macOS), en Qt (PySide6, environnement Python fourni par rez) plutôt qu'en boîte native : fenêtre `external/studio_export_window.c` + `assets/studio_export_window.py`. Au lieu d'un bouton de plus, toutes les entrées d'export de textures (menu File, icône, menu de calque, raccourcis) ouvrent la fenêtre : patch `export-window` (4 lignes dans `box_export_show_textures`). Preset, espace OCIO, calques, destination, préflight en direct ; Ctrl+E refait le dernier export. Template/version : pris du fichier de travail (B3), pas encore choisis dans la fenêtre.
 
 ### B7 — Mode batch & headless · **4 j** *(révisé après test sur binaire — voir §15.6 de l'analyse)*
 

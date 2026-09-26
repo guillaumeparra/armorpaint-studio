@@ -355,6 +355,9 @@ char *studio_report_text(const studio_plan_t *plan, const studio_report_t *repor
 	if (plan->destination != NULL) {
 		sb_printf(&b, "Destination: %s\n", plan->destination);
 	}
+	if (plan->color_override != NULL) {
+		sb_printf(&b, "Colour textures in %s (chosen at export, overrides the preset)\n", plan->color_override);
+	}
 	for (int pass = 0; pass < 2; ++pass) { // bloquants d'abord
 		for (int i = 0; i < report->count; ++i) {
 			const studio_issue_t *issue = &report->issues[i];
@@ -386,6 +389,13 @@ char *studio_report_json(const studio_plan_t *plan, const studio_report_t *repor
 	sb_t b = {0};
 	sb_printf(&b, "{\"ok\": %s, \"preset\": ", report->blocking == 0 ? "true" : "false");
 	sb_quote(&b, plan->preset->name);
+	sb_printf(&b, ", \"color_space_override\": ");
+	if (plan->color_override != NULL) {
+		sb_quote(&b, plan->color_override);
+	}
+	else {
+		sb_printf(&b, "null");
+	}
 	sb_printf(&b, ", \"destination\": ");
 	sb_quote(&b, plan->destination != NULL ? plan->destination : "");
 	sb_printf(&b, ", \"width\": %d, \"height\": %d, \"source_bits\": %d, \"mode\": ", plan->width, plan->height,
