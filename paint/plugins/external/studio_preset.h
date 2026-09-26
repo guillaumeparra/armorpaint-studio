@@ -22,11 +22,15 @@ typedef enum {
 // raw : valeurs d'ArmorPaint telles quelles (= "linear" des presets upstream). linear : les canaux de couleur
 // (STUDIO_VAR_COLOR_MASK, stockés encodés gamma 2.2 par ArmorPaint) sont décodés, les données restent telles quelles.
 // srgb : comme linear, puis le résultat est encodé en gamma 1/2.2. Les constantes et le 4e canal (alpha) ne sont
-// jamais transformés.
+// jamais transformés. Ces trois mots-clés (en minuscules) sont les conversions d'ArmorPaint, sans OCIO.
+// ocio (lot A3) : tout autre nom, celui d'un espace OCIO (nom, alias ou rôle), validé à l'export contre la
+// configuration chargée. Les couleurs sont décodées comme en linear, puis le RGB composé est transformé de l'espace de
+// travail (studio_ocio_working_space) vers cet espace. Un espace de donnée (isdata) écrit les valeurs comme raw.
 typedef enum {
 	STUDIO_COLOR_RAW,
 	STUDIO_COLOR_LINEAR,
 	STUDIO_COLOR_SRGB,
+	STUDIO_COLOR_OCIO,
 } studio_color_t;
 
 typedef enum {
@@ -50,6 +54,7 @@ typedef struct {
 	char          *compression;
 	int            quality; // jpg, 1-100
 	studio_color_t color;
+	char          *color_space; // STUDIO_COLOR_OCIO : le nom tel qu'écrit dans le preset ; NULL sinon
 } studio_preset_texture_t;
 
 typedef struct {
@@ -82,7 +87,9 @@ void             studio_preset_free(studio_preset_t *p);
 
 const char *studio_format_name(studio_format_t format);
 const char *studio_format_ext(studio_format_t format);
-const char *studio_color_name(studio_color_t color);
+const char *studio_color_name(studio_color_t color); // "raw", "linear", "srgb", "ocio"
+// Valeur de color_space de la texture : le mot-clé, ou le nom OCIO.
+const char *studio_preset_color(const studio_preset_texture_t *t);
 // Niveau sdefl (0-8) d'une compression PNG ou TIFF deflate.
 int studio_preset_deflate_level(const char *compression);
 

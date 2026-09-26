@@ -189,6 +189,26 @@ STUDIO_OCIO_EXPORT const char *studio_ocio_lib_resolve(studio_ocio_lib_config_t 
 	});
 }
 
+STUDIO_OCIO_EXPORT const char *studio_ocio_lib_identify_builtin(studio_ocio_lib_config_t *cfg, const char *builtin) {
+	return guarded<const char *>(nullptr, [&]() -> const char * {
+		if (!check(cfg != nullptr && !is_empty(builtin), "null config or empty colorspace name")) {
+			return nullptr;
+		}
+		OCIO::ConstColorSpaceRcPtr cs = cfg->config->getColorSpace(builtin);
+		if (!cs) {
+			// Chargée une fois (une exception laisse la statique à initialiser : l'appel suivant réessaie).
+			static const OCIO::ConstConfigRcPtr reference = OCIO::Config::CreateFromFile("ocio://default");
+			const char *name = OCIO::Config::IdentifyBuiltinColorSpace(cfg->config, reference, builtin);
+			cs               = name != nullptr ? cfg->config->getColorSpace(name) : nullptr;
+		}
+		if (!cs) {
+			set_error((std::string("no colorspace matches the built-in ") + builtin).c_str());
+			return nullptr;
+		}
+		return cs->getName();
+	});
+}
+
 STUDIO_OCIO_EXPORT int studio_ocio_lib_is_data(studio_ocio_lib_config_t *cfg, const char *colorspace) {
 	return guarded<int>(-1, [&]() -> int {
 		OCIO::ConstColorSpaceRcPtr cs = find_colorspace(cfg, colorspace);

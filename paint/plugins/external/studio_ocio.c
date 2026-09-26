@@ -33,6 +33,7 @@ char *path_data(void);
 	X(int, is_data, (studio_ocio_lib_config_t *, const char *))                                                        \
 	X(const char *, encoding, (studio_ocio_lib_config_t *, const char *))                                              \
 	X(const char *, family, (studio_ocio_lib_config_t *, const char *))                                                \
+	X(const char *, identify_builtin, (studio_ocio_lib_config_t *, const char *))                                      \
 	X(const char *, colorspace_from_path, (studio_ocio_lib_config_t *, const char *))                                  \
 	X(const char *, default_display, (studio_ocio_lib_config_t *))                                                     \
 	X(const char *, default_view, (studio_ocio_lib_config_t *, const char *))                                          \
@@ -68,6 +69,8 @@ static cache_entry_t             cache[CACHE_MAX];
 static int                       cache_len;
 static char                      source[4096];
 static char                      status[1024] = "OCIO not initialized";
+static const char               *working; // appartient à config
+static char                      working_error[512];
 #ifndef WITH_STUDIO_OCIO_STATIC
 static bool lib_tried;
 #endif
@@ -155,7 +158,26 @@ static void unload_config(void) {
 		lib.config_free(config);
 		config = NULL;
 	}
-	source[0] = '\0';
+	source[0]        = '\0';
+	working          = NULL;
+	working_error[0] = '\0';
+}
+
+// Appelant : mutex tenu, config chargée.
+static void find_working_space(void) {
+	const char *env = getenv("STUDIO_OCIO_WORKING_SPACE");
+	if (env != NULL && env[0] != '\0') {
+		working = lib.resolve(config, env);
+		if (working == NULL) {
+			snprintf(working_error, sizeof(working_error), "STUDIO_OCIO_WORKING_SPACE: %s", lib.error());
+		}
+		return;
+	}
+	working = lib.identify_builtin(config, STUDIO_OCIO_WORKING_BUILTIN);
+	if (working == NULL) {
+		snprintf(working_error, sizeof(working_error),
+		         "no linear Rec.709 colorspace found in the config (%s): set STUDIO_OCIO_WORKING_SPACE", lib.error());
+	}
 }
 
 bool studio_ocio_reload(const char *config_path) {
@@ -181,9 +203,18 @@ bool studio_ocio_reload(const char *config_path) {
 		}
 		else {
 			snprintf(source, sizeof(source), "%s", path);
-			snprintf(status, sizeof(status), "OCIO %s, config \"%s\" from %s (%s), %d colorspaces, display \"%s\"",
-			         lib.ocio_version(), lib.config_name(config), path, origin,
-			         lib.count(config, STUDIO_OCIO_LIB_COLORSPACES), lib.default_display(config));
+			find_working_space();
+			char ws[600];
+			if (working != NULL) {
+				snprintf(ws, sizeof(ws), "working space \"%s\"", working);
+			}
+			else {
+				snprintf(ws, sizeof(ws), "working space unknown: %s", working_error);
+			}
+			snprintf(status, sizeof(status),
+			         "OCIO %s, config \"%s\" from %s (%s), %d colorspaces, display \"%s\", %s", lib.ocio_version(),
+			         lib.config_name(config), path, origin, lib.count(config, STUDIO_OCIO_LIB_COLORSPACES),
+			         lib.default_display(config), ws);
 			ok = true;
 		}
 	}
@@ -275,6 +306,14 @@ int studio_ocio_view_count(const char *display) {
 
 const char *studio_ocio_view_name(const char *display, int i) {
 	return config != NULL ? lib.view_name(config, display, i) : NULL;
+}
+
+const char *studio_ocio_working_space(void) {
+	return config != NULL ? working : NULL;
+}
+
+const char *studio_ocio_working_space_error(void) {
+	return config != NULL ? working_error : status;
 }
 
 const char *studio_ocio_resolve(const char *cs) {
@@ -400,6 +439,10 @@ static minic_val_t mn_studio_ocio_view_default(minic_val_t *a, int n) {
 	return minic_val_ptr((void *)or_empty(studio_ocio_view_default(minic_arg_p(a, n, 0))));
 }
 
+static minic_val_t mn_studio_ocio_working_space(minic_val_t *a, int n) {
+	return minic_val_ptr((void *)or_empty(studio_ocio_working_space()));
+}
+
 static minic_val_t mn_studio_ocio_resolve(minic_val_t *a, int n) {
 	return minic_val_ptr((void *)or_empty(studio_ocio_resolve(minic_arg_p(a, n, 0))));
 }
@@ -431,6 +474,7 @@ static void studio_ocio_register_script_api(void) {
 	minic_register("studio_ocio_colorspace_name", "p(i)", mn_studio_ocio_colorspace_name);
 	minic_register("studio_ocio_display_default", "p()", mn_studio_ocio_display_default);
 	minic_register("studio_ocio_view_default", "p(p)", mn_studio_ocio_view_default);
+	minic_register("studio_ocio_working_space", "p()", mn_studio_ocio_working_space);
 	minic_register("studio_ocio_resolve", "p(p)", mn_studio_ocio_resolve);
 	minic_register("studio_ocio_is_data", "i(p)", mn_studio_ocio_is_data);
 	minic_register("studio_ocio_colorspace_from_path", "p(p)", mn_studio_ocio_colorspace_from_path);

@@ -19,6 +19,7 @@
 #include "studio_image.h"
 #include "studio_json.h"
 #include "studio_naming.h"
+#include "studio_ocio.h"
 #include "studio_preflight.h"
 #include "studio_preset.h"
 #include "studio_sha256.h"
@@ -742,7 +743,11 @@ typedef struct {
 	uint32_t                       vars;
 	int                            depth;
 	float                          (*minmax)[4][2]; // par job : min et max de chaque canal
+	bool                           decode;          // couleurs décodées (gamma 2.2 -> linéaire, espace de travail)
+	const char                    *ocio_src;        // lot A3 : RGB composé transformé de ocio_src vers ocio_dst
+	const char                    *ocio_dst;        // NULL : aucune transformation OCIO
 	bool                           failed;
+	bool                           ocio_failed;
 } compose_t;
 
 static void compose_job(void *ctx, int job) {
@@ -751,11 +756,15 @@ static void compose_job(void *ctx, int job) {
 	int                            w  = c->src->width;
 	int                            y0 = job * ROWS_PER_JOB;
 	int y1 = y0 + ROWS_PER_JOB < c->src->height ? y0 + ROWS_PER_JOB : c->src->height;
-	bool   decode = t->color != STUDIO_COLOR_RAW;
 	float *rows[STUDIO_VAR_COUNT] = {0};
 	float *scratch = malloc(sizeof(float) * (size_t)w * (size_t)(c->depth > 0 ? c->depth : 1));
-	float *res     = malloc(sizeof(float) * (size_t)w);
-	bool   ok      = scratch != NULL && res != NULL;
+	float *res[4]  = {0};
+	float *rgb     = c->ocio_dst != NULL ? malloc(sizeof(float) * 3 * (size_t)w) : NULL;
+	bool   ok      = scratch != NULL && (c->ocio_dst == NULL || rgb != NULL);
+	for (int k = 0; ok && k < c->out_channels; ++k) {
+		res[k] = malloc(sizeof(float) * (size_t)w);
+		ok     = res[k] != NULL;
+	}
 	for (int v = 0; ok && v < STUDIO_VAR_COUNT; ++v) {
 		if (c->vars & (1u << v)) {
 			rows[v] = malloc(sizeof(float) * (size_t)w);
@@ -770,11 +779,12 @@ static void compose_job(void *ctx, int job) {
 	for (int y = y0; ok && y < y1; ++y) {
 		for (int v = 0; v < STUDIO_VAR_COUNT; ++v) {
 			if (rows[v] != NULL) {
-				load_row(c->src, v, y, decode, rows[v]);
+				load_row(c->src, v, y, c->decode, rows[v]);
 			}
 		}
 		for (int k = 0; k < c->out_channels; ++k) {
-			float value    = 0.0f;
+			float *r        = res[k];
+			float  value    = 0.0f;
 			bool  constant = k >= t->channels;
 			if (constant) { // canaux RGBA de l'EXR au-delà de ceux de la texture
 				value = k == 3 ? 1.0f : 0.0f;
@@ -784,52 +794,74 @@ static void compose_job(void *ctx, int job) {
 			}
 			if (constant) {
 				for (int x = 0; x < w; ++x) {
-					res[x] = value;
+					r[x] = value;
 				}
 			}
 			else {
-				studio_expr_eval(t->exprs[k], w, (const float *const *)rows, res, scratch);
+				studio_expr_eval(t->exprs[k], w, (const float *const *)rows, r, scratch);
 				// srgb : encodage du résultat, jamais de l'alpha ni d'une constante.
 				if (t->color == STUDIO_COLOR_SRGB && k < 3) {
 					for (int x = 0; x < w; ++x) {
-						res[x] = res[x] > 0.0f ? powf(res[x], 1.0f / 2.2f) : 0.0f;
+						r[x] = r[x] > 0.0f ? powf(r[x], 1.0f / 2.2f) : 0.0f;
 					}
 				}
 			}
-			size_t base = (size_t)y * (size_t)w * (size_t)c->out_channels + (size_t)k;
+		}
+		// OCIO : le RGB entier, constantes comprises (une matrice mélange les canaux) ; une texture d'un canal passe
+		// comme un gris (v, v, v) dont on garde R. Jamais l'alpha.
+		if (c->ocio_dst != NULL) {
+			int n = t->channels < 3 ? 1 : 3;
+			for (int x = 0; x < w; ++x) {
+				for (int j = 0; j < 3; ++j) {
+					rgb[(size_t)x * 3 + j] = res[n == 1 ? 0 : j][x];
+				}
+			}
+			if (!studio_ocio_transform(rgb, w, 1, 3, c->ocio_src, c->ocio_dst)) {
+				c->ocio_failed = true;
+				break;
+			}
+			for (int x = 0; x < w; ++x) {
+				for (int j = 0; j < n; ++j) {
+					res[j][x] = rgb[(size_t)x * 3 + j];
+				}
+			}
+		}
+		for (int k = 0; k < c->out_channels; ++k) {
+			const float *r    = res[k];
+			size_t       base = (size_t)y * (size_t)w * (size_t)c->out_channels + (size_t)k;
 			int    oc   = c->out_channels;
 			switch (c->kind) {
 			case OUT_U8: {
 				uint8_t *o = (uint8_t *)c->out + base;
 				for (int x = 0; x < w; ++x) {
-					float v             = res[x] < 0.0f ? 0.0f : res[x] > 1.0f ? 1.0f : res[x];
+					float v             = !(r[x] > 0.0f) ? 0.0f : r[x] > 1.0f ? 1.0f : r[x]; // NaN : 0
 					o[(size_t)x * oc]   = (uint8_t)floorf(v * 255.0f + 0.5f);
 				}
 			} break;
 			case OUT_U16: {
 				uint16_t *o = (uint16_t *)c->out + base;
 				for (int x = 0; x < w; ++x) {
-					float v           = res[x] < 0.0f ? 0.0f : res[x] > 1.0f ? 1.0f : res[x];
+					float v           = !(r[x] > 0.0f) ? 0.0f : r[x] > 1.0f ? 1.0f : r[x];
 					o[(size_t)x * oc] = (uint16_t)floorf(v * 65535.0f + 0.5f);
 				}
 			} break;
 			case OUT_HALF: {
 				uint16_t *o = (uint16_t *)c->out + base;
 				for (int x = 0; x < w; ++x) {
-					o[(size_t)x * oc] = float_to_half(res[x]);
+					o[(size_t)x * oc] = float_to_half(r[x]);
 				}
 			} break;
 			default: {
 				float *o = (float *)c->out + base;
 				for (int x = 0; x < w; ++x) {
-					o[(size_t)x * oc] = res[x];
+					o[(size_t)x * oc] = r[x];
 				}
 			}
 			}
 			if (k < t->channels) {
 				for (int x = 0; x < w; ++x) {
-					mm[k][0] = res[x] < mm[k][0] ? res[x] : mm[k][0];
-					mm[k][1] = res[x] > mm[k][1] ? res[x] : mm[k][1];
+					mm[k][0] = r[x] < mm[k][0] ? r[x] : mm[k][0];
+					mm[k][1] = r[x] > mm[k][1] ? r[x] : mm[k][1];
 				}
 			}
 		}
@@ -838,7 +870,10 @@ static void compose_job(void *ctx, int job) {
 		free(rows[v]);
 	}
 	free(scratch);
-	free(res);
+	for (int k = 0; k < 4; ++k) {
+		free(res[k]);
+	}
+	free(rgb);
 	if (!ok) {
 		c->failed = true;
 	}
@@ -896,7 +931,19 @@ static bool encode_texture(const sources_t *src, const studio_preset_texture_t *
 	out_kind_t kind  = t->bits == 8 ? OUT_U8 : exr && t->bits == 16 ? OUT_HALF : t->bits == 16 ? OUT_U16 : OUT_F32;
 	int        oc    = exr ? 4 : t->channels;
 	size_t     bytes = (size_t)src->width * (size_t)src->height * (size_t)oc * (size_t)(t->bits / 8);
-	compose_t  c     = {.src = src, .t = t, .kind = kind, .out_channels = oc};
+	compose_t  c     = {.src = src, .t = t, .kind = kind, .out_channels = oc, .decode = t->color != STUDIO_COLOR_RAW};
+	if (t->color == STUDIO_COLOR_OCIO) { // validé par check_ocio avant l'écriture ; revérifié : la config a pu changer
+		int data = studio_ocio_is_data(t->color_space);
+		c.decode = data == 0;
+		if (data == 0) {
+			c.ocio_src = studio_ocio_working_space();
+			c.ocio_dst = t->color_space;
+		}
+		if (data < 0 || (data == 0 && c.ocio_src == NULL)) {
+			fail("%s: OCIO colorspace '%s' unavailable (%s)", t->name, t->color_space, studio_ocio_status());
+			return false;
+		}
+	}
 	for (int k = 0; k < t->channels; ++k) {
 		c.vars |= studio_expr_vars(t->exprs[k]);
 		c.depth = studio_expr_depth(t->exprs[k]) > c.depth ? studio_expr_depth(t->exprs[k]) : c.depth;
@@ -911,10 +958,15 @@ static bool encode_texture(const sources_t *src, const studio_preset_texture_t *
 		return false;
 	}
 	exr_parallel_for(thread_count(), jobs, compose_job, &c);
-	if (c.failed) {
+	if (c.failed || c.ocio_failed) {
 		free(c.out);
 		free(c.minmax);
-		fail("%s: out of memory", t->name);
+		if (c.ocio_failed) {
+			fail("%s: OCIO transform from '%s' to '%s' failed (see the log)", t->name, c.ocio_src, c.ocio_dst);
+		}
+		else {
+			fail("%s: out of memory", t->name);
+		}
 		return false;
 	}
 	// Texture uniforme : souvent un canal jamais peint (hauteur plate, calque vide).
@@ -1149,6 +1201,25 @@ static char *manifest_json(const char *dir, const studio_report_t *r) {
 	else {
 		put(&b, "null");
 	}
+	put(&b, ",\n  \"ocio\": ");
+	bool ocio = false;
+	for (int i = 0; i < p->texture_count; ++i) {
+		ocio = ocio || p->textures[i].color == STUDIO_COLOR_OCIO;
+	}
+	if (ocio) { // provenance : la même configuration redonne les mêmes fichiers
+		put(&b, "{\"version\": ");
+		put_quoted(&b, studio_ocio_version());
+		put(&b, ", \"config\": ");
+		put_quoted(&b, studio_ocio_config_name());
+		put(&b, ", \"source\": ");
+		put_quoted(&b, studio_ocio_config_source());
+		put(&b, ", \"working_space\": ");
+		put_quoted(&b, studio_ocio_working_space());
+		put(&b, "}");
+	}
+	else {
+		put(&b, "null");
+	}
 	put(&b, ",\n  \"files\": [\n");
 	for (int i = 0; i < ex.staged_count; ++i) {
 		const staged_t                *s = &ex.staged[i];
@@ -1172,7 +1243,24 @@ static char *manifest_json(const char *dir, const studio_report_t *r) {
 		else {
 			put(&b, "\"default\"");
 		}
-		put(&b, ", \"color_space\": \"%s\", \"channels\": [", studio_color_name(t->color));
+		put(&b, ", \"color_space\": ");
+		put_quoted(&b, studio_preset_color(t));
+		if (t->color == STUDIO_COLOR_OCIO) {
+			const char *cs = studio_ocio_resolve(t->color_space);
+			put(&b, ", \"ocio\": {\"colorspace\": ");
+			put_quoted(&b, cs);
+			if (studio_ocio_is_data(cs) == 1) {
+				put(&b, ", \"data\": true}");
+			}
+			else {
+				put(&b, ", \"from\": ");
+				put_quoted(&b, studio_ocio_working_space());
+				put(&b, ", \"transform\": ");
+				put_quoted(&b, studio_ocio_transform_id(studio_ocio_working_space(), cs));
+				put(&b, "}");
+			}
+		}
+		put(&b, ", \"channels\": [");
 		for (int k = 0; k < t->channels; ++k) {
 			put(&b, "%s", k > 0 ? ", " : "");
 			put_quoted(&b, t->sources[k]);
@@ -1377,6 +1465,71 @@ static void write_variant(const char *variant, const char *udim) {
 
 static studio_report_t last_report = {0};
 
+static uint32_t color_vars(const studio_preset_texture_t *t, uint32_t *all) {
+	uint32_t vars = 0;
+	for (int k = 0; k < t->channels && k < 3; ++k) {
+		vars |= studio_expr_vars(t->exprs[k]);
+	}
+	*all = vars;
+	return vars & STUDIO_VAR_COLOR_MASK;
+}
+
+// Lot A3 : espaces OCIO des textures, vérifiés contre la configuration chargée. Ici et non dans studio_preflight.c,
+// qui reste testable sans OCIO.
+static void check_ocio(studio_report_t *r) {
+	for (int i = 0; i < ex.preset->texture_count; ++i) {
+		const studio_preset_texture_t *t = &ex.preset->textures[i];
+		if (t->color != STUDIO_COLOR_OCIO) {
+			continue;
+		}
+		if (!studio_ocio_ready()) {
+			studio_report_add(r, true, "ocio_unavailable", "%s: color_space '%s' needs OCIO: %s", t->name,
+			                  t->color_space, studio_ocio_status());
+			continue;
+		}
+		const char *cs = studio_ocio_resolve(t->color_space);
+		if (cs == NULL) {
+			studio_report_add(r, true, "ocio_unknown_colorspace",
+			                  "%s: '%s' is not a colorspace, alias or role of the OCIO config \"%s\"", t->name,
+			                  t->color_space, studio_ocio_config_name());
+			continue;
+		}
+		uint32_t vars   = 0;
+		uint32_t colors = color_vars(t, &vars);
+		if (studio_ocio_is_data(cs) == 1) {
+			if (colors != 0) {
+				studio_report_add(r, false, "ocio_color_as_data", "%s: colour written to the data colorspace '%s': "
+				                  "values as stored by ArmorPaint (gamma 2.2 encoded)", t->name, cs);
+			}
+			continue;
+		}
+		const char *ws = studio_ocio_working_space();
+		if (ws == NULL) {
+			studio_report_add(r, true, "ocio_no_working_space", "%s: %s", t->name, studio_ocio_working_space_error());
+			continue;
+		}
+		if (studio_ocio_transform_id(ws, cs) == NULL) {
+			studio_report_add(r, true, "ocio_no_transform", "%s: no OCIO transform from '%s' to '%s' (see the log)",
+			                  t->name, ws, cs);
+			continue;
+		}
+		if (vars != 0 && colors == 0) {
+			studio_report_add(r, false, "ocio_data_as_color", "%s: data channels converted to the colour space "
+			                  "'%s': use a data colorspace (Raw) to keep their values", t->name, cs);
+		}
+		const char *enc    = studio_ocio_encoding(cs);
+		bool        linear = enc != NULL && strcmp(enc, "scene-linear") == 0;
+		if (t->format == STUDIO_FORMAT_EXR && enc != NULL && enc[0] != 0 && !linear) {
+			studio_report_add(r, false, "exr_not_linear", "%s: EXR in '%s' (%s encoding), renderers expect "
+			                  "scene-linear values", t->name, cs, enc);
+		}
+		if (t->bits == 8 && linear && colors != 0) {
+			studio_report_add(r, false, "linear_8bit", "%s: scene-linear colour ('%s') in 8 bits: banding in dark "
+			                  "values, use an encoded colorspace (sRGB - Texture) or 16 bits", t->name, cs);
+		}
+	}
+}
+
 bool studio_export_begin(char *path, bool bake_material) {
 	if (ex.phase != PHASE_IDLE) {
 		return true; // passe interne (plan) : l'upstream déroule ses boucles, studio_export_layers intercepte
@@ -1439,6 +1592,7 @@ bool studio_export_begin(char *path, bool bake_material) {
 	}
 	studio_report_free(&last_report);
 	studio_preflight_run(&plan, &last_report);
+	check_ocio(&last_report);
 	free(ex.last_report);
 	ex.last_report = studio_report_json(&plan, &last_report);
 	ex.last_ok     = last_report.blocking == 0;

@@ -24,6 +24,9 @@ PIXELS = [
     (100.0, 0.0, 0.5, 0.875),
 ]
 
+# Espaces de la configuration intégrée à retrouver dans chaque configuration (studio_ocio_lib_identify_builtin).
+BUILTINS = ["lin_rec709_srgb", "srgb_tx", "g22_rec709_tx", "lin_ap1_scene", "no_such_builtin"]
+
 FILE_PATHS = ["robot_basecolor.png", "robot_nor.exr", "robot_rough.tif", "plate.dpx", "noext", "a/b/c_diffuse.jpg"]
 
 
@@ -142,6 +145,16 @@ def main():
         out.append("resolve\t%s\t%s" % (role, cfg.getColorSpace(role).getName()))
     for p in FILE_PATHS:
         out.append("from_path\t%s\t%s" % (p, cfg.getColorSpaceFromFilepath(p)[0]))  # (espace, index de la règle)
+
+    builtin = OCIO.Config.CreateFromFile("ocio://default")
+    for b in BUILTINS:
+        cs = cfg.getColorSpace(b)
+        if cs is None:
+            try:
+                cs = cfg.getColorSpace(OCIO.Config.IdentifyBuiltinColorSpace(cfg, builtin, b))
+            except OCIO.Exception:
+                cs = None
+        out.append("identify\t%s\t%s" % (b, cs.getName() if cs is not None else ""))
 
     out.append("pixels\t" + pixels_line(PIXELS))
     # Chaque espace vers et depuis scene_linear : chaque transformation de la configuration est parcourue.

@@ -1,9 +1,9 @@
 #pragma once
 
 // Lot A1 : ABI C de libstudio_ocio, le shim C++ au-dessus d'OpenColorIO v2 (sources dans .ocio/, construit par
-// tools/build_ocio.sh). OCIO n'a pas d'API C, et amake ne compile ni ne lie de C++ depuis external/ : la bibliothèque
-// est construite à part, copiée dans data/ comme un asset, et chargée par dlopen (studio_ocio.c). Elle embarque OCIO
-// et ses dépendances en statique et n'exporte que les symboles ci-dessous.
+// tools/build_ocio.sh). OCIO n'a pas d'API C, et amake ne compile pas de C++ depuis external/ : la bibliothèque est
+// construite à part, puis liée en statique (macOS, .project/project.c) ou chargée par dlopen depuis data/ (Linux).
+// Elle embarque OCIO et ses dépendances et n'exporte que les symboles ci-dessous.
 //
 // Contrat commun à toutes les fonctions :
 // - aucune exception ne traverse l'ABI : une erreur rend NULL, 0 ou -1, et studio_ocio_lib_error() la décrit
@@ -15,7 +15,7 @@
 // appeler studio_ocio_lib_apply() en même temps sur le même processeur (sur des pixels disjoints).
 
 // Incrémenté à chaque changement incompatible : studio_ocio.c refuse une bibliothèque d'une autre version.
-#define STUDIO_OCIO_LIB_ABI 1
+#define STUDIO_OCIO_LIB_ABI 2 // 2 : studio_ocio_lib_identify_builtin
 
 #ifdef __cplusplus
 extern "C" {
@@ -49,6 +49,11 @@ const char *studio_ocio_lib_name(studio_ocio_lib_config_t *cfg, int list, int i)
 
 // Nom canonique de l'espace désigné par un nom, un alias ou un rôle ; NULL s'il n'existe pas.
 const char *studio_ocio_lib_resolve(studio_ocio_lib_config_t *cfg, const char *name);
+// Espace de cfg équivalent à l'espace builtin de la configuration intégrée d'OCIO (ocio://default), par exemple
+// "lin_rec709_srgb" : d'abord par nom ou alias, puis par comparaison des transformations
+// (Config::IdentifyBuiltinColorSpace, qui demande les rôles d'interchange aces_interchange ou
+// cie_xyz_d65_interchange). NULL si aucun ne correspond.
+const char *studio_ocio_lib_identify_builtin(studio_ocio_lib_config_t *cfg, const char *builtin);
 // 1 si l'espace est de la donnée (isData : normales, rugosité…, jamais transformées), 0 sinon, -1 s'il n'existe pas.
 int studio_ocio_lib_is_data(studio_ocio_lib_config_t *cfg, const char *colorspace);
 // Encodage déclaré de l'espace ("scene-linear", "sdr-video", "log", "data"…), "" s'il n'en déclare pas, NULL s'il

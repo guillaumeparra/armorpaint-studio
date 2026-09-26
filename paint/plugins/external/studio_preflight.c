@@ -373,7 +373,7 @@ char *studio_report_text(const studio_plan_t *plan, const studio_report_t *repor
 		studio_format_size(f->raw_size, size, sizeof(size));
 		sb_printf(&b, "  %s  (%s %d-bit %s%s%s, %s, <= %s%s)\n", f->path, studio_format_name(t->format), t->bits,
 		          channels_name(t->channels), t->compression != NULL ? " " : "",
-		          t->compression != NULL ? t->compression : "", studio_color_name(t->color), size,
+		          t->compression != NULL ? t->compression : "", studio_preset_color(t), size,
 		          f->exists ? ", replaces existing" : "");
 	}
 	if (plan->manifest_path != NULL) {
@@ -418,8 +418,10 @@ char *studio_report_json(const studio_plan_t *plan, const studio_report_t *repor
 		else {
 			sb_printf(&b, "null");
 		}
-		sb_printf(&b, ", \"color_space\": \"%s\", \"size_estimate\": %llu, \"exists\": %s}", studio_color_name(t->color),
-		          (unsigned long long)f->raw_size, f->exists ? "true" : "false");
+		sb_printf(&b, ", \"color_space\": ");
+		sb_quote(&b, studio_preset_color(t)); // nom OCIO : texte libre
+		sb_printf(&b, ", \"size_estimate\": %llu, \"exists\": %s}", (unsigned long long)f->raw_size,
+		          f->exists ? "true" : "false");
 	}
 	sb_printf(&b, "], \"issues\": [");
 	for (int i = 0; i < report->count; ++i) {

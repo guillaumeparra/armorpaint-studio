@@ -41,6 +41,14 @@ const char *studio_ocio_view_default(const char *display);
 int         studio_ocio_view_count(const char *display);
 const char *studio_ocio_view_name(const char *display, int i);
 
+// Espace de travail : celui des couleurs d'ArmorPaint une fois décodées. Le sélecteur de couleur, les calques et le
+// viewport upstream travaillent en primaires Rec.709 encodées gamma 2.2 : décodées, c'est « Linear Rec.709 (sRGB) »,
+// retrouvé dans la configuration par studio_ocio_lib_identify_builtin(STUDIO_OCIO_WORKING_BUILTIN). Réglable par
+// $STUDIO_OCIO_WORKING_SPACE (nom, alias ou rôle), relu à chaque rechargement ; le projet le portera au lot A5.
+#define STUDIO_OCIO_WORKING_BUILTIN "lin_rec709_srgb"
+const char *studio_ocio_working_space(void);       // nom canonique ; NULL si la configuration n'en a pas
+const char *studio_ocio_working_space_error(void); // pourquoi il est NULL ; "" sinon
+
 const char *studio_ocio_resolve(const char *name);          // nom canonique d'un espace, alias ou rôle ; NULL sinon
 int         studio_ocio_is_data(const char *colorspace);     // 1 donnée, 0 couleur, -1 inconnu
 const char *studio_ocio_encoding(const char *colorspace);    // "scene-linear", "sdr-video"… ; NULL si inconnu

@@ -105,7 +105,7 @@ static bool want_bool(ctx_t *c, studio_json_value_t v, const char *where) {
 // ---- Valeurs ---------------------------------------------------------------------------------------------------------
 
 static const char *format_names[] = {"png", "jpg", "tiff", "exr"};
-static const char *color_names[]  = {"raw", "linear", "srgb"};
+static const char *color_names[]  = {"raw", "linear", "srgb", "ocio"};
 static const char *exr_compressions[] = {"none", "rle", "zips", "zip", "piz", "pxr24", "b44", "b44a", "htj2k256", "htj2k32"};
 
 const char *studio_format_name(studio_format_t format) {
@@ -118,7 +118,11 @@ const char *studio_format_ext(studio_format_t format) {
 }
 
 const char *studio_color_name(studio_color_t color) {
-	return color >= 0 && color <= STUDIO_COLOR_SRGB ? color_names[color] : "?";
+	return color >= 0 && color <= STUDIO_COLOR_OCIO ? color_names[color] : "?";
+}
+
+const char *studio_preset_color(const studio_preset_texture_t *t) {
+	return t->color == STUDIO_COLOR_OCIO ? t->color_space : studio_color_name(t->color);
 }
 
 int studio_preset_deflate_level(const char *compression) {
@@ -192,10 +196,32 @@ typedef struct {
 	int            format; // -1 : non fixé
 	int            bits;   // 0 : non fixé
 	studio_color_t color;
+	char          *color_space; // color == STUDIO_COLOR_OCIO
 	int            quality;
 	char          *compression;          // pour les textures au format `format`
 	char          *compressions[4];      // par format ("compression": {"exr": "zip", ...})
 } defaults_t;
+
+// color_space : un mot-clé d'ArmorPaint, sinon un nom OCIO (s repris dans *name).
+static void parse_color(ctx_t *c, char *s, const char *where, studio_color_t *color, char **name) {
+	if (s == NULL) {
+		return;
+	}
+	int i = find_name(s, color_names, STUDIO_COLOR_OCIO);
+	if (i >= 0) {
+		*color = (studio_color_t)i;
+		free(s);
+	}
+	else if (s[0] == 0 || strcmp(s, "ocio") == 0) {
+		fail(c, "%s: color_space '%s': raw, linear, srgb or an OCIO colorspace name", where, s);
+		free(s);
+	}
+	else {
+		*color = STUDIO_COLOR_OCIO;
+		free(*name);
+		*name = s;
+	}
+}
 
 static void parse_defaults(ctx_t *c, studio_json_value_t v, defaults_t *d) {
 	if (v.type != STUDIO_JSON_OBJECT) {
@@ -218,13 +244,7 @@ static void parse_defaults(ctx_t *c, studio_json_value_t v, defaults_t *d) {
 			d->bits = want_int(c, val, "defaults.bits", 8, 32);
 		}
 		else if (strcmp(key, "color_space") == 0) {
-			char *s = want_string(c, val, "defaults.color_space");
-			int   i = find_name(s, color_names, 3);
-			if (s != NULL && i < 0) {
-				fail(c, "defaults.color_space: '%s' unknown (raw, linear, srgb)", s);
-			}
-			d->color = i < 0 ? STUDIO_COLOR_RAW : (studio_color_t)i;
-			free(s);
+			parse_color(c, want_string(c, val, "defaults.color_space"), "defaults", &d->color, &d->color_space);
 		}
 		else if (strcmp(key, "quality") == 0) {
 			d->quality = want_int(c, val, "defaults.quality", 1, 100);
@@ -398,10 +418,16 @@ static void parse_texture(ctx_t *c, studio_json_value_t v, studio_preset_texture
 		}
 	}
 	if (!c->failed) {
-		int i    = color != NULL ? find_name(color, color_names, 3) : (int)d->color;
-		t->color = i < 0 ? STUDIO_COLOR_RAW : (studio_color_t)i;
-		if (i < 0) {
-			fail(c, "%s: color_space '%s' unknown (raw, linear, srgb)", where, color);
+		t->color = d->color;
+		if (color != NULL) {
+			parse_color(c, color, where, &t->color, &t->color_space);
+			color = NULL;
+		}
+		else if (d->color == STUDIO_COLOR_OCIO) {
+			t->color_space = strdup(d->color_space);
+			if (t->color_space == NULL) {
+				fail(c, "out of memory");
+			}
 		}
 	}
 	if (!c->failed && t->format == STUDIO_FORMAT_JPG && t->channels == 4) {
@@ -544,6 +570,7 @@ studio_preset_t *studio_preset_parse(const char *json, const char *name, char *e
 		fail(&c, "out of memory");
 	}
 	free(d.compression);
+	free(d.color_space);
 	for (int i = 0; i < 4; ++i) {
 		free(d.compressions[i]);
 	}
@@ -588,6 +615,7 @@ void studio_preset_free(studio_preset_t *p) {
 		free(t->suffix);
 		free(t->naming);
 		free(t->compression);
+		free(t->color_space);
 		for (int j = 0; j < 4; ++j) {
 			free(t->sources[j]);
 			studio_expr_free(t->exprs[j]);
@@ -637,7 +665,8 @@ char *studio_preset_stub(const studio_preset_t *p) {
 		for (int j = 0; j < t->channels; ++j) {
 			vars |= studio_expr_vars(t->exprs[j]);
 		}
-		// "srgb" upstream encode tout ; le nôtre ne l'applique qu'aux données (les couleurs sont déjà encodées).
+		// "srgb" upstream encode tout ; le nôtre ne l'applique qu'aux données (les couleurs sont déjà encodées). Un
+		// espace OCIO n'a pas d'équivalent upstream : "linear", valeurs telles quelles.
 		bool  srgb   = t->color == STUDIO_COLOR_SRGB && (vars & STUDIO_VAR_COLOR_MASK) == 0;
 		char *quoted = studio_json_quote(t->name);
 		if (quoted == NULL) {

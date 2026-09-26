@@ -438,6 +438,39 @@ static void test_presets(const char *shipped_dir) {
 	      "minimal preset: %s", err);
 	studio_preset_free(p);
 
+	// Lot A3 : noms OCIO, hérités des défauts, remplacés par un mot-clé ; le stub upstream les écrit en "linear".
+	p = parse("{\"defaults\": {\"format\": \"exr\", \"color_space\": \"ACEScg\"}, \"textures\": ["
+	          " {\"name\": \"a\", \"channels\": [\"base_r\", \"base_g\", \"base_b\"]},"
+	          " {\"name\": \"b\", \"channels\": [\"rough\"], \"color_space\": \"raw\"},"
+	          " {\"name\": \"c\", \"channels\": [\"base_r\", \"base_g\", \"base_b\"], \"format\": \"png\","
+	          "  \"color_space\": \"sRGB - \\\"Texture\\\"\"},"
+	          " {\"name\": \"d\", \"channels\": [\"base_r\", \"base_g\", \"base_b\"], \"color_space\": \"Raw\"}]}",
+	          err, sizeof(err));
+	CHECK(p != NULL, "OCIO preset: %s", err);
+	if (p != NULL) {
+		studio_preset_texture_t *t = p->textures;
+		CHECK(t[0].color == STUDIO_COLOR_OCIO && strcmp(t[0].color_space, "ACEScg") == 0 &&
+		          strcmp(studio_preset_color(&t[0]), "ACEScg") == 0,
+		      "OCIO name from the defaults");
+		CHECK(t[1].color == STUDIO_COLOR_RAW && t[1].color_space == NULL && strcmp(studio_preset_color(&t[1]), "raw") == 0,
+		      "keyword over an OCIO default");
+		CHECK(t[2].color == STUDIO_COLOR_OCIO && strcmp(t[2].color_space, "sRGB - \"Texture\"") == 0, "OCIO name kept as is");
+		CHECK(t[3].color == STUDIO_COLOR_OCIO && strcmp(t[3].color_space, "Raw") == 0, "keywords are lower case only");
+		char *stub = studio_preset_stub(p);
+		CHECK(stub != NULL && studio_json_skip(stub, NULL) != NULL && strstr(stub, "srgb") == NULL, "stub OCIO -> linear: %s",
+		      stub);
+		free(stub);
+	}
+	studio_preset_free(p);
+	expect_error("{\"textures\": [{\"name\": \"a\", \"channels\": [\"occ\"], \"format\": \"png\", "
+	             "\"color_space\": \"\"}]}",
+	             "OCIO colorspace name");
+	expect_error("{\"textures\": [{\"name\": \"a\", \"channels\": [\"occ\"], \"format\": \"png\", "
+	             "\"color_space\": \"ocio\"}]}",
+	             "color_space 'ocio'");
+	expect_error("{\"defaults\": {\"color_space\": 3}, \"textures\": [{\"name\": \"a\", \"channels\": [\"occ\"], "
+	             "\"format\": \"png\"}]}",
+	             "defaults.color_space");
 	expect_error("", "valid JSON");
 	expect_error("[]", "valid JSON");
 	expect_error("{\"textures\": []}", "non-empty");

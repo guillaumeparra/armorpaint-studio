@@ -127,7 +127,7 @@ OCIO est du C++ ; le projet est du C. Il faut une couche `extern "C"`.
 
 **Livrable** : le viewport affiche via la chaîne OCIO du studio ; changement de view à chaud.
 
-### A3 — Export : transform par texture · **6 j**
+### A3 — Export : transform par texture · **6 j** — ✅ **fait le 2026-09-26** (macOS)
 
 - Remplacer le champ `color_space` (2 valeurs) par un nom de colorspace OCIO dans le preset d'export ([box_export.c:330](paint/sources/ui/box_export.c:330), [main.c:250](paint/sources/main.c:250)).
 - Injecter la transformation **avant** l'encodage, dans `export_texture_write_texture()` ([export_texture.c:6](paint/sources/io/export_texture.c:6)) :
@@ -141,6 +141,30 @@ OCIO est du C++ ; le projet est du C. Il faut une couche `extern "C"`.
 **Injection upstream** : 1 ligne dans `export_texture.c` + le champ de preset.
 
 **Livrable** : un preset peut demander `ACEScg`, `sRGB - Texture`, `Utility - Raw` etc. par texture.
+
+✅ **Fait le 2026-09-26** (macOS).
+- **Preset.** Dans un preset studio (B4), `color_space` accepte tout nom d'espace OCIO (nom, alias ou rôle), validé
+  à l'export contre la configuration chargée. Hérité de `defaults`, comme les autres clés.
+- **Conversion.** Dans la composition studio (B5), ligne par ligne et dans ses threads : couleurs décodées,
+  expressions, RGB converti de l'espace de travail vers la cible, puis quantification. L'alpha ne passe pas par
+  OCIO, une texture à 1 canal est convertie comme un gris, un espace de donnée écrit les valeurs brutes.
+- **Espace de travail** : l'équivalent de `lin_rec709_srgb` dans la configuration (`Linear Rec.709 (sRGB)` en ACES),
+  trouvé par `IdentifyBuiltinColorSpace`, sinon `$STUDIO_OCIO_WORKING_SPACE`. Nouvelle fonction de l'ABI (v2).
+- **Préflight** : 4 codes bloquants (OCIO indisponible, espace inconnu, pas d'espace de travail, pas de conversion)
+  et 4 avertissements (couleur en donnée, donnée en couleur, EXR non linéaire, linéaire en 8 bits).
+- **Manifeste** : espace canonique et identifiant de conversion par fichier ; version, configuration et espace de
+  travail au niveau du manifeste.
+- **Tests.** `.tests/ocio_export_app.sh`, dans l'app : 13 textures d'une texture procédurale (1,7 million de
+  couleurs) en EXR 32/half, TIFF 16 et PNG 8, relues et comparées à PyOpenColorIO : **identiques au bit près**. Plus
+  le préflight, le manifeste et les cas bloquants. `.tests/ocio.sh` couvre l'espace de travail hors app.
+- **Différent du plan.**
+  - Aucune injection upstream : la conversion se fait dans la composition studio, pas dans
+    `export_texture_write_texture()`. Les presets upstream restent en `linear`/`srgb`.
+  - Pas de mappage des mots-clés : `raw`, `linear` et `srgb` gardent leur sens (les conversions d'ArmorPaint, sans
+    OCIO), et les presets livrés les gardent pour marcher sans OCIO. `Linear Rec.709 (sRGB)` donne au bit près le
+    même fichier que `linear`.
+  - L'espace de travail vient de la configuration ou d'une variable d'environnement ; le stocker dans le `.arm` va
+    au lot A5.
 
 ### A4 — Import : interprétation des textures entrantes · **4 j**
 
@@ -236,7 +260,7 @@ que la production maintient déjà dans `templates.yml`. On n'ajoute ni langage 
 - Non rejoué dans l'app : export par tuile UDIM et par objet, qui ne se règlent que dans l'UI. Les tests couvrent le
   modèle et la substitution.
 
-### B4 — Presets studio étendus · **4 j** — ✅ **fait le 2026-09-26** (colorspace : raw/linear/srgb en attendant OCIO, lot A)
+### B4 — Presets studio étendus · **4 j** — ✅ **fait le 2026-09-26** (colorspace raw/linear/srgb ; espaces OCIO depuis A3)
 
 - ✅ **Format de preset studio** (`external/studio_preset.c`, lecture stricte). Par texture : format, profondeur,
   compression, `color_space`, suffixe et modèle de nom (`<file>[_<variant>]_<channel>[.<UDIM>].<ext>`, sous-dossiers
@@ -249,7 +273,7 @@ que la production maintient déjà dans `templates.yml`. On n'ajoute ni langage 
   upstream homonyme n'est jamais écrasé. `STUDIO_EXPORT_PRESETS` pour les presets du studio ou du show.
 - ✅ Injection upstream `studio-export` : 18 lignes, 3 blocs dans `export_texture.c`. Les boucles upstream (objets,
   atlas, tuiles, bake) restent la seule source des variantes.
-- Reste : colorspace OCIO (lot A3) ; les canaux d'un nœud de bake (ils passent par le calque aplati).
+- Reste : les canaux d'un nœud de bake (ils passent par le calque aplati).
 
 - Étendre le format de preset : format et profondeur **par texture** (pas globaux), colorspace OCIO, compression, template de nommage, suffixe de canal
 - Canaux personnalisés au-delà des 23 en dur — permettre une expression (`occ*rough`, constante, canal d'un nœud de bake)

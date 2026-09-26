@@ -33,7 +33,8 @@ Modules, un par lot (voir `ARMORPAINT_LOTS.md` à la racine d'armorpaint) :
 | `studio_naming`, `studio_export_naming` | B3 | ✅ noms des textures exportées par le template Toolkit du fichier de travail (macOS ; validé sur site simulé) |
 | `studio_export`, `studio_preset`, `studio_expr`, `studio_image`, `studio_preflight`, `studio_sha256`, `studio_fs`, `assets/studio_preset_*.json` | B2, B4, B5 | ✅ presets d'export studio : PNG 8/16, TIFF 8/16/32 (none/LZW/deflate), JPG, EXR 16/32 ; canaux calculés ; préflight ; écriture atomique ; manifeste (macOS) |
 | `studio_ocio`, `studio_ocio_lib.h`, `.ocio/`, `tools/build_ocio.sh` | A0, A1 | ✅ OpenColorIO 2.5.2 embarqué : configuration, espaces, displays/views, transformations CPU, API de scripting (macOS ; Linux écrit, non testé) |
-| `studio_ocio` (export, viewport, import, UI) | A2-A6 | à faire |
+| `studio_ocio`, `studio_export` (color_space OCIO) | A3 | ✅ export : chaque texture convertie vers un espace OCIO de la configuration, préflight, manifeste (macOS) |
+| `studio_ocio` (viewport, import, UI) | A2, A4-A6 | à faire |
 | `studio_sg`, `studio_shotgrid`, `studio_json`, `assets/studio_sg_*.py` | C2 | ✅ sidecar ShotGrid (Toolkit), superviseur, API de scripting (macOS ; validé sur site simulé) |
 | `studio_workfiles`, `tk-armorpaint/` | C3 | ✅ Workfiles (tk-multi-workfiles2) et menu ShotGrid, par le moteur Toolkit tk-armorpaint (macOS ; validé sur site simulé) |
 | `studio_shotgrid` (UI) | C4-C5 | à faire |
@@ -57,6 +58,7 @@ upstream sans rebuild ; les réglages destinés aux artistes passeront par l'UI 
 | `STUDIO_EXPORT_PRESETS` | presets d'export studio : dossiers ou fichiers `.json`, séparés par `:` (`;` sous Windows), prioritaires sur les presets livrés |
 | `STUDIO_EXPORT_THREADS` | threads de composition et d'encodage des exports studio (défaut : cœurs matériels) |
 | `OCIO` | configuration OpenColorIO (fichier `.ocio`, archive `.ocioz` ou URI `ocio://`) ; défaut : `ocio://studio-config-latest` |
+| `STUDIO_OCIO_WORKING_SPACE` | espace de travail d'ArmorPaint dans la configuration OCIO (nom, alias ou rôle), quand elle n'en a pas de reconnaissable ; voir « Gestion couleur OCIO » |
 | `STUDIO_OCIO_LIB` | chemin de `libstudio_ocio` pour un build sans liaison statique (bancs de test, Linux) |
 
 ## Exécution (C1)
@@ -365,7 +367,7 @@ La lecture est stricte : une clé inconnue, un type faux ou une combinaison impo
 |---|---|
 | `format` | `png` (8, 16 bits), `jpg` (8), `tiff` (8, 16, 32 float), `exr` (16 half, 32 float) |
 | `compression` | png `fast`, `default`, `best` ; tiff `none`, `lzw`, `deflate` (défaut) ; exr `none`, `rle`, `zips`, `zip`, `piz`, `pxr24`, `b44`, `b44a`, `htj2k256`, `htj2k32` (défaut : `STUDIO_EXR_COMPRESSION`) ; jpg : `quality` 1-100 (défaut 90) |
-| `color_space` | `raw` : valeurs d'ArmorPaint telles quelles (le `linear` des presets upstream) ; `linear` : couleurs décodées (gamma 2.2 → linéaire) ; `srgb` : décodées, calculées, puis réencodées. Les données, les constantes et l'alpha ne sont jamais transformés |
+| `color_space` | `raw` : valeurs d'ArmorPaint telles quelles (le `linear` des presets upstream) ; `linear` : couleurs décodées (gamma 2.2 → linéaire) ; `srgb` : décodées, calculées, puis réencodées. Les données, les constantes et l'alpha ne sont jamais transformés. Tout autre nom est un espace OCIO (nom, alias ou rôle : `ACEScg`, `sRGB - Texture`, `Raw`…) : voir « Export (A3) ». Les trois mots-clés s'écrivent en minuscules ; `Raw` est l'espace OCIO |
 | `channels` | 1, 3 ou 4 expressions (pas de 4e canal en JPG) |
 | `naming` | marqueurs `<file>`, `<variant>` (objet ou atlas), `<channel>` (`suffix`, sinon `name`), `<UDIM>`, `<ext>`. Une section `[…]` disparaît si un marqueur qu'elle contient est vide. Un chemin relatif part du dossier choisi ; des sous-dossiers sont permis |
 | `resolutions` | résolutions admises par le show : une autre est bloquante |
@@ -389,7 +391,7 @@ presets upstream, avec les mêmes définitions.
 
    | Bloquant | Avertissement |
    |---|---|
-   | nommage impossible (template ShotGrid), aucun calque visible, aucun fichier, résolution hors show, chemins en double, fichier existant (`block`), dossier non inscriptible, espace disque insuffisant, PNG > 2 Gio, TIFF non compressé > 4 Gio | calques masqués ignorés, profondeur supérieure à celle des calques, hauteur en 8 bits, données en JPG, EXR `srgb`, couleur linéaire en 8 bits, maillage UDIM exporté hors mode tuile, tuiles UDIM manquantes, fichier existant (`warn`), marge disque faible |
+   | nommage impossible (template ShotGrid), aucun calque visible, aucun fichier, résolution hors show, chemins en double, fichier existant (`block`), dossier non inscriptible, espace disque insuffisant, PNG > 2 Gio, TIFF non compressé > 4 Gio, espace OCIO inconnu ou OCIO indisponible (A3) | calques masqués ignorés, profondeur supérieure à celle des calques, hauteur en 8 bits, données en JPG, EXR `srgb` ou non linéaire, couleur linéaire en 8 bits, données converties vers un espace couleur et inversement (A3), maillage UDIM exporté hors mode tuile, tuiles UDIM manquantes, fichier existant (`warn`), marge disque faible |
 
 3. **Écriture.** Pour chaque variante, les calques aplatis sont relus une fois. Chaque texture est composée en
    parallèle (`STUDIO_EXPORT_THREADS`), encodée, puis écrite en `<fichier>.studio-tmp`. Une texture uniforme est
@@ -406,6 +408,7 @@ presets upstream, avec les mêmes définitions.
 - la résolution, la profondeur des calques, le mode et le template ShotGrid ;
 - pour chaque fichier : chemin relatif, texture, variante, tuile, format, profondeur, compression, espace, canaux,
   taille, SHA-256 ;
+- la provenance OCIO si une texture en dépend (A3) ;
 - les avertissements.
 
 PNG et TIFF sont écrits par `studio_image.c` : filtres adaptatifs, deflate et LZW parallèles, prédicteur TIFF
@@ -430,7 +433,7 @@ aplatis (`png`/`jpg` : 8 bits, `exr16` : half, `exr32` : float), comme dans l'up
 
 Point d'injection upstream : `STUDIO-PATCH(studio-export)` (PATCHES.md).
 
-## Gestion couleur OCIO (A0, A1)
+## Gestion couleur OCIO (A0, A1, A3)
 
 **Décision A0 : le vrai OpenColorIO**, pas une réimplémentation. Version épinglée dans `.ocio/CMakeLists.txt`
 (`STUDIO_OCIO_TAG`, aujourd'hui `v2.5.2`, VFX Reference Platform CY2026), construite depuis ses sources avec ses
@@ -439,7 +442,7 @@ dépendances (expat, yaml-cpp, pystring, Imath, zlib, minizip-ng) par `tools/bui
 sur une machine neuve, puis rebuild d'ArmorPaint.
 
 OCIO est en C++ et amake ne compile que du C : le shim `.ocio/studio_ocio_lib.cpp` expose une ABI C
-(`studio_ocio_lib.h`, 24 fonctions, version `STUDIO_OCIO_LIB_ABI`). Aucune exception ne la traverse : chaque
+(`studio_ocio_lib.h`, 25 fonctions, version `STUDIO_OCIO_LIB_ABI`). Aucune exception ne la traverse : chaque
 erreur devient un retour NULL/0/-1 et un message (`studio_ocio_lib_error()`, par thread).
 
 - **macOS : liaison statique.** `build_ocio.sh` fusionne le shim, OCIO et ses dépendances en un seul objet
@@ -456,7 +459,7 @@ configuration studio intégrée à OCIO (`ocio://studio-config-latest`, ACES 2.0
 sans repli : un repli cacherait au studio que sa configuration n'est pas chargée. Le log de démarrage l'affiche :
 
 ```
-studio: OCIO 2.5.2, config "studio-config-v4.0.0_aces-v2.0_ocio-v2.5" from ocio://studio-config-latest (built-in default), 55 colorspaces, display "sRGB - Display"
+studio: OCIO 2.5.2, config "studio-config-v4.0.0_aces-v2.0_ocio-v2.5" from ocio://studio-config-latest (built-in default), 55 colorspaces, display "sRGB - Display", working space "Linear Rec.709 (sRGB)"
 ```
 
 `studio_ocio_transform()` convertit des pixels float32 (RGB ou RGBA) sur place, avec le processeur CPU par défaut
@@ -464,6 +467,48 @@ d'OCIO (celui d'`ocioconvert` et de PyOpenColorIO). L'alpha n'est jamais transmi
 d'affichage le modifient. Les processeurs sont gardés en cache par couple (src, dst), et l'appel est sûr depuis
 plusieurs threads sur des bandes disjointes. La liste des espaces contient aussi les espaces d'affichage
 (`sRGB - Display`…).
+
+**Espace de travail.** ArmorPaint stocke ses couleurs encodées gamma 2.2 en primaires Rec.709 ; décodées, elles sont
+en Rec.709 linéaire. C'est l'espace de travail : la source de toutes les conversions. Il est cherché dans la
+configuration par son équivalence avec l'espace intégré `lin_rec709_srgb` d'OCIO (`IdentifyBuiltinColorSpace`) :
+dans les configurations ACES studio et CG, `Linear Rec.709 (sRGB)`. Cette recherche demande les rôles d'échange
+(`aces_interchange`, `cie_xyz_d65_interchange`). Une configuration maison qui ne les a pas doit le nommer par
+`STUDIO_OCIO_WORKING_SPACE` (nom, alias ou rôle, par exemple `scene_linear` si c'est bien du Rec.709 linéaire). Sans
+lui, les conversions sont bloquées et le statut dit pourquoi. Le projet le portera au lot A5.
+
+### Export (A3)
+
+Un `color_space` qui n'est pas `raw`, `linear` ou `srgb` est un espace OCIO. Les couleurs sont décodées comme en
+`linear`, les expressions calculées, puis le RGB composé est converti de l'espace de travail vers cet espace, ligne
+par ligne dans les threads de composition, avant la quantification. L'alpha ne passe jamais par OCIO. Une texture à
+1 canal est convertie comme un gris (v, v, v), dont on garde R. Un espace de donnée (`isdata`, `Raw`) écrit les
+valeurs telles quelles, comme `raw`. `Linear Rec.709 (sRGB)` donne donc, au bit près, le même fichier que `linear`.
+
+```json
+{ "name": "base", "channels": ["base_r", "base_g", "base_b"], "color_space": "ACEScg" },
+{ "name": "base_srgb", "channels": ["base_r", "base_g", "base_b"], "format": "png", "bits": 8, "color_space": "sRGB - Texture" },
+{ "name": "rough", "channels": ["rough"], "color_space": "Raw" }
+```
+
+Le nom est validé à l'export, contre la configuration chargée à ce moment : un preset peut viser les espaces d'une
+configuration de show. Les presets livrés restent en `raw`/`linear`, qui marchent sans OCIO.
+
+| Code du préflight | Niveau | Cas |
+|---|---|---|
+| `ocio_unavailable` | bloquant | OCIO non chargé (`$OCIO` invalide, build sans bibliothèque) |
+| `ocio_unknown_colorspace` | bloquant | nom absent de la configuration |
+| `ocio_no_working_space` | bloquant | pas d'espace de travail (voir plus haut) |
+| `ocio_no_transform` | bloquant | OCIO ne sait pas construire la conversion |
+| `ocio_color_as_data` | avertissement | canaux de couleur écrits dans un espace de donnée : valeurs encodées gamma 2.2 |
+| `ocio_data_as_color` | avertissement | canaux de donnée (rugosité…) convertis vers un espace couleur |
+| `exr_not_linear` | avertissement | EXR dans un espace non linéaire (encodage OCIO autre que `scene-linear`, par exemple ACEScct) |
+| `linear_8bit` | avertissement | espace linéaire en 8 bits (banding) |
+
+Le manifeste note, pour chaque fichier OCIO, l'espace canonique (un alias est résolu) et la conversion :
+`"ocio": {"colorspace": "ACEScg", "from": "Linear Rec.709 (sRGB)", "transform": "<cache id OCIO>"}`, ou
+`{"colorspace": "Raw", "data": true}`. Au niveau du manifeste, `"ocio"` donne la version d'OCIO, le nom et la source
+de la configuration et l'espace de travail ; `null` si aucune texture n'en dépend. L'identifiant de conversion
+change si la configuration change : deux exports au même identifiant ont subi la même conversion.
 
 ### Scripts (minic)
 
@@ -474,6 +519,7 @@ int   studio_ocio_colorspace_count(void);
 char *studio_ocio_colorspace_name(int i);
 char *studio_ocio_display_default(void);
 char *studio_ocio_view_default(char *display);
+char *studio_ocio_working_space(void);           // espace de travail ; "" si la configuration n'en a pas
 char *studio_ocio_resolve(char *name);           // nom canonique d'un espace, alias ou rôle ; "" si inconnu
 int   studio_ocio_is_data(char *colorspace);     // 1 donnée, 0 couleur, -1 inconnu
 char *studio_ocio_colorspace_from_path(char *path);  // file_rules de la configuration
@@ -491,6 +537,7 @@ STUDIO_TEST_TK_CORE=<tk-core> .tests/sg.sh [dossier de travail]   # ShotGrid (C2
 .tests/export_app.sh [dossier]         # export studio dans l'app : scripts, --export-textures, pixels = upstream, manifeste, atomicité
 .tests/ocio.sh [dossier de travail]    # OCIO (A1) hors app : ABI, module, références PyOpenColorIO, threads, erreurs ; OCIO_TEST_CONFIGS=<configs>
 .tests/ocio_app.sh [dossier]           # OCIO dans l'app : configuration par défaut, $OCIO, $OCIO invalide, API de scripting
+.tests/ocio_export_app.sh [dossier]    # export OCIO (A3) dans l'app : pixels = PyOpenColorIO, préflight, manifeste, cas bloquants
 ```
 
 `ocio.sh` compare au bit près à PyOpenColorIO, la roue officielle à la même version, installée dans `.ocio/venv`
@@ -499,6 +546,11 @@ au premier lancement. Pour chaque configuration (celle du banc avec LUT, looks e
 file_rules, puis chaque espace depuis et vers scene_linear et chaque display/view dans les deux sens, sur des pixels
 HDR, négatifs et nuls. Le harnais est construit deux fois, lié en statique comme l'app et chargé par dlopen, avec
 de fausses bibliothèques (ABI différente, symbole manquant).
+
+`ocio_export_app.sh` exporte une texture procédurale (1,7 million de couleurs) en EXR 32 et half, TIFF 16 et
+PNG 8, à 1, 3 et 4 canaux, vers ACEScg, ACEScct, sRGB - Texture, Raw et des alias. `ocio_export_check.py` relit
+chaque fichier et le compare à PyOpenColorIO appliqué à la texture brute : identique au bit près (au code près en
+8 et 16 bits). Il demande, dans `.ocio/venv` : `pip install numpy OpenEXR tifffile pillow`.
 
 `export.sh` requiert libpng et libtiff (`brew install libpng libtiff`) ; `export_app.sh`, Pillow et `tiffinfo`.
 

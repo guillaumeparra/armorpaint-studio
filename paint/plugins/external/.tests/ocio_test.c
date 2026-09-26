@@ -6,6 +6,7 @@
 //   ocio_test threads                  transformations parallèles, cache sous contention et éviction
 //   ocio_test reload <config>          rechargements successifs (défaut, <config>, invalide, défaut)
 //   ocio_test unavailable <extrait>    OCIO indisponible : status contient <extrait>, rien ne plante
+//   ocio_test working <espace> [<err>] espace de travail attendu ("" : aucun, et l'erreur contient <err>)
 //
 // Tolérance de ref : 0 ULP par défaut, OCIO_TEST_ULPS pour la relâcher (voir ocio.sh, « tolérance »).
 
@@ -118,6 +119,7 @@ static void compare(const char *what, const float *got, const float *expected, i
 }
 
 static studio_ocio_lib_config_t *lib_config;
+static bool                       has_error(void);
 
 static void ref_xform(char **f, int nf) {
 	float expected[MAX_PX * 4];
@@ -229,6 +231,16 @@ static int mode_ref(const char *path) {
 			CHECK(same(studio_ocio_colorspace_from_path(f[1]), f[2]), "from_path %s: %s, expected %s", f[1],
 			      s(studio_ocio_colorspace_from_path(f[1])), f[2]);
 		}
+		else if (strcmp(f[0], "identify") == 0) {
+			const char *got = studio_ocio_lib_identify_builtin(lib_config, f[1]);
+			CHECK(same(got != NULL ? got : "", nf > 2 ? f[2] : ""), "identify %s: %s, expected '%s' (%s)", f[1], s(got),
+			      nf > 2 ? f[2] : "", studio_ocio_lib_error());
+			CHECK(got != NULL || has_error(), "identify %s: no error message", f[1]);
+			if (strcmp(f[1], STUDIO_OCIO_WORKING_BUILTIN) == 0 && getenv("STUDIO_OCIO_WORKING_SPACE") == NULL) {
+				CHECK(same(studio_ocio_working_space() != NULL ? studio_ocio_working_space() : "", nf > 2 ? f[2] : ""),
+				      "working space %s", s(studio_ocio_working_space()));
+			}
+		}
 		else if (strcmp(f[0], "xform") == 0) {
 			ref_xform(f, nf);
 		}
@@ -329,6 +341,11 @@ static int mode_errors(void) {
 	CHECK(strstr(studio_ocio_lib_error(), "null config") != NULL, "message: %s", studio_ocio_lib_error());
 	CHECK(studio_ocio_lib_resolve(c, "nope") == NULL && strstr(studio_ocio_lib_error(), "nope") != NULL,
 	      "unknown colorspace not named in the message: %s", studio_ocio_lib_error());
+	CHECK(studio_ocio_lib_identify_builtin(NULL, "lin_rec709_srgb") == NULL && has_error(), "identify on NULL config");
+	CHECK(studio_ocio_lib_identify_builtin(c, NULL) == NULL && has_error(), "identify(NULL)");
+	CHECK(studio_ocio_lib_identify_builtin(c, "") == NULL && has_error(), "identify(\"\")");
+	CHECK(studio_ocio_lib_identify_builtin(c, "no_such_builtin") == NULL && strstr(studio_ocio_lib_error(), "no_such") != NULL,
+	      "identify(unknown): %s", studio_ocio_lib_error());
 	CHECK(studio_ocio_lib_is_data(c, NULL) == -1 && studio_ocio_lib_encoding(c, "") == NULL && studio_ocio_lib_family(NULL, "x") == NULL,
 	      "colorspace attributes with invalid arguments");
 	CHECK(studio_ocio_lib_colorspace_from_path(c, NULL) == NULL && has_error(), "from_path(NULL)");
@@ -476,6 +493,31 @@ static int mode_reload(const char *other) {
 	return 0;
 }
 
+// ── working ────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+static int mode_working(const char *expect, const char *error) {
+	studio_ocio_init();
+	CHECK(studio_ocio_ready(), "not ready: %s", studio_ocio_status());
+	const char *w = studio_ocio_working_space();
+	CHECK(same(w != NULL ? w : "", expect), "working space '%s', expected '%s' (%s)", s(w), expect,
+	      studio_ocio_working_space_error());
+	if (expect[0] == '\0') {
+		CHECK(strstr(studio_ocio_working_space_error(), error) != NULL, "error '%s' lacks '%s'",
+		      studio_ocio_working_space_error(), error);
+		CHECK(strstr(studio_ocio_status(), "working space unknown") != NULL, "status: %s", studio_ocio_status());
+	}
+	else {
+		CHECK(studio_ocio_working_space_error()[0] == '\0', "error with a working space: %s",
+		      studio_ocio_working_space_error());
+		float px[3] = {0.18f, 0.5f, 1.0f};
+		CHECK(studio_ocio_transform(px, 1, 1, 3, w, "scene_linear"), "working -> scene_linear");
+	}
+	printf("  %s\n", studio_ocio_status());
+	studio_ocio_shutdown();
+	CHECK(studio_ocio_working_space() == NULL, "working space after shutdown");
+	return 0;
+}
+
 // ── unavailable ────────────────────────────────────────────────────────────────────────────────────────────────────
 
 static int mode_unavailable(const char *expect) {
@@ -513,6 +555,9 @@ int main(int argc, char **argv) {
 	}
 	else if (strcmp(argv[1], "reload") == 0 && argc == 3) {
 		r = mode_reload(argv[2]);
+	}
+	else if (strcmp(argv[1], "working") == 0 && argc >= 3) {
+		r = mode_working(argv[2], argc > 3 ? argv[3] : "");
 	}
 	else if (strcmp(argv[1], "unavailable") == 0 && argc == 3) {
 		r = mode_unavailable(argv[2]);

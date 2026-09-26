@@ -88,6 +88,9 @@ done
 printf 'not: [a, config\n' > "$W/garbage.ocio"
 sed 's/scene_linear: lin/scene_linear: missing_space/' "$W/cfg/config.ocio" > "$W/cfg/invalid.ocio"
 
+# Une affectation devant un appel de fonction survit à l'appel (sh POSIX) : chaque run pose OCIO, et celles qui posent
+# d'autres variables sont dans un sous-shell.
+unset STUDIO_OCIO_WORKING_SPACE STUDIO_OCIO_LIB
 run() { # variante, mode, arguments…
 	v=$1
 	shift
@@ -109,6 +112,11 @@ for v in ${STATIC:+static} dlopen; do
 	OCIO= run $v errors
 	OCIO= run $v threads
 	OCIO= run $v reload "$W/cfg/config.ocio"
+	OCIO= run $v working "Linear Rec.709 (sRGB)"
+	(OCIO= STUDIO_OCIO_WORKING_SPACE=scene_linear run $v working ACEScg)
+	OCIO=$W/cfg/config.ocio run $v working "" "set STUDIO_OCIO_WORKING_SPACE"
+	(OCIO=$W/cfg/config.ocio STUDIO_OCIO_WORKING_SPACE=lin_srgb run $v working lin)
+	(OCIO=$W/cfg/config.ocio STUDIO_OCIO_WORKING_SPACE=nope run $v working "" "STUDIO_OCIO_WORKING_SPACE: unknown colorspace: nope")
 	OCIO=/nonexistent/config.ocio run $v unavailable "config /nonexistent/config.ocio (\$OCIO) rejected"
 	OCIO=$W/garbage.ocio run $v unavailable "garbage.ocio (\$OCIO) rejected"
 	OCIO=$W/cfg/invalid.ocio run $v unavailable "missing_space"
@@ -121,6 +129,6 @@ else
 	(cd "$W" && LIB= run dlopen unavailable "cannot load ./$SO")
 fi
 LIB=/nonexistent/$SO run dlopen unavailable "cannot load /nonexistent/$SO"
-LIB=$W/fake_abi.$SO run dlopen unavailable "has ABI 99, expected 1"
+LIB=$W/fake_abi.$SO run dlopen unavailable "has ABI 99, expected $(sed -n 's/^#define STUDIO_OCIO_LIB_ABI \([0-9]*\).*/\1/p' "$EXT/studio_ocio_lib.h")"
 LIB=$W/fake_missing.$SO run dlopen unavailable "has no studio_ocio_lib_proc_cache_id"
 echo "== OK"
