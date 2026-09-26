@@ -1,0 +1,830 @@
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE // clock_gettime, nanosleep en -std=c11
+#endif
+#include "studio_sg.h"
+#include "studio_json.h"
+#include "studio_proc.h"
+#include <stdarg.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <pthread.h>
+#include <time.h>
+#endif
+
+#define SG_MAX_JOBS 256
+#define SG_DEFAULT_HELLO_MS 60000
+#define SG_DEFAULT_CALL_MS 300000
+// Tranche d'attente d'une réponse : entre deux tranches, le stderr du sidecar est relayé (progression d'un amorçage).
+#define SG_SLICE_MS 250
+#define SG_WRITE_MS 10000
+// Arrêt : délai laissé au sidecar pour sortir seul après EOF (ou après avoir annoncé "restart").
+#define SG_EXIT_GRACE_MS 3000
+#define SG_TAIL_SIZE 4096     // fin du stderr gardée pour expliquer un arrêt
+#define SG_LOG_LINE_MAX 4096  // ligne de stderr sans '\n' plus longue : relayée en morceaux
+#define SG_MAX_OUTPUT ((size_t)256 << 20) // taille maximale d'une réponse
+
+static int64_t now_ms(void) {
+#ifdef _WIN32
+	return (int64_t)GetTickCount64();
+#else
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+#endif
+}
+
+// ---- Verrous ----------------------------------------------------------------------------------------------------------
+// call : le sidecar et la configuration (un appel à la fois). state : la table des jobs et la poignée de main, jamais
+// tenu longtemps. Ordre : call puis state.
+
+#ifdef _WIN32
+// studio_proc n'est pas encore implémenté sous Windows : tout échoue aussitôt, sans thread.
+static void call_lock(void) {}
+static void call_unlock(void) {}
+static void state_lock(void) {}
+static void state_unlock(void) {}
+#else
+static pthread_mutex_t call_mutex  = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t state_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  state_cond  = PTHREAD_COND_INITIALIZER;
+
+static void call_lock(void) {
+	pthread_mutex_lock(&call_mutex);
+}
+
+static void call_unlock(void) {
+	pthread_mutex_unlock(&call_mutex);
+}
+
+static void state_lock(void) {
+	pthread_mutex_lock(&state_mutex);
+}
+
+static void state_unlock(void) {
+	pthread_mutex_unlock(&state_mutex);
+}
+#endif
+
+// ---- Configuration et état du sidecar (sous call) ---------------------------------------------------------------------
+
+static char **cfg_argv;
+static char **cfg_env;
+static int    cfg_hello_ms = SG_DEFAULT_HELLO_MS;
+static int    cfg_call_ms  = SG_DEFAULT_CALL_MS;
+static void (*cfg_log)(const char *line);
+
+static studio_proc_t *sidecar;
+static int            next_id = 1;
+static char           tail[SG_TAIL_SIZE]; // fin du stderr, pour les messages d'erreur
+static size_t         tail_len;
+static char           partial[SG_LOG_LINE_MAX]; // ligne de stderr pas encore terminée
+static size_t         partial_len;
+static volatile int   closed; // studio_sg_shutdown() est passé
+
+static char *hello; // sous state
+
+static void sg_log(const char *format, ...) {
+	if (cfg_log == NULL) {
+		return;
+	}
+	char    line[1024];
+	va_list args;
+	va_start(args, format);
+	vsnprintf(line, sizeof(line), format, args);
+	va_end(args);
+	cfg_log(line);
+}
+
+static void strv_free(char **v) {
+	if (v != NULL) {
+		for (int i = 0; v[i] != NULL; i++) {
+			free(v[i]);
+		}
+		free(v);
+	}
+}
+
+static char **strv_copy(const char *const *v) {
+	if (v == NULL) {
+		return NULL;
+	}
+	int n = 0;
+	while (v[n] != NULL) {
+		n++;
+	}
+	char **copy = calloc((size_t)n + 1, sizeof(char *));
+	for (int i = 0; copy != NULL && i < n; i++) {
+		copy[i] = strdup(v[i]);
+		if (copy[i] == NULL) {
+			strv_free(copy);
+			return NULL;
+		}
+	}
+	return copy;
+}
+
+static void flush_partial(void) {
+	if (partial_len > 0) {
+		partial[partial_len] = 0;
+		if (cfg_log != NULL) {
+			cfg_log(partial);
+		}
+		partial_len = 0;
+	}
+}
+
+// Relaye le stderr disponible, ligne par ligne, et en garde la fin dans `tail`.
+static void pump_stderr(void) {
+	if (sidecar == NULL) {
+		return;
+	}
+	size_t n;
+	bool   truncated;
+	char  *chunk = studio_proc_take_stderr(sidecar, &n, &truncated);
+	if (chunk == NULL) {
+		return;
+	}
+	if (n >= SG_TAIL_SIZE) {
+		memcpy(tail, chunk + n - SG_TAIL_SIZE + 1, SG_TAIL_SIZE - 1);
+		tail_len = SG_TAIL_SIZE - 1;
+	}
+	else {
+		if (tail_len + n >= SG_TAIL_SIZE) {
+			size_t drop = tail_len + n - (SG_TAIL_SIZE - 1);
+			memmove(tail, tail + drop, tail_len - drop);
+			tail_len -= drop;
+		}
+		memcpy(tail + tail_len, chunk, n);
+		tail_len += n;
+	}
+	tail[tail_len] = 0;
+	for (size_t i = 0; i < n; i++) {
+		if (chunk[i] == '\n') {
+			flush_partial();
+		}
+		else if (chunk[i] != '\r') {
+			if (partial_len == SG_LOG_LINE_MAX - 1) {
+				flush_partial();
+			}
+			partial[partial_len++] = chunk[i];
+		}
+	}
+	if (truncated) {
+		sg_log("(sidecar stderr truncated)");
+	}
+	free(chunk);
+}
+
+// Dernières lignes du stderr, sur une ligne, pour un message d'erreur : "…" si rien.
+static const char *tail_excerpt(char *buf, size_t size) {
+	const char *start = tail;
+	if (tail_len > 600) {
+		start = tail + tail_len - 600;
+		const char *nl = strchr(start, '\n');
+		if (nl != NULL && nl[1] != 0) {
+			start = nl + 1;
+		}
+	}
+	size_t k = 0;
+	for (const char *c = start; *c && k + 1 < size; c++) {
+		buf[k++] = *c == '\n' || *c == '\r' ? ' ' : *c;
+	}
+	while (k > 0 && buf[k - 1] == ' ') {
+		k--;
+	}
+	buf[k] = 0;
+	return k > 0 ? buf : "no output on stderr";
+}
+
+// Réponse d'erreur synthétisée par le superviseur. id < 0 : null.
+static char *synth(int id, const char *code, const char *format, ...) {
+	char    message[1600];
+	va_list args;
+	va_start(args, format);
+	vsnprintf(message, sizeof(message), format, args);
+	va_end(args);
+	char *quoted = studio_json_quote(message);
+	if (quoted == NULL) {
+		return NULL;
+	}
+	char id_text[16] = "null";
+	if (id >= 0) {
+		snprintf(id_text, sizeof(id_text), "%d", id);
+	}
+	size_t size = strlen(quoted) + strlen(code) + 64;
+	char  *reply = malloc(size);
+	if (reply != NULL) {
+		snprintf(reply, size, "{\"id\":%s,\"ok\":false,\"error\":{\"code\":\"%s\",\"message\":%s}}", id_text, code, quoted);
+	}
+	free(quoted);
+	return reply;
+}
+
+static void set_hello(char *line) {
+	state_lock();
+	free(hello);
+	hello = line;
+	state_unlock();
+}
+
+// Libère le sidecar, qui doit être arrêté ou tué.
+static void release_sidecar(void) {
+	pump_stderr();
+	flush_partial();
+	if (studio_proc_exited(sidecar)) {
+		int code = studio_proc_exit_code(sidecar), sig = studio_proc_signal(sidecar);
+		if (sig != 0) {
+			sg_log("sidecar stopped (signal %d)", sig);
+		}
+		else {
+			sg_log("sidecar stopped (exit code %d)", code);
+		}
+	}
+	studio_proc_free(sidecar);
+	sidecar = NULL;
+	set_hello(NULL);
+}
+
+// Arrêt demandé : EOF sur stdin, le sidecar sort seul ; sinon tué au bout de grace_ms.
+static void stop_sidecar(int grace_ms) {
+	if (sidecar == NULL) {
+		return;
+	}
+	studio_proc_set_cancel(sidecar, NULL);
+	studio_proc_close_stdin(sidecar);
+	if (!studio_proc_wait(sidecar, grace_ms)) {
+		sg_log("sidecar did not exit within %d ms, killing it", grace_ms);
+		studio_proc_kill(sidecar, 500);
+	}
+	release_sidecar();
+}
+
+static void kill_sidecar(const char *reason) {
+	if (sidecar == NULL) {
+		return;
+	}
+	sg_log("killing the sidecar: %s", reason);
+	studio_proc_set_cancel(sidecar, NULL);
+	studio_proc_kill(sidecar, 500);
+	release_sidecar();
+}
+
+static bool is_cancelled(volatile int *cancel) {
+	return cancel != NULL && *cancel != 0;
+}
+
+static bool sidecar_exited(void) {
+	return studio_proc_wait(sidecar, 0); // sans attendre (et même si l'annulation est demandée : l'état est lu d'abord)
+}
+
+// Lance le sidecar s'il ne tourne pas, jusqu'à la poignée de main. NULL si prêt, sinon la réponse d'erreur pour `id`.
+static char *ensure_sidecar(int id, volatile int *cancel) {
+	if (closed) {
+		return synth(id, "sidecar_failed", "ShotGrid is unavailable: ArmorPaint is exiting");
+	}
+	if (sidecar != NULL && sidecar_exited()) {
+		sg_log("sidecar exited on its own, restarting it");
+		release_sidecar();
+	}
+	if (sidecar != NULL) {
+		return NULL;
+	}
+	if (cfg_argv == NULL || cfg_argv[0] == NULL) {
+		return synth(id, "sidecar_failed", "ShotGrid sidecar not configured");
+	}
+	char               err[512];
+	studio_proc_opts_t opts = {.env = (const char *const *)cfg_env, .max_output = SG_MAX_OUTPUT};
+	tail_len                = 0;
+	tail[0]                 = 0;
+	sidecar                 = studio_proc_spawn((const char *const *)cfg_argv, &opts, err, sizeof(err));
+	if (sidecar == NULL) {
+		return synth(id, "sidecar_failed", "cannot start the ShotGrid sidecar (%s): %s", cfg_argv[0], err);
+	}
+	sg_log("sidecar starting: %s %s", cfg_argv[0], cfg_argv[1] != NULL ? cfg_argv[1] : "");
+	studio_proc_set_cancel(sidecar, cancel);
+	int64_t deadline = now_ms() + cfg_hello_ms;
+	while (true) {
+		int64_t left = deadline - now_ms();
+		char   *line = studio_proc_read_line(sidecar, left <= 0 ? 0 : left < SG_SLICE_MS ? (int)left : SG_SLICE_MS);
+		pump_stderr();
+		if (line == NULL) {
+			char buf[700];
+			if (is_cancelled(cancel)) {
+				kill_sidecar("cancelled during startup");
+				return synth(id, "cancelled", "cancelled while starting the ShotGrid sidecar");
+			}
+			if (sidecar_exited()) {
+				int code = studio_proc_exit_code(sidecar);
+				release_sidecar();
+				return synth(id, "sidecar_failed", "the ShotGrid sidecar exited during startup (exit code %d): %s", code,
+				             tail_excerpt(buf, sizeof(buf)));
+			}
+			if (left <= 0) {
+				kill_sidecar("no handshake");
+				return synth(id, "sidecar_failed", "the ShotGrid sidecar did not answer within %d s: %s", cfg_hello_ms / 1000,
+				             tail_excerpt(buf, sizeof(buf)));
+			}
+			continue;
+		}
+		if (studio_json_int(studio_json_find(line, "/id"), -1) != 0) {
+			sg_log("ignored before handshake: %.200s", line);
+			free(line);
+			continue;
+		}
+		if (!studio_json_truthy(studio_json_find(line, "/ok"))) {
+			char *message = studio_json_text(studio_json_find(line, "/error/message"));
+			char *reply   = synth(id, "sidecar_failed", "%s", message != NULL ? message : line);
+			free(message);
+			free(line);
+			stop_sidecar(SG_EXIT_GRACE_MS);
+			return reply;
+		}
+		long long protocol = studio_json_int(studio_json_find(line, "/data/protocol"), -1);
+		if (protocol != 1) {
+			free(line);
+			stop_sidecar(SG_EXIT_GRACE_MS);
+			return synth(id, "sidecar_failed", "ShotGrid sidecar protocol %lld, ArmorPaint expects 1 (mismatched install?)",
+			             protocol);
+		}
+		char *core  = studio_json_text(studio_json_find(line, "/data/toolkit/core"));
+		char *error = studio_json_text(studio_json_find(line, "/data/toolkit/error"));
+		if (studio_json_truthy(studio_json_find(line, "/data/toolkit/available"))) {
+			sg_log("sidecar ready, Toolkit core %s", core != NULL ? core : "?");
+		}
+		else {
+			sg_log("sidecar ready, Toolkit unavailable: %s", error != NULL ? error : "?");
+		}
+		free(core);
+		free(error);
+		set_hello(line);
+		return NULL;
+	}
+}
+
+// Un appel, sous call. op_json : op déjà en littéral JSON ; args_json : objet JSON sur une ligne.
+static char *call_locked(const char *op, const char *op_json, const char *args_json, int timeout_ms, volatile int *cancel) {
+	int    id   = next_id++;
+	size_t size = strlen(op_json) + strlen(args_json) + 48;
+	char  *line = malloc(size);
+	if (line == NULL) {
+		return NULL;
+	}
+	int     len      = snprintf(line, size, "{\"id\":%d,\"op\":%s,\"args\":%s}\n", id, op_json, args_json);
+	int     timeout  = timeout_ms == 0 ? cfg_call_ms : timeout_ms;
+	int64_t deadline = timeout < 0 ? -1 : now_ms() + timeout;
+	char   *reply    = NULL;
+	char    buf[700];
+
+	for (int attempt = 0; attempt < 2 && reply == NULL; attempt++) {
+		if ((reply = ensure_sidecar(id, cancel)) != NULL) {
+			break;
+		}
+		studio_proc_set_cancel(sidecar, cancel);
+		if (!studio_proc_write(sidecar, line, (size_t)len, SG_WRITE_MS)) {
+			pump_stderr();
+			if (is_cancelled(cancel)) {
+				kill_sidecar("cancelled");
+				reply = synth(id, "cancelled", "%s cancelled", op);
+			}
+			else if (sidecar_exited()) {
+				// Parti avant d'avoir lu la requête : la rejouer ne peut rien doubler.
+				release_sidecar();
+				if (attempt == 1) {
+					reply = synth(id, "sidecar_died", "the ShotGrid sidecar stopped before reading %s: %s", op,
+					              tail_excerpt(buf, sizeof(buf)));
+				}
+			}
+			else {
+				kill_sidecar("request not read");
+				reply = synth(id, "sidecar_failed", "the ShotGrid sidecar did not read the %s request", op);
+			}
+			continue;
+		}
+
+		bool restart = false;
+		while (reply == NULL && !restart) {
+			int64_t left  = deadline < 0 ? SG_SLICE_MS : deadline - now_ms();
+			int     slice = left <= 0 ? 0 : left < SG_SLICE_MS ? (int)left : SG_SLICE_MS;
+			int64_t t0    = now_ms();
+			char   *got   = studio_proc_read_line(sidecar, slice);
+			pump_stderr();
+			if (got != NULL) {
+				if (studio_json_int(studio_json_find(got, "/id"), -1) != id) {
+					sg_log("discarding unexpected reply: %.200s", got);
+					free(got);
+					continue;
+				}
+				if (!studio_json_truthy(studio_json_find(got, "/restart"))) {
+					reply = got;
+					continue;
+				}
+				// Le sidecar s'arrête juste après cette réponse ; relancé, il rejoue la requête (une fois).
+				char *why = studio_json_text(studio_json_find(got, "/error/message"));
+				sg_log("sidecar restarting: %s", why != NULL ? why : "");
+				free(why);
+				stop_sidecar(SG_EXIT_GRACE_MS);
+				if (attempt == 1) {
+					reply = got;
+				}
+				else {
+					free(got);
+					restart = true;
+				}
+				continue;
+			}
+			if (is_cancelled(cancel)) {
+				kill_sidecar("cancelled");
+				reply = synth(id, "cancelled", "%s cancelled", op);
+			}
+			else if (sidecar_exited() || (slice > 0 && now_ms() - t0 < slice / 2 && !studio_proc_wait(sidecar, 1000))) {
+				// Arrêté, ou stdout fermé / réponse démesurée (read_line rend la main aussitôt) : fini dans tous les cas.
+				int  code   = studio_proc_exited(sidecar) ? studio_proc_exit_code(sidecar) : -1;
+				bool exited = studio_proc_exited(sidecar);
+				if (!exited) {
+					kill_sidecar("unreadable reply");
+				}
+				else {
+					release_sidecar();
+				}
+				reply = exited ? synth(id, "sidecar_died", "the ShotGrid sidecar stopped during %s (exit code %d): %s", op,
+				                       code, tail_excerpt(buf, sizeof(buf)))
+				               : synth(id, "sidecar_failed", "unreadable reply from the ShotGrid sidecar to %s", op);
+			}
+			else if (deadline >= 0 && left <= 0) {
+				kill_sidecar("timeout");
+				reply = synth(id, "timeout", "no reply to %s within %d s", op, timeout / 1000);
+			}
+		}
+	}
+	if (sidecar != NULL) {
+		studio_proc_set_cancel(sidecar, NULL);
+	}
+	free(line);
+	return reply;
+}
+
+// Vérifie op et args, les met sous la forme de la requête. NULL si valides, sinon la réponse d'erreur.
+static char *prepare(const char *op, const char *args_json, char **op_json, char **args_line) {
+	*op_json   = NULL;
+	*args_line = NULL;
+	if (op == NULL || op[0] == 0) {
+		return synth(-1, "bad_request", "empty op");
+	}
+	const char *a = args_json != NULL ? args_json : "";
+	while (*a == ' ' || *a == '\t' || *a == '\n' || *a == '\r') {
+		a++;
+	}
+	if (*a == 0) {
+		a = "{}";
+	}
+	studio_json_type_t type;
+	const char        *end = studio_json_skip(a, &type);
+	while (end != NULL && (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r')) {
+		end++;
+	}
+	if (type != STUDIO_JSON_OBJECT || end == NULL || *end != 0) {
+		return synth(-1, "bad_request", "%s: args must be a JSON object, got: %.200s", op, a);
+	}
+	*op_json   = studio_json_quote(op);
+	*args_line = strdup(a);
+	if (*op_json == NULL || *args_line == NULL) {
+		free(*op_json);
+		free(*args_line);
+		return synth(-1, "internal", "out of memory");
+	}
+	// Une requête tient sur une ligne : hors des chaînes, un saut de ligne n'est qu'un espace (dans une chaîne, il est
+	// forcément échappé, sinon args aurait été refusé).
+	for (char *c = *args_line; *c; c++) {
+		if (*c == '\n' || *c == '\r') {
+			*c = ' ';
+		}
+	}
+	return NULL;
+}
+
+char *studio_sg_call(const char *op, const char *args_json, int timeout_ms, volatile int *cancel) {
+	char *op_json, *args_line;
+	char *reply = prepare(op, args_json, &op_json, &args_line);
+	if (reply != NULL) {
+		return reply;
+	}
+	call_lock();
+	reply = call_locked(op, op_json, args_line, timeout_ms, cancel);
+	call_unlock();
+	free(op_json);
+	free(args_line);
+	return reply;
+}
+
+void studio_sg_configure(const studio_sg_config_t *config) {
+	call_lock();
+	stop_sidecar(SG_EXIT_GRACE_MS);
+	strv_free(cfg_argv);
+	strv_free(cfg_env);
+	cfg_argv     = strv_copy(config->argv);
+	cfg_env      = strv_copy(config->env);
+	cfg_hello_ms = config->hello_timeout_ms > 0 ? config->hello_timeout_ms : SG_DEFAULT_HELLO_MS;
+	cfg_call_ms  = config->call_timeout_ms != 0 ? config->call_timeout_ms : SG_DEFAULT_CALL_MS;
+	cfg_log      = config->log;
+	call_unlock();
+}
+
+void studio_sg_stop(void) {
+	call_lock();
+	stop_sidecar(SG_EXIT_GRACE_MS);
+	call_unlock();
+}
+
+char *studio_sg_hello(void) {
+	state_lock();
+	char *copy = hello != NULL ? strdup(hello) : NULL;
+	state_unlock();
+	return copy;
+}
+
+// ---- Jobs -------------------------------------------------------------------------------------------------------------
+
+typedef struct sg_job {
+	int          id;
+	char        *op;
+	char        *op_json;
+	char        *args_line;
+	int          timeout_ms;
+	volatile int cancel;
+	int          state;    // sous state
+	bool         released; // idem : libéré pendant qu'il tournait, le thread le libérera
+	char        *result;
+	char       **texts; // rendus par studio_sg_get, vivent jusqu'au release
+	int          text_count;
+} sg_job_t;
+
+static sg_job_t *jobs[SG_MAX_JOBS];
+static int       job_next_id = 1;
+static bool      worker_started;
+static bool      quitting;
+
+static void job_free(sg_job_t *j) {
+	free(j->op);
+	free(j->op_json);
+	free(j->args_line);
+	free(j->result);
+	for (int i = 0; i < j->text_count; i++) {
+		free(j->texts[i]);
+	}
+	free(j->texts);
+	free(j);
+}
+
+// Sous state.
+static sg_job_t *job_find(int id) {
+	for (int i = 0; i < SG_MAX_JOBS; i++) {
+		if (jobs[i] != NULL && jobs[i]->id == id) {
+			return jobs[i];
+		}
+	}
+	return NULL;
+}
+
+// Exécute le job (sur le thread appelant) et le marque fini.
+static void job_execute(sg_job_t *j) {
+	char *reply = NULL;
+	if (j->result != NULL) {
+		reply     = j->result; // refusé à la création
+		j->result = NULL;
+	}
+	else if (j->cancel) {
+		reply = synth(-1, "cancelled", "%s cancelled before it started", j->op);
+	}
+	else {
+		call_lock();
+		reply = call_locked(j->op, j->op_json, j->args_line, j->timeout_ms, &j->cancel);
+		call_unlock();
+	}
+	state_lock();
+	j->result   = reply;
+	j->state    = STUDIO_SG_DONE;
+	bool orphan = j->released;
+	state_unlock();
+	if (orphan) {
+		job_free(j);
+	}
+}
+
+// Crée et inscrit un job dans l'état donné. 0 si la table est pleine.
+static int job_create(const char *op, const char *args_json, int timeout_ms, int state, sg_job_t **out) {
+	sg_job_t *j = calloc(1, sizeof(sg_job_t));
+	if (j == NULL) {
+		return 0;
+	}
+	j->op         = strdup(op != NULL ? op : "");
+	j->timeout_ms = timeout_ms;
+	j->state      = state;
+	j->result     = prepare(op, args_json, &j->op_json, &j->args_line); // erreur : le job la rendra telle quelle
+	if (j->op == NULL) {
+		job_free(j);
+		return 0;
+	}
+	state_lock();
+	int slot = -1;
+	for (int i = 0; i < SG_MAX_JOBS && slot < 0; i++) {
+		if (jobs[i] == NULL) {
+			slot = i;
+		}
+	}
+	if (slot >= 0) {
+		j->id      = job_next_id++;
+		jobs[slot] = j;
+	}
+	state_unlock();
+	if (slot < 0) {
+		sg_log("job refused, %d jobs open (studio_sg_release missing?)", SG_MAX_JOBS);
+		job_free(j);
+		return 0;
+	}
+	*out = j;
+	return j->id;
+}
+
+#ifndef _WIN32
+static void *worker(void *arg) {
+	(void)arg;
+	state_lock();
+	while (!quitting) {
+		sg_job_t *next = NULL;
+		for (int i = 0; i < SG_MAX_JOBS; i++) {
+			if (jobs[i] != NULL && jobs[i]->state == STUDIO_SG_QUEUED && (next == NULL || jobs[i]->id < next->id)) {
+				next = jobs[i];
+			}
+		}
+		if (next == NULL) {
+			pthread_cond_wait(&state_cond, &state_mutex);
+			continue;
+		}
+		next->state = STUDIO_SG_RUNNING;
+		state_unlock();
+		job_execute(next);
+		state_lock();
+	}
+	state_unlock();
+	return NULL;
+}
+#endif
+
+int studio_sg_start(const char *op, const char *args_json, int timeout_ms) {
+	sg_job_t *j;
+	int       id = job_create(op, args_json, timeout_ms, STUDIO_SG_QUEUED, &j);
+	if (id == 0) {
+		return 0;
+	}
+#ifdef _WIN32
+	state_lock();
+	j->state = STUDIO_SG_RUNNING;
+	state_unlock();
+	job_execute(j);
+#else
+	state_lock();
+	bool start = !worker_started;
+	if (start) {
+		pthread_attr_t attr;
+		pthread_t      thread;
+		pthread_attr_init(&attr);
+		pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+		worker_started = pthread_create(&thread, &attr, worker, NULL) == 0;
+		pthread_attr_destroy(&attr);
+	}
+	bool threaded = worker_started;
+	if (!threaded) {
+		j->state = STUDIO_SG_RUNNING; // pas de thread disponible : on exécute ici plutôt que de perdre le job
+	}
+	pthread_cond_signal(&state_cond);
+	state_unlock();
+	if (!threaded) {
+		job_execute(j);
+	}
+#endif
+	return id;
+}
+
+int studio_sg_run(const char *op, const char *args_json, int timeout_ms) {
+	sg_job_t *j;
+	int       id = job_create(op, args_json, timeout_ms, STUDIO_SG_RUNNING, &j);
+	if (id != 0) {
+		job_execute(j);
+	}
+	return id;
+}
+
+int studio_sg_state(int job) {
+	state_lock();
+	sg_job_t *j     = job_find(job);
+	int       state = j != NULL ? j->state : STUDIO_SG_UNKNOWN;
+	state_unlock();
+	return state;
+}
+
+void studio_sg_cancel(int job) {
+	state_lock();
+	sg_job_t *j = job_find(job);
+	if (j != NULL) {
+		j->cancel = 1;
+	}
+	state_unlock();
+}
+
+void studio_sg_release(int job) {
+	state_lock();
+	sg_job_t *j   = NULL;
+	bool      now = false;
+	for (int i = 0; i < SG_MAX_JOBS; i++) {
+		if (jobs[i] != NULL && jobs[i]->id == job) {
+			j       = jobs[i];
+			jobs[i] = NULL;
+		}
+	}
+	if (j != NULL) {
+		now = j->state != STUDIO_SG_RUNNING; // en file : retiré de la table, le thread ne le verra plus
+		if (!now) {
+			j->released = true;
+			j->cancel   = 1;
+		}
+	}
+	state_unlock();
+	if (now) {
+		job_free(j);
+	}
+}
+
+const char *studio_sg_result(int job) {
+	state_lock();
+	sg_job_t   *j      = job_find(job);
+	const char *result = j != NULL && j->state == STUDIO_SG_DONE ? j->result : NULL;
+	state_unlock();
+	return result;
+}
+
+bool studio_sg_ok(int job) {
+	return studio_json_truthy(studio_json_find(studio_sg_result(job), "/ok"));
+}
+
+const char *studio_sg_get(int job, const char *pointer) {
+	const char *text = "";
+	state_lock();
+	sg_job_t *j = job_find(job);
+	if (j != NULL && j->state == STUDIO_SG_DONE) {
+		char  *value = studio_json_text(studio_json_find(j->result, pointer));
+		char **grown = value != NULL ? realloc(j->texts, sizeof(char *) * (size_t)(j->text_count + 1)) : NULL;
+		if (grown != NULL) {
+			j->texts                  = grown;
+			j->texts[j->text_count++] = value;
+			text                      = value;
+		}
+		else {
+			free(value);
+		}
+	}
+	state_unlock();
+	return text;
+}
+
+int studio_sg_length(int job, const char *pointer) {
+	return studio_json_length(studio_json_find(studio_sg_result(job), pointer));
+}
+
+long long studio_sg_int(int job, const char *pointer, long long fallback) {
+	return studio_json_int(studio_json_find(studio_sg_result(job), pointer), fallback);
+}
+
+void studio_sg_shutdown(void) {
+	closed = 1;
+	state_lock();
+	quitting = true;
+	for (int i = 0; i < SG_MAX_JOBS; i++) {
+		if (jobs[i] != NULL) {
+			jobs[i]->cancel = 1;
+		}
+	}
+#ifndef _WIN32
+	pthread_cond_broadcast(&state_cond);
+#endif
+	state_unlock();
+#ifdef _WIN32
+	stop_sidecar(1000);
+#else
+	// L'appel en cours voit l'annulation en 20 ms et tue le sidecar en 500 ms au plus. Si le verrou ne se libère pas,
+	// on part sans y toucher : le sidecar recevra EOF à la fermeture de nos descripteurs et sortira seul.
+	for (int waited = 0; waited < 3000; waited += 10) {
+		if (pthread_mutex_trylock(&call_mutex) == 0) {
+			stop_sidecar(1000);
+			call_unlock();
+			return;
+		}
+		struct timespec ts = {0, 10 * 1000000};
+		nanosleep(&ts, NULL);
+	}
+#endif
+}

@@ -51,6 +51,10 @@ void studio_proc_kill(studio_proc_t *p, int grace_ms);
 // Tue le processus s'il tourne encore (grâce de 200 ms), ferme les pipes, libère.
 void studio_proc_free(studio_proc_t *p);
 
+// Annulation : tant que *cancel est non nul, studio_proc_write, studio_proc_read_line et studio_proc_wait rendent la
+// main (au plus STUDIO_PROC_TICK_MS plus tard) sans avoir abouti. NULL pour détacher. Le processus n'est pas tué.
+void studio_proc_set_cancel(studio_proc_t *p, volatile int *cancel);
+
 // État, valide une fois studio_proc_wait() vrai.
 bool studio_proc_exited(const studio_proc_t *p);
 int  studio_proc_exit_code(const studio_proc_t *p); // code de sortie, -1 si tué par un signal ou inconnu
@@ -59,6 +63,11 @@ int  studio_proc_signal(const studio_proc_t *p);    // signal qui l'a tué, 0 si
 // Sortie accumulée (non consommée par studio_proc_read_line), terminée par NUL. *truncated : max_output dépassé.
 const char *studio_proc_stdout(const studio_proc_t *p, size_t *size, bool *truncated);
 const char *studio_proc_stderr(const studio_proc_t *p, size_t *size, bool *truncated);
+
+// Lit le stderr disponible sans attendre, puis le consomme : copie malloc (terminée par NUL, NULL si mémoire
+// insuffisante) et vide le tampon. *truncated (optionnel) : max_output a été dépassé depuis la dernière prise.
+// Pour relayer au fil de l'eau le stderr d'un processus qui dure (sidecar).
+char *studio_proc_take_stderr(studio_proc_t *p, size_t *size, bool *truncated);
 
 // ---- Exécution complète ----------------------------------------------------------------------------------------------
 

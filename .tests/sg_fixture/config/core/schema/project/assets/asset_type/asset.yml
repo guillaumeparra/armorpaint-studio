@@ -1,0 +1,6 @@
+type: "shotgun_entity"
+name: "code"
+entity_type: "Asset"
+filters:
+    - { "path": "project", "relation": "is", "values": [ "$project" ] }
+    - { "path": "sg_asset_type", "relation": "is", "values": [ "$asset_type"] }

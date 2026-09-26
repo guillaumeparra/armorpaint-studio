@@ -75,7 +75,7 @@ static const char *buf_view(const proc_buf_t *b, size_t *size, bool *truncated) 
 }
 
 static char *buf_take(proc_buf_t *b, size_t *size) {
-	size_t n   = b->len - b->pos;
+	size_t n = b->len - b->pos;
 	char  *out = malloc(n + 1);
 	if (out != NULL) {
 		if (n > 0) {
@@ -581,6 +581,27 @@ const char *studio_proc_stderr(const studio_proc_t *p, size_t *size, bool *trunc
 	return buf_view(&p->err, size, truncated);
 }
 
+void studio_proc_set_cancel(studio_proc_t *p, volatile int *cancel) {
+	p->cancel = cancel;
+}
+
+char *studio_proc_take_stderr(studio_proc_t *p, size_t *size, bool *truncated) {
+	drain(&p->err_fd, &p->err);
+	size_t n;
+	char  *out = buf_take(&p->err, &n);
+	if (truncated != NULL) {
+		*truncated = p->err.truncated;
+	}
+	if (out != NULL) {
+		p->err.pos       = p->err.len;
+		p->err.truncated = false;
+	}
+	if (size != NULL) {
+		*size = n;
+	}
+	return out;
+}
+
 bool studio_proc_run(const char *const *argv, const studio_proc_opts_t *opts, const void *in, size_t in_size, int timeout_ms,
                      volatile int *cancel, studio_proc_result_t *res) {
 	memset(res, 0, sizeof(*res));
@@ -686,6 +707,21 @@ const char *studio_proc_stdout(const studio_proc_t *p, size_t *size, bool *trunc
 
 const char *studio_proc_stderr(const studio_proc_t *p, size_t *size, bool *truncated) {
 	return studio_proc_stdout(p, size, truncated);
+}
+
+void studio_proc_set_cancel(studio_proc_t *p, volatile int *cancel) {
+	(void)p, (void)cancel;
+}
+
+char *studio_proc_take_stderr(studio_proc_t *p, size_t *size, bool *truncated) {
+	(void)p;
+	if (size != NULL) {
+		*size = 0;
+	}
+	if (truncated != NULL) {
+		*truncated = false;
+	}
+	return calloc(1, 1);
 }
 
 bool studio_proc_run(const char *const *argv, const studio_proc_opts_t *opts, const void *in, size_t in_size, int timeout_ms,

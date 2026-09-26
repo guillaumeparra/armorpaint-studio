@@ -1,0 +1,5 @@
+type: "shotgun_entity"
+name: "short_name"
+entity_type: "Step"
+create_with_parent: True
+filters: [{"path":"$FROM$Task.step.entity", "relation": "is", "values":["$asset"]}]

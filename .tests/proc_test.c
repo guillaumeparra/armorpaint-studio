@@ -277,6 +277,67 @@ static void test_line_protocol(void) {
 	printf("  ok   CRLF, partial last line, over-long line\n");
 }
 
+// Processus qui dure (sidecar) : stderr relayé au fil de l'eau, attente annulable.
+static void test_long_lived(void) {
+	char           err[256];
+	studio_proc_t *p = studio_proc_spawn(
+	    (const char *[]){"sh", "-c", "while IFS= read -r l; do echo \"log:$l\" >&2; echo \"ok:$l\"; done", NULL}, NULL, err,
+	    sizeof(err));
+	CHECK(p != NULL, "spawn: %s", err);
+	if (p == NULL) {
+		return;
+	}
+	studio_proc_write(p, "a\n", 2, 2000);
+	char *line = studio_proc_read_line(p, 2000);
+	free(line);
+	studio_proc_wait(p, 100); // laisse arriver le stderr de "a"
+	size_t size;
+	bool   truncated;
+	char  *e1 = studio_proc_take_stderr(p, &size, &truncated);
+	CHECK(e1 != NULL && strcmp(e1, "log:a\n") == 0 && size == 6 && !truncated, "take_stderr: \"%s\"", e1 ? e1 : "(null)");
+	studio_proc_write(p, "b\n", 2, 2000);
+	line = studio_proc_read_line(p, 2000);
+	free(line);
+	studio_proc_wait(p, 100);
+	char *e2 = studio_proc_take_stderr(p, NULL, NULL);
+	CHECK(e2 != NULL && strcmp(e2, "log:b\n") == 0, "take_stderr consumes: \"%s\"", e2 ? e2 : "(null)");
+	char *e3 = studio_proc_take_stderr(p, &size, NULL);
+	CHECK(e3 != NULL && size == 0 && e3[0] == 0, "take_stderr empty");
+	free(e1);
+	free(e2);
+	free(e3);
+
+	// Une attente sans réponse rend la main dès que l'annulation est demandée, sans tuer le processus.
+	volatile int cancel = 1;
+	studio_proc_set_cancel(p, &cancel);
+	double t0 = now_s();
+	line      = studio_proc_read_line(p, 5000);
+	CHECK(line == NULL && now_s() - t0 < 0.5, "read_line cancelled in %.2f s", now_s() - t0);
+	CHECK(!studio_proc_wait(p, 5000) && now_s() - t0 < 1.0, "wait cancelled");
+	studio_proc_set_cancel(p, NULL);
+	studio_proc_write(p, "c\n", 2, 2000);
+	line = studio_proc_read_line(p, 2000);
+	CHECK(line != NULL && strcmp(line, "ok:c") == 0, "still alive after cancel: \"%s\"", line ? line : "(null)");
+	free(line);
+
+	// Plafond : stderr tronqué au-delà de max_output, puis le drapeau repart à zéro.
+	studio_proc_free(p);
+	studio_proc_opts_t small = {.max_output = 100};
+	p = studio_proc_spawn((const char *[]){"sh", "-c", "head -c 5000 /dev/zero | tr '\\0' x >&2; read l; echo y >&2; read l", NULL},
+	                      &small, err, sizeof(err));
+	studio_proc_wait(p, 300);
+	char *big = studio_proc_take_stderr(p, &size, &truncated);
+	CHECK(big != NULL && size == 100 && truncated, "take_stderr capped: %zu bytes, truncated %d", size, truncated);
+	studio_proc_write(p, "\n", 1, 2000);
+	studio_proc_wait(p, 300);
+	char *small_err = studio_proc_take_stderr(p, &size, &truncated);
+	CHECK(small_err != NULL && strcmp(small_err, "y\n") == 0 && !truncated, "truncated flag reset");
+	free(big);
+	free(small_err);
+	studio_proc_free(p);
+	printf("  ok   long-lived process: stderr taken incrementally (capped), cancellable waits\n");
+}
+
 // Pas de fuite de fd ni de zombie après de nombreux lancements.
 static void test_leaks(void) {
 	int before = open_fds();
@@ -314,6 +375,7 @@ int main(void) {
 	test_large_io();
 	test_timeout();
 	test_line_protocol();
+	test_long_lived();
 	test_leaks();
 	printf("%d checks, %d failures\n", checks, failures);
 	return failures > 0;

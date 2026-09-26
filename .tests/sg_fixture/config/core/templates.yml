@@ -1,0 +1,27 @@
+# Templates d'une config studio minimale, aux noms par défaut du sidecar (studio_sg_session.py).
+keys:
+    Asset:
+        type: str
+    sg_asset_type:
+        type: str
+    Step:
+        type: str
+    Sequence:
+        type: str
+    Shot:
+        type: str
+    name:
+        type: str
+        filter_by: alphanumeric
+    version:
+        type: int
+        format_spec: "03"
+
+paths:
+    asset_root: assets/{sg_asset_type}/{Asset}/{Step}
+    shot_root: sequences/{Sequence}/{Shot}/{Step}
+    armorpaint_asset_work: '@asset_root/work/armorpaint/{name}.v{version}.arm'
+    armorpaint_asset_publish: '@asset_root/publish/armorpaint/{name}.v{version}.arm'
+    armorpaint_shot_work: '@shot_root/work/armorpaint/{name}.v{version}.arm'
+
+strings: {}
