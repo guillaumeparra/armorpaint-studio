@@ -28,7 +28,8 @@ Modules, un par lot (voir `ARMORPAINT_LOTS.md` à la racine d'armorpaint) :
 | `studio_export` | B2-B5 | à faire |
 | `studio_ocio` | A | à faire |
 | `studio_sg`, `studio_shotgrid`, `studio_json`, `assets/studio_sg_*.py` | C2 | ✅ sidecar ShotGrid (Toolkit), superviseur, API de scripting (macOS ; validé sur site simulé) |
-| `studio_shotgrid` (UI) | C3-C5 | à faire |
+| `studio_workfiles`, `tk-armorpaint/` | C3 | ✅ Workfiles (tk-multi-workfiles2) et menu ShotGrid, par le moteur Toolkit tk-armorpaint (macOS ; validé sur site simulé) |
+| `studio_shotgrid` (UI) | C4-C5 | à faire |
 | `studio_ui` | B6/C3 | à faire |
 
 Build : `../base/make --compile` depuis `paint/`. Le log de démarrage affiche `studio: external <version>
@@ -106,7 +107,7 @@ projet redémarre le sidecar, et le superviseur la rejoue ; l'appelant ne voit q
 | `STUDIO_SG_BRIDGE` | script du sidecar (défaut `data/studio_sg_bridge.py`) |
 | `STUDIO_SGTK_PATH` | dossier contenant le paquet `sgtk` ; sinon `SHOTGUN_BUNDLE_CACHE_PATH`, puis le cache de ShotGrid Desktop (`$SHOTGUN_HOME` ou `~/Library/Caches/Shotgun`, `bundle_cache/app_store/tk-core`, version la plus récente) |
 | `STUDIO_SG_SCRIPT_NAME`, `STUDIO_SG_SCRIPT_KEY`, `STUDIO_SG_HOST` | connexion par script (ferme de rendu) au lieu de la session Desktop ; `SHOTGUN_SITE` à défaut de `STUDIO_SG_HOST` |
-| `STUDIO_SG_ENGINE` | moteur démarré après l'amorçage (défaut `tk-shell`, `none` pour aucun ; sans moteur en repli s'il échoue) |
+| `STUDIO_SG_ENGINE` | moteur démarré après l'amorçage (défaut `tk-armorpaint`, voir C3 ; `none` pour aucun ; sans moteur en repli s'il échoue) |
 | `STUDIO_SG_PLUGIN_ID` | plugin id de l'amorçage (défaut `basic.armorpaint`) |
 | `STUDIO_SG_BASE_CONFIGURATION` | descripteur de configuration si le projet n'a pas de PipelineConfiguration |
 | `STUDIO_SG_WORK_TEMPLATES` | templates de travail par type d'entité (défaut `Asset=armorpaint_asset_work,Shot=armorpaint_shot_work`) |
@@ -140,12 +141,14 @@ Le nom de publish suit la convention Toolkit : le nom de fichier sans sa version
 | `next_version` | `task_id`, `name` ? | `{name, version, path, publish_name}` : première version libre (fichiers et publishes) ; crée les dossiers de la tâche |
 | `register_publish` | `task_id`, `path`, `name` ?, `version` ? (défaut : lue dans le nom), `type` ?, `description` ?, `thumbnail_path` ?, `dependency_paths` ? | le PublishedFile créé |
 | `upload_thumbnail` | `entity` (`{type, id}`), `path` | `{attachment_id}` |
+| `list_commands` | `task_id` ? ou `project_id` ? | `{context, commands, favourites, has_ui}` : le menu du moteur tk-armorpaint, voir C3 |
+| `show_app` | `command`, `task_id` ? ou `project_id` ? | `{command, context}` à la fin de la commande (fermeture de la fenêtre) |
 | `ping`, `shutdown` | — | `{}` |
 
 Codes d'erreur (`/error/code`) : du sidecar, `bad_request`, `unknown_op`, `auth_required` (pas de session Desktop,
 ou expirée : jamais d'invite de mot de passe), `sg_unreachable`, `sg_error`, `toolkit_unavailable` (tk-core
 introuvable), `toolkit_error`, `not_found`, `template_missing` (la config n'a pas le template de travail),
-`internal` ; du superviseur, `sidecar_failed`, `sidecar_died`, `timeout`, `cancelled`. `restart_required` n'arrive
+`internal`, `app_unavailable` (moteur tk-armorpaint absent de la config, ou commande inconnue : Qt manquant…) ; du superviseur, `sidecar_failed`, `sidecar_died`, `timeout`, `cancelled`. `restart_required` n'arrive
 à l'appelant que si le rejeu échoue lui aussi.
 
 ### Scripts (minic)
@@ -190,12 +193,76 @@ Le C appelle `studio_sg_call()` (`studio_sg.h`), ou les mêmes jobs.
 ⚠️ **Windows** : le sidecar est portable, mais `studio_proc` n'y est pas implémenté (voir C1) : tout appel échoue en
 `sidecar_failed`.
 
+## Workfiles et menu ShotGrid (C3)
+
+Les fenêtres sont **celles de Toolkit**, pas une réimplémentation. `tk-armorpaint/` est un moteur Toolkit, sur le
+modèle des moteurs Adobe (tk-photoshopcc) : il tourne dans le sidecar, qui l'amorce, et les apps du studio
+(tk-multi-workfiles2…) y ouvrent leurs fenêtres Qt. Il faut donc PySide6 dans l'interpréteur du sidecar
+(`STUDIO_SG_PYTHON`) ; sans lui (ou avec `STUDIO_SG_NO_UI=1`), les apps à fenêtre ne se chargent pas et
+`show_app` répond `app_unavailable`.
+
+Une fois une fenêtre ouverte, le sidecar est une application pour le système. Entre deux requêtes, il fait donc
+tourner sa boucle d'événements Qt (`studio_sg_bridge.IDLE`, toutes les 50 ms) : sinon macOS le déclare bloqué, et
+s'il reçoit le premier plan, il retient clavier et souris (roue arc-en-ciel sur ArmorPaint). Sur macOS, c'est une
+application d'arrière-plan, absente du Dock et de Cmd+Tab, qui rend le premier plan à ArmorPaint à la fermeture de
+chaque fenêtre.
+
+Ce que les apps font sur la scène revient à ArmorPaint par des **requêtes host**, dans l'autre sens du protocole :
+le sidecar écrit `{"host":N,"op","args"}`, ArmorPaint exécute l'op à sa frame suivante et répond
+`{"host":N,"ok":true,"data":…}` ou `{"host":N,"ok":false,"error":{code,message}}`. Ops de `studio_workfiles.c` :
+`current_path`, `open` (`path`), `save`, `save_as` (`path`), `new`. Le hook `scene_operation` de workfiles2
+fourni par le moteur (`tk-armorpaint/hooks/tk-multi-workfiles2/scene_operation.py`) les appelle. Côté C, le
+superviseur les met en file ; le thread de l'UI les relève par `studio_sg_host_take()` et y répond par
+`studio_sg_host_reply()`. Un appel qui déclenche des requêtes host doit donc tourner en job (`studio_sg_start`),
+jamais en `studio_sg_run` sur le thread de l'UI. Le réglage `wake` du superviseur (`iron_delay_idle_sleep`)
+réveille l'app quand une requête arrive : au repos, iron ne rend plus de frame et les callbacks d'update ne
+tournent plus.
+
+Dans ArmorPaint :
+
+- **menu ShotGrid**, après Help (point d'injection `menubar-hook`, voir `PATCHES.md`). On y trouve le contexte
+  courant, la section contexte du moteur (Jump to Flow Production Tracking, Jump to File System), les favoris,
+  puis les commandes des apps. Le menu est chargé à la première ouverture (`list_commands`) et rechargé après
+  chaque fenêtre, qui a pu changer de contexte ;
+- **Ctrl+Alt+O / Ctrl+Alt+S** (Cmd+Alt sur macOS) : File Open / File Save de workfiles2 ;
+- `STUDIO_SG_WORKFILES_ON_START=1` ouvre File Open au démarrage ;
+- le titre de la fenêtre porte le fichier et le contexte (`robot.v003.arm - Demo / robot / Texture / texturing`).
+
+Une fenêtre à la fois : tant qu'une fenêtre Toolkit est ouverte, les entrées du menu sont grisées. Le contexte
+d'une fenêtre est la dernière tâche connue (celle de la fenêtre précédente), sinon le projet de lancement.
+
+Configuration Toolkit du studio, dans les environnements où ArmorPaint doit avoir ses apps :
+
+```yaml
+engines:
+  tk-armorpaint:
+    location: {type: path, path: <external>/tk-armorpaint}   # ou dev/git selon le déploiement
+    menu_favourites:
+      - {app_instance: tk-multi-workfiles2, name: File Open...}
+      - {app_instance: tk-multi-workfiles2, name: File Save...}
+    apps:
+      tk-multi-workfiles2:
+        location: {type: app_store, name: tk-multi-workfiles2, version: v0.15.x}
+        hook_scene_operation: '{engine}/tk-multi-workfiles2/scene_operation.py'
+        template_work: armorpaint_asset_work      # et les autres réglages habituels de workfiles2
+```
+
+Démo sur le site simulé, avec des versions créées au premier lancement :
+
+```sh
+STUDIO_TEST_TK_CORE=<tk-core> STUDIO_TEST_TK_APPS=<clones> STUDIO_SG_PYTHON=<python avec PySide6> \
+    .tests/demo_workfiles.sh [dossier]
+```
+
+(`STUDIO_TEST_TK_APPS` : tk-multi-workfiles2, tk-framework-shotgunutils et tk-framework-qtwidgets clonés depuis
+github.com/shotgunsoftware ; voir l'en-tête du script.)
+
 ## Tests
 
 ```sh
 .tests/run.sh [dossier de travail]     # EXR (B1) ; FUZZ=<n> pour le nombre de mutations
 .tests/proc.sh [dossier de travail]    # processus (C1)
-STUDIO_TEST_TK_CORE=<tk-core> .tests/sg.sh [dossier de travail]   # ShotGrid (C2)
+STUDIO_TEST_TK_CORE=<tk-core> .tests/sg.sh [dossier de travail]   # ShotGrid (C2) ; STUDIO_TEST_TK_APPS pour le moteur (C3)
 ```
 
 `sg.sh` fait tourner le sidecar sur un site ShotGrid simulé (`sg_fixture.py` : mockgun avec le schéma d'un vrai

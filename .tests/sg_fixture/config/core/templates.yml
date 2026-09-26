@@ -20,8 +20,13 @@ keys:
 paths:
     asset_root: assets/{sg_asset_type}/{Asset}/{Step}
     shot_root: sequences/{Sequence}/{Shot}/{Step}
+    armorpaint_asset_work_area: '@asset_root/work/armorpaint'
     armorpaint_asset_work: '@asset_root/work/armorpaint/{name}.v{version}.arm'
+    armorpaint_asset_publish_area: '@asset_root/publish/armorpaint'
     armorpaint_asset_publish: '@asset_root/publish/armorpaint/{name}.v{version}.arm'
+    armorpaint_shot_work_area: '@shot_root/work/armorpaint'
     armorpaint_shot_work: '@shot_root/work/armorpaint/{name}.v{version}.arm'
+    armorpaint_shot_publish_area: '@shot_root/publish/armorpaint'
+    armorpaint_shot_publish: '@shot_root/publish/armorpaint/{name}.v{version}.arm'
 
 strings: {}

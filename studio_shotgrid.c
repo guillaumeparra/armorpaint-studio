@@ -8,6 +8,7 @@
 
 // Cœur ArmorPaint / iron
 char *path_data(void);
+void  iron_delay_idle_sleep(void); // base/sources/iron.h
 
 static void shotgrid_log(const char *line) {
 	iron_log("studio: shotgrid: %s", line);
@@ -29,7 +30,9 @@ static void shotgrid_configure(void) {
 	const char *argv[] = {python, bridge, NULL};
 	// Pas de __pycache__ dans data/ : le paquet de l'app est signé (macOS), et ce dossier peut être en lecture seule.
 	const char        *env[]  = {"PYTHONDONTWRITEBYTECODE=1", NULL};
-	studio_sg_config_t config = {.argv = argv, .env = env, .log = shotgrid_log};
+	// wake : sans entrée clavier ou souris, iron saute les frames (IDLE_SLEEP) et avec elles les callbacks qui relèvent
+	// jobs et requêtes host ; quand l'artiste travaille dans une fenêtre Qt du sidecar, ArmorPaint n'en reçoit aucune.
+	studio_sg_config_t config = {.argv = argv, .env = env, .log = shotgrid_log, .wake = iron_delay_idle_sleep};
 	studio_sg_configure(&config);
 	iron_log("studio: shotgrid ready (sidecar: %s %s, started on first call)", python, bridge);
 }

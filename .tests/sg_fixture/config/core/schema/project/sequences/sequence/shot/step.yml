@@ -1,0 +1,6 @@
+type: "shotgun_entity"
+name: "short_name"
+entity_type: "Step"
+create_with_parent: True
+# Comme tk-config-default2 : les étapes du type d'entité (mockgun ignore les chemins $FROM$).
+filters: [{"path": "entity_type", "relation": "is", "values": ["Shot"]}]

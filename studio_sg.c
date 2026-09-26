@@ -21,6 +21,7 @@
 #define SG_DEFAULT_CALL_MS 300000
 // Tranche d'attente d'une réponse : entre deux tranches, le stderr du sidecar est relayé (progression d'un amorçage).
 #define SG_SLICE_MS 250
+#define SG_HOST_SLICE_MS 10 // tranche pendant qu'une requête host attend la réponse de l'app
 #define SG_WRITE_MS 10000
 // Arrêt : délai laissé au sidecar pour sortir seul après EOF (ou après avoir annoncé "restart").
 #define SG_EXIT_GRACE_MS 3000
@@ -77,6 +78,7 @@ static char **cfg_env;
 static int    cfg_hello_ms = SG_DEFAULT_HELLO_MS;
 static int    cfg_call_ms  = SG_DEFAULT_CALL_MS;
 static void (*cfg_log)(const char *line);
+static void (*cfg_wake)(void);
 
 static studio_proc_t *sidecar;
 static int            next_id = 1;
@@ -87,6 +89,15 @@ static size_t         partial_len;
 static volatile int   closed; // studio_sg_shutdown() est passé
 
 static char *hello; // sous state
+
+// Requêtes du sidecar vers l'app pendant un appel ({"host":N,...}, voir studio_sg.h) et réponses de l'app, sous state.
+typedef struct sg_line {
+	char           *text;
+	struct sg_line *next;
+} sg_line_t;
+static sg_line_t *host_requests;
+static sg_line_t *host_replies;
+static int        host_waiting; // sous call : requêtes de l'appel en cours dont la réponse n'est pas encore écrite
 
 static void sg_log(const char *format, ...) {
 	if (cfg_log == NULL) {
@@ -274,6 +285,63 @@ static void kill_sidecar(const char *reason) {
 	release_sidecar();
 }
 
+static bool lines_push(sg_line_t **list, char *text) {
+	sg_line_t *line = malloc(sizeof(sg_line_t));
+	if (line == NULL) {
+		return false;
+	}
+	line->text = text;
+	line->next = NULL;
+	while (*list != NULL) {
+		list = &(*list)->next;
+	}
+	*list = line;
+	return true;
+}
+
+static char *lines_pop(sg_line_t **list) {
+	sg_line_t *line = *list;
+	if (line == NULL) {
+		return NULL;
+	}
+	char *text = line->text;
+	*list      = line->next;
+	free(line);
+	return text;
+}
+
+static void lines_clear(sg_line_t **list) {
+	char *text;
+	while ((text = lines_pop(list)) != NULL) {
+		free(text);
+	}
+}
+
+// Sous call, en début et en fin d'appel : une requête ou une réponse d'un autre appel n'a plus de destinataire.
+static void host_reset(void) {
+	state_lock();
+	lines_clear(&host_requests);
+	lines_clear(&host_replies);
+	state_unlock();
+	host_waiting = 0;
+}
+
+// Sous call : écrit au sidecar les réponses que l'app a données depuis la dernière tranche.
+static void write_host_replies(void) {
+	state_lock();
+	sg_line_t *list = host_replies;
+	host_replies    = NULL;
+	state_unlock();
+	char *text;
+	while ((text = lines_pop(&list)) != NULL) {
+		if (!studio_proc_write(sidecar, text, strlen(text), SG_WRITE_MS)) {
+			sg_log("could not write a host reply to the sidecar");
+		}
+		host_waiting = host_waiting > 0 ? host_waiting - 1 : 0;
+		free(text);
+	}
+}
+
 static bool is_cancelled(volatile int *cancel) {
 	return cancel != NULL && *cancel != 0;
 }
@@ -379,6 +447,7 @@ static char *call_locked(const char *op, const char *op_json, const char *args_j
 	int64_t deadline = timeout < 0 ? -1 : now_ms() + timeout;
 	char   *reply    = NULL;
 	char    buf[700];
+	host_reset();
 
 	for (int attempt = 0; attempt < 2 && reply == NULL; attempt++) {
 		if ((reply = ensure_sidecar(id, cancel)) != NULL) {
@@ -408,11 +477,33 @@ static char *call_locked(const char *op, const char *op_json, const char *args_j
 
 		bool restart = false;
 		while (reply == NULL && !restart) {
-			int64_t left  = deadline < 0 ? SG_SLICE_MS : deadline - now_ms();
-			int     slice = left <= 0 ? 0 : left < SG_SLICE_MS ? (int)left : SG_SLICE_MS;
+			write_host_replies();
+			// Une requête host attend l'app : tranches courtes, pour lui écrire la réponse dès qu'elle est donnée, et
+			// réveil à chacune (un réveil isolé peut se perdre dans la boucle de l'app).
+			if (host_waiting > 0 && cfg_wake != NULL) {
+				cfg_wake();
+			}
+			int     max   = host_waiting > 0 ? SG_HOST_SLICE_MS : SG_SLICE_MS;
+			int64_t left  = deadline < 0 ? max : deadline - now_ms();
+			int     slice = left <= 0 ? 0 : left < max ? (int)left : max;
 			int64_t t0    = now_ms();
 			char   *got   = studio_proc_read_line(sidecar, slice);
 			pump_stderr();
+			if (got != NULL && studio_json_int(studio_json_find(got, "/host"), -1) > 0) {
+				state_lock();
+				bool queued = lines_push(&host_requests, got);
+				state_unlock();
+				if (queued) {
+					host_waiting++;
+					if (cfg_wake != NULL) {
+						cfg_wake();
+					}
+				}
+				else {
+					free(got);
+				}
+				continue;
+			}
 			if (got != NULL) {
 				if (studio_json_int(studio_json_find(got, "/id"), -1) != id) {
 					sg_log("discarding unexpected reply: %.200s", got);
@@ -464,6 +555,7 @@ static char *call_locked(const char *op, const char *op_json, const char *args_j
 	if (sidecar != NULL) {
 		studio_proc_set_cancel(sidecar, NULL);
 	}
+	host_reset();
 	free(line);
 	return reply;
 }
@@ -531,6 +623,7 @@ void studio_sg_configure(const studio_sg_config_t *config) {
 	cfg_hello_ms = config->hello_timeout_ms > 0 ? config->hello_timeout_ms : SG_DEFAULT_HELLO_MS;
 	cfg_call_ms  = config->call_timeout_ms != 0 ? config->call_timeout_ms : SG_DEFAULT_CALL_MS;
 	cfg_log      = config->log;
+	cfg_wake     = config->wake;
 	call_unlock();
 }
 
@@ -545,6 +638,35 @@ char *studio_sg_hello(void) {
 	char *copy = hello != NULL ? strdup(hello) : NULL;
 	state_unlock();
 	return copy;
+}
+
+char *studio_sg_host_take(void) {
+	state_lock();
+	char *text = lines_pop(&host_requests);
+	state_unlock();
+	return text;
+}
+
+void studio_sg_host_reply(const char *reply) {
+	if (reply == NULL || studio_json_int(studio_json_find(reply, "/host"), -1) <= 0) {
+		sg_log("host reply without \"host\" ignored: %.200s", reply != NULL ? reply : "(null)");
+		return;
+	}
+	size_t len  = strlen(reply);
+	char  *line = malloc(len + 2);
+	if (line == NULL) {
+		return;
+	}
+	for (size_t i = 0; i < len; i++) { // une ligne : hors des chaînes JSON, un saut de ligne n'est qu'un espace
+		line[i] = reply[i] == '\n' || reply[i] == '\r' ? ' ' : reply[i];
+	}
+	line[len]     = '\n';
+	line[len + 1] = 0;
+	state_lock();
+	if (!lines_push(&host_replies, line)) {
+		free(line);
+	}
+	state_unlock();
 }
 
 // ---- Jobs -------------------------------------------------------------------------------------------------------------
@@ -612,6 +734,9 @@ static void job_execute(sg_job_t *j) {
 	state_unlock();
 	if (orphan) {
 		job_free(j);
+	}
+	else if (cfg_wake != NULL) {
+		cfg_wake();
 	}
 }
 

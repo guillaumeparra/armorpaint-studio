@@ -69,6 +69,20 @@ for line in sys.stdin:
         send({"id": rid, "ok": True, "data": None})
     elif op == "huge":
         send({"id": rid, "ok": True, "data": "x" * args["n"]})
+    elif op == "host":
+        # Requêtes host vers l'app (args["ops"]), une réponse attendue pour chacune : comme le hook scene_operation.
+        replies = []
+        for k, host_op in enumerate(args["ops"], 1):
+            if host_op == "stray":
+                out.write('{"host":999,"op":"ignored"}\n')  # jamais répondue : jetée en fin d'appel
+                out.flush()
+                continue
+            send({"host": k, "op": host_op, "args": {"k": k, "text": "é\n\"x\""}})
+            reply = json.loads(sys.stdin.readline())
+            while reply.get("host") != k:  # réponse à une autre requête (stray) : ignorée, comme studio_sg_bridge.py
+                reply = json.loads(sys.stdin.readline())
+            replies.append(reply)
+        send({"id": rid, "ok": True, "data": replies})
     elif op == "close_stdout":
         out.close()
         os.close(1)

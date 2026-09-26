@@ -357,6 +357,66 @@ class TestToolkit(Base):
         self.assertIn("armorpaint_asset_work", reply["error"]["message"])
 
 
+def has_qt():
+    try:
+        import PySide6  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+@unittest.skipUnless(os.environ.get("STUDIO_TEST_TK_APPS"), "STUDIO_TEST_TK_APPS not set (tk-multi-workfiles2 clones)")
+class TestEngine(Base):
+    """Le moteur tk-armorpaint et le menu ShotGrid (scénario demo). Les fenêtres ne sont pas ouvertes ici : voir
+    demo_workfiles.sh."""
+
+    CONTEXT_COMMANDS = ["Jump to Flow Production Tracking", "Jump to File System"]
+
+    def test_menu_without_qt(self):
+        s = self.start("demo", STUDIO_SG_NO_UI="1")
+        menu = s.data("list_commands", {"task_id": 1})
+        self.assertEqual(menu["context"]["label"], "Demo / robot / Texture / texturing")
+        self.assertEqual((menu["context"]["task_id"], menu["context"]["project_id"]), (1, 1))
+        self.assertFalse(menu["has_ui"])
+        # Sans Qt, workfiles2 ne s'enregistre pas : seule la section contexte du moteur reste.
+        self.assertEqual([c["name"] for c in menu["commands"]], self.CONTEXT_COMMANDS)
+        self.assertEqual({c["type"] for c in menu["commands"]}, {"context_menu"})
+        self.assertEqual(menu["favourites"], [])
+        # Les dossiers de la tâche sont créés avant le changement de contexte.
+        work = os.path.join(self.workdir, "storage", "demo", "assets", "Prop", "robot", "TXT", "work", "armorpaint")
+        self.assertTrue(os.path.isdir(work))
+        code, reply = s.error("show_app", {"command": "open", "task_id": 1})
+        self.assertEqual(code, "app_unavailable")
+        self.assertIn("no Qt", reply["error"]["message"])
+
+        # project_id seul garde le contexte courant du moteur s'il est dans ce projet.
+        project = s.data("list_commands", {"project_id": 1})
+        self.assertEqual(project["context"]["task_id"], 1)
+        # Autre tâche : les commandes du moteur survivent au changement de contexte.
+        other = s.data("list_commands", {"task_id": 2})
+        self.assertEqual(other["context"]["label"], "Demo / tree / Texture / lookdev")
+        self.assertEqual([c["name"] for c in other["commands"]], self.CONTEXT_COMMANDS)
+
+    @unittest.skipUnless(has_qt(), "PySide6 not importable by this Python")
+    def test_menu_with_workfiles(self):
+        s = self.start("demo")
+        menu = s.data("list_commands", {"task_id": 1})
+        self.assertTrue(menu["has_ui"])
+        names = [c["name"] for c in menu["commands"]]
+        self.assertEqual([c["name"] for c in menu["commands"] if c["type"] == "context_menu"], self.CONTEXT_COMMANDS)
+        self.assertIn("File Open...", names)
+        self.assertIn("File Save...", names)
+        wf = {c["name"]: c for c in menu["commands"]}["File Open..."]
+        self.assertEqual((wf["app_instance"], wf["type"]), ("tk-multi-workfiles2", "default"))
+        self.assertEqual(menu["favourites"], ["File Open...", "File Save..."])  # réglage menu_favourites
+
+    def test_engine_missing(self):
+        s = self.start()  # config sans tk-armorpaint
+        code, reply = s.error("list_commands", {"task_id": 1})
+        self.assertEqual(code, "app_unavailable")
+        self.assertIn("tk-armorpaint", reply["error"]["message"])
+
+
 class TestCoreDiscovery(Base):
     def test_toolkit_unavailable(self):
         home = os.path.join(self.workdir, "home")
@@ -388,6 +448,42 @@ class TestCoreDiscovery(Base):
             os.environ.clear()
             os.environ.update(old)
         self.assertEqual(versions, ["v0.21.10", "v0.21.2", "v0.9.10", "v0.3.0"])
+
+    def test_line_reader_idle(self):
+        # Entre deux requêtes, le sidecar fait tourner la boucle d'événements de ses fenêtres (studio_sg_bridge.IDLE).
+        import threading
+
+        from studio_sg_bridge import LineReader
+
+        r, w = os.pipe()
+        reader = LineReader(r)
+        ticks = []
+
+        def writer():
+            time.sleep(0.3)
+            os.write(w, "a\nb".encode())
+            time.sleep(0.2)
+            os.write(w, "é\nc\n".encode())
+            os.close(w)
+
+        threading.Thread(target=writer).start()
+        self.assertEqual(reader.readline(idle=lambda: ticks.append(1)), "a\n")
+        self.assertGreaterEqual(len(ticks), 3)  # toutes les 50 ms pendant 0,3 s
+        self.assertEqual(reader.readline(), "bé\n")  # une ligne coupée entre deux écritures
+        self.assertEqual(reader.readline(), "c\n")
+        self.assertEqual(reader.readline(idle=lambda: None), "")  # EOF
+        os.close(r)
+
+        def failing():
+            raise RuntimeError("boom")
+
+        r, w = os.pipe()
+        os.write(w, b"x\n")
+        reader = LineReader(r)
+        self.assertEqual(reader.readline(idle=failing), "x\n")  # rien à attendre : idle pas appelé
+        threading.Timer(0.2, lambda: (os.write(w, b"y\n"), os.close(w))).start()
+        self.assertEqual(reader.readline(idle=failing), "y\n")  # idle en échec : désactivé, la lecture continue
+        os.close(r)
 
     def test_publish_name(self):
         from studio_sg_session import publish_name, version_in_name

@@ -87,6 +87,12 @@ static void log_clear(void) {
 	pthread_mutex_unlock(&log_mutex);
 }
 
+static volatile int wakes; // appels de config.wake
+
+static void count_wake(void) {
+	__sync_fetch_and_add(&wakes, 1);
+}
+
 static void use_fake(const char *hello, int hello_ms, int call_ms) {
 	char script[1024], mode[64];
 	snprintf(script, sizeof(script), "%s/sg_fake.py", tests_dir);
@@ -94,7 +100,7 @@ static void use_fake(const char *hello, int hello_ms, int call_ms) {
 	const char        *argv[] = {"python3", script, NULL};
 	const char        *env[]  = {mode, "PYTHONDONTWRITEBYTECODE=1", NULL};
 	studio_sg_config_t config = {.argv = argv, .env = env, .hello_timeout_ms = hello_ms, .call_timeout_ms = call_ms,
-	                             .log = capture_log};
+	                             .log = capture_log, .wake = count_wake};
 	studio_sg_configure(&config);
 }
 
@@ -430,6 +436,94 @@ static void test_end_to_end(void) {
 	printf("  ok   shutdown: sidecar stopped, later calls refused\n");
 }
 
+// Thread d'interface simulé : répond aux requêtes host (en majuscules pour "upper", en erreur pour "fail").
+static volatile int host_stop;
+static volatile int host_answered;
+
+static void *host_ui(void *arg) {
+	(void)arg;
+	while (!host_stop) {
+		char *request = studio_sg_host_take();
+		if (request == NULL) {
+			sleep_ms(2);
+			continue;
+		}
+		long long n     = studio_json_int(studio_json_find(request, "/host"), -1);
+		char     *op    = text_at(request, "/op");
+		char     *text  = text_at(request, "/args/text");
+		char     *quote = studio_json_quote(text);
+		char      reply[512];
+		if (strcmp(op, "fail") == 0) {
+			snprintf(reply, sizeof(reply), "{\"host\":%lld,\"ok\":false,\"error\":{\"code\":\"no_scene\",\"message\":\"m\"}}", n);
+		}
+		else {
+			snprintf(reply, sizeof(reply), "{\"host\":%lld,\n\"ok\":true,\"data\":{\"op\":\"%s\",\"text\":%s}}", n, op, quote);
+		}
+		studio_sg_host_reply(reply);
+		host_answered++;
+		free(op), free(text), free(quote), free(request);
+	}
+	return NULL;
+}
+
+static void test_host(void) {
+	use_fake("ok", 0, 0);
+	studio_sg_host_reply("{\"id\":1}"); // sans "host" : refusée
+	CHECK(log_has("host reply without"), "host reply without host refused");
+	studio_sg_host_reply("{\"host\":42,\"ok\":true}"); // d'un autre appel : jetée au début du suivant
+	pthread_t ui;
+	host_stop = 0;
+	pthread_create(&ui, NULL, host_ui, NULL);
+	double t0 = now_s();
+	char  *r  = expect("host", "{\"ops\":[\"open\",\"stray\",\"fail\",\"save\"]}", 5000, NULL, "host");
+	CHECK(now_s() - t0 < 1.0, "host round trips are quick: %.2f s", now_s() - t0);
+	CHECK(studio_json_length(studio_json_find(r, "/data")) == 3, "three host replies: %.300s", r);
+	char *a = text_at(r, "/data/0/data/op"), *b = text_at(r, "/data/0/data/text"), *c = text_at(r, "/data/1/error/code");
+	char *d = text_at(r, "/data/2/data/op");
+	CHECK(strcmp(a, "open") == 0 && strcmp(b, "é\n\"x\"") == 0, "host reply data: %s %s", a, b);
+	CHECK(studio_json_int(studio_json_find(r, "/data/0/host"), -1) == 1, "host id kept");
+	CHECK(strcmp(c, "no_scene") == 0 && strcmp(d, "save") == 0, "host error and order: %s %s", c, d);
+	free(a), free(b), free(c), free(d), free(r);
+	host_stop = 1;
+	pthread_join(ui, NULL);
+	// Sans thread d'interface : une requête restée sans preneur est jetée à la fin de l'appel.
+	free(expect("host", "{\"ops\":[\"stray\"]}", 5000, NULL, "stray"));
+	CHECK(studio_sg_host_take() == NULL, "stray host request dropped at the end of the call");
+	// Pendant un job (le cas de l'app : show_app) ; le thread d'interface répond avec du retard. L'app est réveillée
+	// à la requête, puis régulièrement tant qu'elle n'a pas répondu, et à la fin du job.
+	wakes     = 0;
+	int job   = studio_sg_start("host", "{\"ops\":[\"open\"]}", -1);
+	char *req = NULL;
+	for (int i = 0; i < 2000 && req == NULL; i++) {
+		req = studio_sg_host_take();
+		sleep_ms(1);
+	}
+	CHECK(req != NULL && studio_sg_state(job) == STUDIO_SG_RUNNING, "job waits for the host reply");
+	sleep_ms(300);
+	CHECK(studio_sg_state(job) == STUDIO_SG_RUNNING, "still waiting");
+	CHECK(wakes >= 10, "app woken while the host request waits: %d", wakes);
+	studio_sg_host_reply("{\"host\":1,\"ok\":true,\"data\":7}");
+	CHECK(wait_done(job, 5) == STUDIO_SG_DONE && studio_sg_int(job, "/data/0/data", -1) == 7, "job done after reply: %s",
+	      studio_sg_result(job));
+	int after = wakes;
+	sleep_ms(100);
+	CHECK(wakes == after, "no wake once replied and done: %d then %d", after, wakes);
+	studio_sg_release(job);
+	free(req);
+	// Annulé pendant qu'il attend l'app : sidecar tué, rien ne reste.
+	job = studio_sg_start("host", "{\"ops\":[\"open\"]}", -1);
+	for (int i = 0; i < 2000 && (req = studio_sg_host_take()) == NULL; i++) {
+		sleep_ms(1);
+	}
+	studio_sg_cancel(job);
+	CHECK(wait_done(job, 3) == STUDIO_SG_DONE && strcmp(studio_sg_get(job, "/error/code"), "cancelled") == 0,
+	      "cancel while waiting for the app");
+	studio_sg_release(job);
+	free(req);
+	studio_sg_stop();
+	printf("  ok   host: requests to the app, replies in order, errors, stray and stale lines, job, cancel\n");
+}
+
 int main(int argc, char **argv) {
 	if (argc != 3) {
 		fprintf(stderr, "usage: sg_super_test <tests dir> <workdir>\n");
@@ -442,6 +536,7 @@ int main(int argc, char **argv) {
 	test_failures();
 	test_startup();
 	test_jobs();
+	test_host();
 	test_no_leak();
 	test_end_to_end();
 	printf("%d checks, %d failures\n", checks, failures);

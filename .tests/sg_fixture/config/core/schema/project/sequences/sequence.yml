@@ -1,0 +1,5 @@
+type: "shotgun_entity"
+name: "code"
+entity_type: "Sequence"
+filters:
+    - { "path": "project", "relation": "is", "values": [ "$project" ] }

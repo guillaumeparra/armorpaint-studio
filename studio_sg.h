@@ -28,6 +28,9 @@ typedef struct studio_sg_config {
 	int                call_timeout_ms;  // délai par défaut d'un appel ; 0 = 300 s (un premier amorçage Toolkit peut
 	                                     // télécharger la configuration du projet)
 	void (*log)(const char *line);       // stderr du sidecar (ligne par ligne) et évènements ; NULL = aucun log
+	void (*wake)(void);                  // depuis le thread de l'appel : l'app a quelque chose à relever (requête
+	                                     // host, job fini). Pour une boucle d'interface qui dort sans entrée
+	                                     // utilisateur ; NULL = rien
 } studio_sg_config_t;
 
 // Copie la configuration. Le sidecar en cours est arrêté : le prochain appel lance la nouvelle commande.
@@ -65,6 +68,17 @@ bool        studio_sg_ok(int job);
 const char *studio_sg_get(int job, const char *pointer);        // "" si absent
 int         studio_sg_length(int job, const char *pointer);     // éléments d'un tableau ou d'un objet, -1 sinon
 long long   studio_sg_int(int job, const char *pointer, long long fallback);
+
+// ---- Requêtes du sidecar vers l'app (host) ------------------------------------------------------------------------------
+// Pendant un appel, le sidecar peut demander une action à l'app : {"host":N,"op":"open","args":{...}} (les opérations
+// sur la scène du moteur Toolkit tk-armorpaint, op show_app). Le thread de l'interface les relève à chaque frame et
+// répond {"host":N,"ok":true,"data":...} ou {"host":N,"ok":false,"error":{"code":...,"message":...}} ; le thread de
+// l'appel écrit la réponse au sidecar, qui attend. Une requête qui reste sans réponse bloque l'appel en cours : un
+// appel qui en émet se lance en job (studio_sg_start), jamais par studio_sg_run depuis le thread de l'interface.
+// Les requêtes et réponses non consommées à la fin de l'appel sont jetées.
+
+char *studio_sg_host_take(void);               // prochaine requête (à libérer), NULL si aucune
+void  studio_sg_host_reply(const char *reply); // réponse (objet JSON portant "host")
 
 // À la sortie de l'app : annule les jobs, arrête le sidecar. Les appels suivants échouent en sidecar_failed.
 void studio_sg_shutdown(void);

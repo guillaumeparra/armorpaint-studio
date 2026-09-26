@@ -7,6 +7,8 @@
 #   requête        -> {"id":7,"op":"list_tasks","args":{...}}
 #   réponse        <- {"id":7,"ok":true,"data":...}
 #                  <- {"id":7,"ok":false,"error":{"code":"auth_required","message":"..."}}
+#   requête host   <- {"host":1,"op":"open","args":{...}}         pendant une requête, le sidecar demande à ArmorPaint
+#   réponse host   -> {"host":1,"ok":true,"data":...}             (ou "ok":false,"error") ; voir HostChannel
 # "id" est toujours le premier champ : le superviseur apparie requête et réponse sans parser le JSON.
 # Une réponse portant "restart":true annonce que le sidecar s'arrête juste après : le superviseur le relance et
 # rejoue la requête (changement de projet Toolkit, voir studio_sg_session.py).
@@ -20,12 +22,15 @@ import json
 import logging
 import os
 import re
+import select
 import sys
 import traceback
 
 PROTOCOL = 1
 
 log = logging.getLogger("studio_sg")
+
+HOST = None  # canal vers ArmorPaint (HostChannel), posé par main() ; utilisé par le moteur tk-armorpaint
 
 
 class BridgeError(Exception):
@@ -38,11 +43,87 @@ class BridgeError(Exception):
         self.restart = restart
 
 
+class HostError(Exception):
+    """Refus ou échec d'ArmorPaint sur une requête host (code et message de sa réponse)."""
+
+    def __init__(self, code, message):
+        super().__init__("ArmorPaint: %s (%s)" % (message, code))
+        self.code = code
+
+
+# Boucle d'événements de l'interface du sidecar, posée par le moteur tk-armorpaint quand il crée son QApplication. Le
+# sidecar l'appelle toutes les IDLE_MS quand il attend ArmorPaint entre deux requêtes : un processus qui a ouvert une
+# fenêtre est une application pour macOS, qui la déclare bloquée (roue, clavier et souris retenus quand elle a le
+# premier plan) si elle ne lit plus ses événements.
+IDLE = None
+IDLE_MS = 50
+
+
+class LineReader(object):
+    """readline() sur le descripteur du protocole. Sans tampon caché devant le descripteur : select() dit vrai, et
+    l'attente peut faire tourner idle() (hors Windows, où select() ne prend pas les pipes)."""
+
+    def __init__(self, fd):
+        self.fd = fd
+        self.buf = b""
+
+    def readline(self, idle=None):
+        while b"\n" not in self.buf:
+            if idle is not None and os.name != "nt" and not select.select([self.fd], [], [], IDLE_MS / 1000.0)[0]:
+                try:
+                    idle()
+                except Exception:  # noqa: BLE001
+                    log.exception("idle callback failed, disabled")
+                    idle = None
+                continue
+            chunk = os.read(self.fd, 65536)
+            if not chunk:
+                line, self.buf = self.buf, b""
+                return line.decode("utf-8", "replace")
+            self.buf += chunk
+        line, _, self.buf = self.buf.partition(b"\n")
+        return (line + b"\n").decode("utf-8", "replace")
+
+
+class HostChannel(object):
+    """Requêtes du sidecar vers ArmorPaint, pendant une requête d'ArmorPaint (op show_app : les opérations sur la scène
+    que demande une app Toolkit). Le superviseur les passe au thread de l'interface d'ArmorPaint, qui répond à la frame
+    suivante ; la requête en cours d'ArmorPaint attend pendant ce temps, rien d'autre ne peut arriver sur stdin."""
+
+    def __init__(self, proto_in, send):
+        self._in = proto_in
+        self._send = send
+        self._next = 0
+
+    def request(self, op, args=None):
+        self._next += 1
+        number = self._next
+        message = {"host": number, "op": op, "args": args or {}}
+        self._send(json.dumps(message, default=_json_default, ensure_ascii=True, allow_nan=False, separators=(",", ":")))
+        while True:
+            line = self._in.readline()
+            if not line:
+                raise HostError("host_gone", "ArmorPaint closed the connection")
+            line = line.strip()
+            try:
+                reply = json.loads(line) if line else None
+            except ValueError:
+                reply = None
+            if not isinstance(reply, dict) or reply.get("host") != number:
+                if line:
+                    log.warning("ignored while waiting for ArmorPaint: %.200s", line)
+                continue
+            if reply.get("ok"):
+                return reply.get("data")
+            error = reply.get("error") or {}
+            raise HostError(error.get("code", "host_error"), error.get("message", "no message"))
+
+
 def _claim_stdio():
     # Garde des copies privées de stdin/stdout pour le protocole, puis branche les descripteurs 0 et 1 du processus
     # sur /dev/null et stderr : un sous-processus lancé par un hook les hérite sans pouvoir corrompre le protocole.
     # os.dup() crée des descripteurs non héritables.
-    proto_in = os.fdopen(os.dup(0), "r", encoding="utf-8", errors="replace", newline="\n")
+    proto_in = LineReader(os.dup(0))
     proto_out = os.fdopen(os.dup(1), "w", encoding="ascii", newline="\n")
     null = os.open(os.devnull, os.O_RDONLY)
     os.dup2(null, 0)
@@ -76,6 +157,7 @@ def encode(message_id, ok, payload, restart=False):
 
 
 _ID_PREFIX = re.compile(r'^\s*\{\s*"id"\s*:\s*(\d+)')
+_HOST_PREFIX = re.compile(r'^\s*\{\s*"host"\s*:')
 
 
 def handle_line(session, line):
@@ -133,13 +215,18 @@ def main(session_factory=None):
         return 1
     hello["protocol"] = PROTOCOL
     send(encode(0, True, hello))
+    global HOST
+    HOST = HostChannel(proto_in, send)
 
     while True:
-        line = proto_in.readline()
+        line = proto_in.readline(idle=IDLE)
         if not line:
             break  # EOF : ArmorPaint est parti
         line = line.strip()
         if not line:
+            continue
+        if _HOST_PREFIX.match(line):
+            log.warning("late reply from ArmorPaint ignored: %.200s", line)  # requête host déjà abandonnée
             continue
         response, stop = handle_line(session, line)
         send(response)

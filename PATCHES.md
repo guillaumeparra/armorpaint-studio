@@ -169,3 +169,39 @@ apporter ces bornes : rejouer le fuzz sur `main` sans le patch avant de le retir
 **Non couvert.** Le décodeur DWA d'`io_exr.c` lui-même reste sans bornes ; c'est `studio_exr_dwa_legacy_safe()`
 qui valide un fichier avant de le lui confier, et `io_exr_parse()` déborde toujours sa pile au-delà de 4 canaux
 (cas `many.exr` du banc). N'appeler `io_exr_parse()` que derrière cette validation.
+
+---
+
+## menubar-hook
+
+| | |
+|---|---|
+| Fichier | `paint/sources/ui/ui_menubar.c` (`ui_menubar_add_category`, `ui_menubar_draw_category_items`, `ui_menubar_render_ui`) |
+| Commit studio | `6cae0e88` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-26) |
+| Injection | 22 lignes, point d'injection générique, sans dépendance à `external/` (compile sans `WITH_EXTERNAL`) |
+
+**Motif.** La barre de menus d'ArmorPaint est codée en dur (`menubar_category_t`, une chaîne par catégorie dans
+`ui_menubar_render_ui()`, un `if` par catégorie dans `ui_menubar_draw_category_items()`). Aucun plugin ne peut y
+ajouter un menu. Le studio y veut le menu ShotGrid (menu standard des moteurs Toolkit : section contexte,
+favoris, commandes des apps).
+
+**Correctif.** `void ui_menubar_add_category(char *label, void (*draw_items)(void))` enregistre au plus 4
+catégories, affichées après Help. Leur numéro de catégorie suit `MENUBAR_CATEGORY_HELP`, la dernière valeur de
+l'enum. `ui_menubar_draw_category_items()` appelle alors `draw_items`, qui dessine ses entrées avec les helpers
+`ui_menu_button` / `ui_menu_separator` / `ui_menu_label`, comme une catégorie upstream : même ouverture au
+survol, même fermeture. Le plugin déclare le prototype lui-même (`external/studio_workfiles.c`), si bien qu'aucun
+header upstream n'est touché.
+
+**Test.** Lancer la démo (`.tests/demo_workfiles.sh`, voir README « Workfiles et menu ShotGrid (C3) »). Un menu
+ShotGrid apparaît après Help. Survoler Help puis ShotGrid bascule d'un menu à l'autre. Le menu ShotGrid liste le
+contexte, « Jump to Flow Production Tracking », « Jump to File System », puis File Open... et File Save... en
+favoris. Sans plugin, ou sans appel à `ui_menubar_add_category`, la barre est identique à l'upstream.
+
+**Signes que l'upstream l'a corrigé.** Une API de menus pour les plugins (catégorie ajoutée depuis un plugin
+`.js`/minic), ou `menubar_category_t` qui gagne une valeur après `HELP` : dans ce dernier cas, **le numéro des
+catégories ajoutées entre en collision** avec la nouvelle, et il faut refaire le patch. Si une API existe, y
+porter `studio_workfiles_init()` et retirer le patch.
+
+**Non couvert.** L'UI tactile (`g_config->touch_ui`) : sa barre est une rangée d'icônes, les catégories ajoutées
+n'y apparaissent pas. Les raccourcis Ctrl/Cmd+Alt+O et S de `studio_workfiles.c` restent disponibles.

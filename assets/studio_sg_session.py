@@ -44,7 +44,9 @@ def _env_map(name, default):
 def default_settings():
     return {
         # Moteur démarré après l'amorçage : les hooks de la config studio en attendent souvent un. "none" : aucun.
-        "engine": os.environ.get("STUDIO_SG_ENGINE", "tk-shell"),
+        # tk-armorpaint (external/tk-armorpaint) : les fenêtres des apps Toolkit (op show_app). Absent de la
+        # configuration du projet, l'amorçage continue sans moteur : seules les fenêtres manquent.
+        "engine": os.environ.get("STUDIO_SG_ENGINE", "tk-armorpaint"),
         "plugin_id": os.environ.get("STUDIO_SG_PLUGIN_ID", "basic.armorpaint"),
         # Configuration de repli si le projet n'a pas de PipelineConfiguration (descripteur Toolkit), None : erreur.
         "base_configuration": os.environ.get("STUDIO_SG_BASE_CONFIGURATION") or None,
@@ -374,6 +376,22 @@ class Session(object):
             raise BridgeError("not_found", "Task %d has no project" % task_id)
         return task
 
+    def _task_entity(self, task):
+        """La tâche avec les noms de ses liens, pour context_from_entity_dictionary (sans requête de plus). Les
+        liens rendus par ShotGrid portent déjà "name" ; le site simulé (mockgun) ne le fait pas pour tous."""
+        sg = self._connect()
+        found = sg.find_one("Task", [["id", "is", task["id"]]], ["project.Project.name", "step.Step.code"]) or {}
+        entity = dict(task)
+        entity["type"] = "Task"
+        entity["project"] = dict(task["project"], name=task["project"].get("name") or found.get("project.Project.name"))
+        if task.get("step"):
+            entity["step"] = dict(task["step"], name=task["step"].get("name") or found.get("step.Step.code"))
+        link = task.get("entity")
+        if link and not link.get("name"):
+            linked = sg.find_one(link["type"], [["id", "is", link["id"]]], ["code", "name"]) or {}
+            entity["entity"] = dict(link, name=linked.get("code") or linked.get("name"))
+        return entity
+
     def _work_area(self, task_id, create_folders):
         """(tk, contexte, template, champs) de la tâche. Champs None si les dossiers de la tâche n'existent pas et
         que create_folders est faux (il n'y a alors aucun fichier de travail)."""
@@ -575,6 +593,108 @@ class Session(object):
             version += 1
             path = template.apply_fields(dict(fields, name=name, version=version))
         return {"name": name, "version": version, "path": path, "publish_name": pub_name}
+
+    # ---- Apps Toolkit (moteur tk-armorpaint) -------------------------------------------------------------------------
+
+    def _default_project(self):
+        """Projet d'une fenêtre sans contexte donné : celui du lancement par ShotGrid Desktop, sinon celui de la
+        dernière tâche assignée à l'artiste."""
+        launch = self.op_context({})
+        if launch:
+            if launch.get("type") == "Project":
+                return launch["id"]
+            if launch.get("project"):
+                return launch["project"]["id"]
+        human = self._human_user()
+        if human is not None:
+            task = self._connect().find_one(
+                "Task",
+                [["task_assignees", "is", {"type": "HumanUser", "id": human["id"]}]],
+                ["project"],
+                order=[{"field_name": "id", "direction": "desc"}],
+            )
+            if task and task.get("project"):
+                return task["project"]["id"]
+        raise BridgeError(
+            "bad_request", "no project for show_app: pass project_id or task_id, or launch ArmorPaint from ShotGrid Desktop"
+        )
+
+    def _engine_for(self, args):
+        """Le moteur tk-armorpaint dans le contexte demandé : task_id, sinon project_id, sinon _default_project().
+        Sans task_id, le moteur garde son contexte courant dans ce projet (celui de la dernière fenêtre)."""
+        task_id = _int(args, "task_id", required=False)
+        project_id = _int(args, "project_id", required=False)
+        task = None
+        if task_id is not None:
+            task = self._task(task_id)
+            project_id = task["project"]["id"]
+        elif project_id is None:
+            project_id = self._default_project()
+        self.tk_for_project(project_id)
+        engine_name = self.settings["engine"]
+        engine = self.sgtk.platform.current_engine()
+        if engine is None or engine.name != engine_name:
+            raise BridgeError(
+                "app_unavailable",
+                "engine %s is not running for project %d: it must be in the environments of the project's Toolkit "
+                "configuration (see the log for the bootstrap)" % (engine_name, project_id),
+            )
+        if task is not None and (engine.context.task or {}).get("id") != task_id:
+            # Dossiers de la tâche d'abord, comme au lancement d'un DCC (tk-multi-launchapp) : sans eux, les apps
+            # dont les templates en dépendent (workfiles2) ne se chargent pas dans le nouveau contexte.
+            engine.sgtk.create_filesystem_structure("Task", task_id)
+            ctx = engine.sgtk.context_from_entity_dictionary(self._task_entity(task))
+            self.sgtk.platform.change_context(ctx)
+            engine = self.sgtk.platform.current_engine()
+        return engine
+
+    def op_list_commands(self, args):
+        """Les commandes du moteur tk-armorpaint (le menu ShotGrid d'ArmorPaint), dans l'ordre d'enregistrement :
+        [{"name","type","app","app_instance","description"}], type "context_menu" pour la section contexte ;
+        favourites : noms des commandes du réglage menu_favourites du moteur. Même contexte que show_app."""
+        engine = self._engine_for(args)
+        commands = []
+        for name, entry in engine.commands.items():
+            props = entry.get("properties") or {}
+            app = props.get("app")
+            commands.append(
+                {
+                    "name": name,
+                    "type": props.get("type") or "default",
+                    "app": app.display_name if app is not None else None,
+                    "app_instance": app.instance_name if app is not None else None,
+                    "description": props.get("description"),
+                }
+            )
+        favourites = []
+        for fav in engine.get_setting("menu_favourites") or []:
+            for c in commands:
+                if c["app_instance"] == fav.get("app_instance") and c["name"] == fav.get("name"):
+                    favourites.append(c["name"])
+        return {"context": engine.context_info(), "commands": commands, "favourites": favourites, "has_ui": engine.has_ui}
+
+    def op_show_app(self, args):
+        """Lance une commande du moteur tk-armorpaint et répond quand elle a fini : pour une fenêtre d'app Toolkit,
+        à sa fermeture. command : un nom de list_commands, ou "open" / "save" (File Open... / File Save... de
+        tk-multi-workfiles2). Pendant ce temps, l'app agit sur la scène par des requêtes host (hooks du moteur) :
+        ArmorPaint lance donc cette requête en job, sans délai. Contexte comme _engine_for(). Retourne le contexte
+        à la fin (une app a pu en changer)."""
+        command = _str(args, "command")
+        command = {"open": "File Open...", "save": "File Save..."}.get(command, command)
+        engine = self._engine_for(args)
+        entry = engine.commands.get(command)
+        if entry is None:
+            hint = "" if engine.has_ui else " (no Qt: PySide is not importable by %s, apps with windows are not loaded)" % sys.executable
+            raise BridgeError(
+                "app_unavailable",
+                "command '%s' not available in %s for %s%s; available: %s"
+                % (command, engine.name, engine.context, hint, ", ".join(sorted(engine.commands)) or "none"),
+            )
+        log.info("show_app: %s in %s", command, engine.context)
+        entry["callback"]()
+        engine = self.sgtk.platform.current_engine() or engine  # une app a pu changer de contexte
+        self.engine = engine
+        return {"command": command, "context": engine.context_info()}
 
     def op_register_publish(self, args):
         """Crée le PublishedFile d'un fichier existant, lié à la tâche (sgtk.util.register_publish)."""
