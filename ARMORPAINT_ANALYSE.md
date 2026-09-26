@@ -1092,8 +1092,9 @@ ArmorPaint --background cube.obj --script export.c
 **Organisation (depuis le 2026-09-26, un seul dépôt, privé : `github.com/guillaumeparra/armorpaint-studio`) :**
 - Branche **`upstream`** : le code d'armory3d tel quel. On n'y commite jamais ; elle avance en fast-forward sur `armory3d/main`.
 - Branche **`studio`** (par défaut) : `upstream` + nos patches sur les fichiers upstream (un commit par patch) + nos plugins dans `paint/plugins/external/`. Ce dossier, ignoré par l'upstream, est suivi ici (patch `track-external`) ; son ancien dépôt séparé y a été importé avec son historique (`git subtree add`).
+- Ce document et `ARMORPAINT_LOTS.md` sont suivis à la racine de `studio` (ils ne font pas partie de l'upstream).
 - Remotes : `armory3d` (lecture seule, push désactivé) et `origin` (le dépôt privé). Mise à jour : `git fetch armory3d`, fast-forward d'`upstream`, `git merge upstream` dans `studio`, push des deux branches.
-- `git diff upstream studio -- ':!paint/plugins/external'` = exactement nos modifications du code upstream.
+- `git diff upstream studio -- ':!paint/plugins/external' ':!ARMORPAINT_*.md'` = exactement nos modifications du code upstream.
 - `external/PATCHES.md` est le registre des patches upstream : pour chacun, le bug, le correctif, le test et les signes que l'upstream l'a corrigé. `external/patches/<id>.patch` + `<id>.base` (dernier commit upstream validé).
 - `external/tools/check_patches.sh` signale, pour chaque patch, s'il est présent, perdu (réapplicable), en conflit, ou si l'upstream a modifié les fichiers patchés depuis la dernière validation. Les hooks git `post-merge` et `post-rewrite` d'armorpaint le lancent après chaque pull ou rebase (`tools/install_hooks.sh`).
 

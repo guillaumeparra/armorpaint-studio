@@ -15,7 +15,7 @@ Chaque patch a :
 - `upstream` : le code d'armory3d tel quel. On n'y commite jamais ; elle avance en fast-forward sur `armory3d/main`.
 - `studio` : `upstream` + ces patches + nos plugins (`paint/plugins/external/`). Branche de travail et par défaut.
 
-`git diff upstream studio -- ':!paint/plugins/external'` montre exactement nos modifications du code upstream.
+`git diff upstream studio -- ':!paint/plugins/external' ':!ARMORPAINT_*.md'` montre exactement nos modifications du code upstream.
 Remotes : `armory3d` (lecture seule, push désactivé) et `origin` (notre dépôt privé).
 
 ## Après chaque pull de l'upstream
