@@ -47,10 +47,13 @@ void import_mesh_run(char *path, bool _clear_layers, bool replace_existing, bool
 	else {
 		char *ext                           = string_tmp("%s", path + string_last_index_of(path, ".") + 1);
 		raw_mesh_t *(*importer)(char *path) = any_map_get(import_mesh_importers, ext);
+		char *message                       = console_message; // STUDIO-PATCH(import-null-guards)
 
 		raw_mesh_t *mesh = importer(path);
-		if (mesh == NULL) { // STUDIO-PATCH(import-null-guards)
-			console_error(string("Could not import file %s.", path));
+		if (mesh == NULL) {                   // STUDIO-PATCH(import-null-guards)
+			if (console_message == message) { // The importer's own error stays shown (io_fbx: geometry it cannot read)
+				console_error(string("Could not import file %s.", path));
+			}
 			return;
 		}
 		if (string_equals(mesh->name, "")) {
