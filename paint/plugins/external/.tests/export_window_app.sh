@@ -1,9 +1,9 @@
 #!/bin/sh
 # Fenêtre d'export Qt (lot B6) dans ArmorPaint lancé avec son interface : un script ouvre la fenêtre, qui tourne en
 # essai sans intervention (STUDIO_EXPORT_WINDOW_TEST, Qt offscreen) : choix, préflight, export, résultat en JSON.
-# Vérifie l'état envoyé à la fenêtre, l'export et son manifeste (espace imposé), le blocage sans rien écrire, le
-# refus d'un preset upstream, et qu'une deuxième ouverture pendant la première ramène la fenêtre au lieu d'en lancer
-# une autre.
+# Vérifie l'état envoyé à la fenêtre, l'export et son manifeste (espace imposé), les fichiers décochés, le blocage sans
+# rien écrire, et qu'une deuxième ouverture pendant la première ramène la fenêtre au lieu d'en lancer une autre. La
+# liste groupée (tuiles UDIM, objets) est testée contre un faux ArmorPaint : export_window_ui.py.
 #
 #   sh .tests/export_window_app.sh [dossier de travail]
 #   APP=<binaire ArmorPaint> pour un autre build (défaut : build Release de paint/).
@@ -88,13 +88,34 @@ assert spaces["base_color"] == "ACEScg" and spaces["emission_color"] == "ACEScg"
 assert spaces["normal"] == "raw" and spaces["specular_roughness"] == "raw", spaces
 PY'
 check "fenêtre : les fichiers du rapport et le message de fin" '[ "$(json "$R" "len(r[\"files\"])")" = 7 ] && grep -q "Exported 7 files with Karma" "$R"'
+check "aucun avertissement (profondeur : note ou rien), la fenêtre n'affiche aucun problème" '"$PY" - "$R" <<PY
+import json, sys
+r = json.load(open(sys.argv[1]))
+issues = r["preflight"]["report"]["issues"]
+assert all(i["level"] == "note" for i in issues), issues
+assert not any(i["code"] == "bits_above_source" for i in issues), issues
+assert r["issues"] == "", r["issues"]
+PY'
+TEX=$(json "$R" "' '.join(f['texture'] for f in r['preflight']['report']['files'])")
 
-# 3. Dossier en lecture seule : bloqué au préflight, pas d'export, rien d'écrit.
+# 3. Fichiers décochés : ni vérifiés ni écrits, gardés dans le rapport.
+window skip '{"preset": "karma", "dir": "'"$W/out_skip"'", "mode": 0, "padding": false, "skip": [["normal", "", ""], ["specular_roughness", "", ""]]}'
+R=$W/skip.result.json
+check "décochés : 5 EXR écrits, manifeste à 5 fichiers" '[ "$(json "$R" "r[\"export\"][\"ok\"]")" = "True" ] && [ $(ls "$W/out_skip"/p_*.exr 2>/dev/null | wc -l) -eq 5 ] && [ ! -e "$W/out_skip/p_normal.exr" ] && [ "$("$PY" -c "import json,sys; print(len(json.load(open(sys.argv[1]))[\"files\"]))" "$W/out_skip/p.export.json")" = 5 ]'
+check "décochés : dans le rapport avec skip, message de fin à 5" '[ "$(json "$R" "sorted(f[\"texture\"] for f in r[\"export\"][\"report\"][\"files\"] if f[\"skip\"])")" = "['"'"'normal'"'"', '"'"'specular_roughness'"'"']" ] && grep -q "Exported 5 files with Karma" "$R"'
+
+# 4. Rien de coché : bloqué, pas d'export.
+SKIP_ALL=$(for t in $TEX; do printf '["%s", "", ""],' "$t"; done)
+window none '{"preset": "karma", "dir": "'"$W/out_none"'", "mode": 0, "padding": false, "skip": ['"${SKIP_ALL%,}"']}'
+R=$W/none.result.json
+check "rien de coché : bloqué (no_selection), rien d'écrit" '[ -s "$R" ] && [ "$(json "$R" "[i[\"code\"] for i in r[\"preflight\"][\"report\"][\"issues\"] if i[\"level\"] == \"blocking\"]")" = "['"'"'no_selection'"'"']" ] && [ "$(json "$R" "\"export\" in r")" = "False" ] && [ ! -e "$W/out_none" ] && grep -q "No file selected" "$R"'
+
+# 5. Dossier en lecture seule : bloqué au préflight, pas d'export, rien d'écrit.
 window ro '{"preset": "arnold", "dir": "'"$W/ro/out"'", "mode": 0, "padding": false}'
 R=$W/ro.result.json
 check "lecture seule : préflight bloquant, pas d'export" '[ -s "$R" ] && [ "$(json "$R" "r[\"preflight\"][\"ok\"]")" = "False" ] && [ "$(json "$R" "\"export\" in r")" = "False" ] && grep -q "Blocked" "$R" && [ ! -e "$W/ro/out" ]'
 
-# 4. Deux ouvertures de suite : la seconde ramène la fenêtre, un seul processus.
+# 6. Deux ouvertures de suite : la seconde ramène la fenêtre, un seul processus.
 window twice '{"preset": "basic", "dir": "'"$W/out_twice"'", "mode": 0, "padding": true}' \
 	'studio_export_window_show(); studio_export_window_show(); console_log(string("t: open=%d", studio_export_window_is_open()));'
 R=$W/twice.result.json

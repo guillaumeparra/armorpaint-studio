@@ -38,6 +38,7 @@ char                   *project_filepath_get(void);
 i32                     config_get_texture_res_x(void);
 i32                     config_get_texture_res_y(void);
 void                    render_path_paint_dilate(bool base, bool nor_pack);
+i32                     util_mesh_udim_tile(char *name);
 void                    console_toast(char *s);
 void                    ui_box_show_message(char *title, char *text, bool copyable);
 char                   *path_data(void);
@@ -296,8 +297,37 @@ static char *state_json(void) {
 	put_quoted(&b, ui_files_filename != NULL && ui_files_filename[0] != 0 ? ui_files_filename : "untitled");
 	put(&b, ",\"path\":");
 	put_quoted(&b, file);
-	put(&b, ",\"width\":%d,\"height\":%d,\"bits\":%d},", config_get_texture_res_x(), config_get_texture_res_y(),
+	put(&b, ",\"width\":%d,\"height\":%d,\"bits\":%d,", config_get_texture_res_x(), config_get_texture_res_y(),
 	    base_bits == TEXTURE_BITS_BITS32 ? 32 : base_bits == TEXTURE_BITS_BITS16 ? 16 : 8);
+	// Objets du projet, et tuiles UDIM : un maillage à tuiles est découpé en un objet par tuile ("tete.1001").
+	string_array_t        *objects = (string_array_t *)any_array_create_from_raw((void *[]){}, 0);
+	string_array_t        *tiles   = (string_array_t *)any_array_create_from_raw((void *[]){}, 0);
+	mesh_object_t_array_t *paint   = g_project->_->paint_objects;
+	for (int i = 0; paint != NULL && i < (int)paint->length; ++i) {
+		char *name = paint->buffer[i]->base->name;
+		int   len  = (int)strlen(name);
+		if (util_mesh_udim_tile(name) >= 0 && len > 5) {
+			char *tile = substring(name, len - 4, len);
+			if (string_array_index_of(tiles, tile) == -1) {
+				any_array_push((any_array_t *)tiles, tile);
+			}
+			name = substring(name, 0, len - 5);
+		}
+		if (string_array_index_of(objects, name) == -1) {
+			any_array_push((any_array_t *)objects, name);
+		}
+	}
+	put(&b, "\"objects\":[");
+	for (int i = 0; i < (int)objects->length; ++i) {
+		put(&b, i > 0 ? "," : "");
+		put_quoted(&b, objects->buffer[i]);
+	}
+	put(&b, "],\"tiles\":[");
+	for (int i = 0; i < (int)tiles->length; ++i) {
+		put(&b, i > 0 ? "," : "");
+		put_quoted(&b, tiles->buffer[i]);
+	}
+	put(&b, "]},");
 
 	put(&b, "\"presets\":[");
 	for (int i = 0; i < studio_export_preset_count(); ++i) {
@@ -383,6 +413,27 @@ static void adopt(const char *dir, const char *preset, int mode, bool padding) {
 	}
 }
 
+// args.skip : [[texture, variant, tuile], ...] -> lignes de studio_export_set_skip.
+static char *skip_keys(const char *req) {
+	studio_json_value_t list = studio_json_find(req, "/args/skip");
+	int                 n    = list.type == STUDIO_JSON_ARRAY ? studio_json_length(list) : 0;
+	text_t              b    = {0};
+	for (int i = 0; i < n; ++i) {
+		char *part[3];
+		for (int k = 0; k < 3; ++k) {
+			studio_json_value_t v = studio_json_find(req, string_tmp("/args/skip/%d/%d", i, k));
+			part[k]               = v.type == STUDIO_JSON_STRING ? studio_json_text(v) : NULL;
+		}
+		if (part[0] != NULL && part[1] != NULL && part[2] != NULL) {
+			put(&b, "%s\t%s\t%s\n", part[0], part[1], part[2]);
+		}
+		for (int k = 0; k < 3; ++k) {
+			free(part[k]);
+		}
+	}
+	return b.data != NULL ? b.data : strdup("");
+}
+
 static void run_request(int id, const char *req, bool preflight_only) {
 	char *preset  = arg_text(req, "preset");
 	char *space   = arg_text(req, "color_space");
@@ -399,9 +450,14 @@ static void run_request(int id, const char *req, bool preflight_only) {
 		reply_error(id, "no_destination", "choose a destination folder");
 	}
 	else {
-		// L'espace choisi ne sert qu'à cette requête, sauf si l'export aboutit (Cancel ne change rien).
-		char *previous = strdup(studio_export_color_space());
+		// L'espace et les fichiers choisis ne servent qu'à cette requête, sauf si l'export aboutit (Cancel ne change
+		// rien).
+		char *previous      = strdup(studio_export_color_space());
+		char *previous_skip = strdup(studio_export_skip());
+		char *skip          = skip_keys(req);
 		studio_export_set_color_space(space);
+		studio_export_set_skip(skip);
+		free(skip);
 		if (!preflight_only && padding) {
 			dilate_layers();
 		}
@@ -411,8 +467,10 @@ static void run_request(int id, const char *req, bool preflight_only) {
 		}
 		else {
 			studio_export_set_color_space(previous);
+			studio_export_set_skip(previous_skip);
 		}
 		free(previous);
+		free(previous_skip);
 		const char *report = studio_export_last_report();
 		text_t      b      = {0};
 		put(&b, "{\"ok\":%s,\"report\":%s,\"error\":", ok ? "true" : "false", report[0] != 0 ? report : "null");

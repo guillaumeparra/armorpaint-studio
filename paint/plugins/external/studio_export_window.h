@@ -12,9 +12,11 @@
 //                           {"id":3,"op":"export","args":{...}}        export, puis rapport
 //   réponse d'ArmorPaint    {"id":N,"ok":true,"data":...} ou {"id":N,"ok":false,"error":{"code","message"}}
 //   évènement d'ArmorPaint  {"event":"raise","mode":M}                 menu rouvert : la fenêtre repasse devant
-// args : preset, color_space ("" : celui du preset), dir, mode (EXPORT_MODE_*), padding. Les requêtes sont traitées
-// une à une, à la frame suivante, hors du dessin. Un export abouti devient l'export courant d'ArmorPaint (dossier,
-// preset, mode, marge, espace) : Ctrl+E le refait ; Cancel ne change rien.
+// args : preset, color_space ("" : celui du preset), dir, mode (EXPORT_MODE_*), padding, skip (fichiers décochés :
+// [[texture, variant, udim], ...], voir studio_export_set_skip). L'état donne aussi les objets du projet et ses tuiles
+// UDIM. Les requêtes sont traitées une à une, à la frame suivante, hors du dessin. Un export abouti devient l'export
+// courant d'ArmorPaint (dossier, preset, mode, marge, espace, fichiers décochés) : Ctrl+E le refait ; Cancel ne
+// change rien.
 //
 // Interpréteur : STUDIO_PYTHON, sinon STUDIO_SG_PYTHON, sinon python3 dans le PATH ; il lui faut PySide6.
 // STUDIO_EXPORT_WINDOW remplace le script (data/studio_export_window.py). Pas encore sous Windows (studio_proc).

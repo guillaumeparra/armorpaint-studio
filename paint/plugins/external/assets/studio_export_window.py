@@ -6,8 +6,9 @@
 # ArmorPaint recopie dans son log. La fenêtre s'arrête sur EOF de stdin (ArmorPaint fermé ou tué).
 #
 # STUDIO_EXPORT_WINDOW_TEST=<fichier.json> : essai sans intervention (.tests/export_window_app.sh). Le fichier donne
-# les choix {"preset","color_space","dir","mode","padding"} ; la fenêtre les applique, attend le préflight, exporte,
-# écrit {"state","preflight","export","summary"} dans "result", puis se ferme.
+# les choix {"preset","color_space","dir","mode","padding"}, et en option "skip" (fichiers décochés : [[texture,
+# variant, udim]...]) et "group" ("map" ou "set") ; la fenêtre les applique, attend le préflight, exporte, écrit
+# {"state","preflight","export","summary","files","groups"} dans "result", puis se ferme.
 
 import ctypes
 import ctypes.util
@@ -21,6 +22,10 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 MODES = ["Visible", "Selected", "Per Object", "Per UDIM Tile"]
 PREFLIGHT_DELAY_MS = 250
+# Montrés à l'artiste. Les notes (choix du preset : 8 bits, JPG, espace...) restent dans le rapport et le manifeste ;
+# les fichiers existants sont en couleur dans la liste et comptés dans le résumé.
+SHOWN_LEVELS = ("blocking", "warning")
+FILE_KEY_ROLE = QtCore.Qt.UserRole
 
 ACCENT = "#2f6fb0"
 MUTED = "#8c8c8c"
@@ -170,6 +175,35 @@ def size_label(n):
     return "%d B" % n
 
 
+def file_key(f):
+    """Identité d'un fichier d'une préflight à l'autre (le chemin change avec le dossier) : texture du preset, objet ou
+    atlas, tuile UDIM ; celle que studio_export_set_skip attend."""
+    return (f.get("texture", ""), f.get("variant", ""), f.get("udim", ""))
+
+
+def plural(n, word, words=None):
+    return "%d %s" % (n, word if n == 1 else (words or word + "s"))
+
+
+def set_label(f):
+    """Jeu de textures d'un fichier : objet ou atlas, tuile."""
+    parts = [p for p in (f.get("variant", ""), f.get("udim", "")) if p]
+    return "  ·  ".join(parts) if parts else "All objects"
+
+
+def composition(files, mode):
+    """« 9 maps × 7 UDIM tiles » : ce que représentent les fichiers."""
+    maps = len({f.get("texture") for f in files})
+    tiles = len({f.get("udim") for f in files if f.get("udim")})
+    variants = len({f.get("variant") for f in files if f.get("variant")})
+    parts = [plural(maps, "map")]
+    if variants:
+        parts.append(plural(variants, "object" if mode == 2 else "texture set"))
+    if tiles:
+        parts.append(plural(tiles, "UDIM tile"))
+    return " × ".join(parts)
+
+
 def group_issues(issues):
     """(bloquant, message) ; les constats de même code et même texte sur plusieurs textures (« baseColor: written in
     16 bits... ») tiennent en une ligne. Les bloquants d'abord."""
@@ -230,6 +264,9 @@ def apply_look(app):
         QLabel#muted { color: %(muted)s; }
         QLabel#tag { color: %(muted)s; border: 1px solid #3a3a3a; border-radius: 9px; padding: 1px 8px; }
         QLabel#section { color: %(muted)s; font-weight: 600; }
+        QPushButton#link { padding: 2px 6px; border: none; background: transparent; color: %(accent)s; }
+        QPushButton#link:hover { text-decoration: underline; background: transparent; }
+        QPushButton#link:disabled { color: #555555; }
         QFrame#issues { background: #1f1f1f; border: 1px solid #333333; border-radius: 4px; }
         QFrame#issues QScrollArea, QFrame#issues QLabel { background: transparent; border: none; }
         """
@@ -259,6 +296,8 @@ class ExportWindow(QtWidgets.QDialog):
         self.in_flight = False
         self.dirty = False
         self.exported = None
+        self.skipped = set()  # file_key des fichiers décochés, gardés d'une préflight à l'autre
+        self.expanded = set()  # groupes ouverts
         self.test_log = {}
         self.setWindowTitle("Export Textures")
         self.resize(760, 740)
@@ -343,15 +382,40 @@ class ExportWindow(QtWidgets.QDialog):
         form.addRow("Destination", dir_box)
         root.addLayout(form)
 
+        files_header = QtWidgets.QHBoxLayout()
         files_title = QtWidgets.QLabel("Files")
         files_title.setObjectName("section")
-        root.addWidget(files_title)
+        files_header.addWidget(files_title)
+        self.composition = muted()
+        self.composition.setWordWrap(False)
+        files_header.addWidget(self.composition, 1)
+        self.group_label = muted("Group by")
+        self.group_label.setWordWrap(False)
+        files_header.addWidget(self.group_label)
+        self.group = QtWidgets.QComboBox()
+        self.group.addItem("Map", "map")
+        self.group.addItem("Object / Tile", "set")
+        self.group.currentIndexChanged.connect(lambda *_: self._show_files(self.report))
+        files_header.addWidget(self.group)
+        self.check_all = QtWidgets.QPushButton("All")
+        self.check_all.setObjectName("link")
+        self.check_all.clicked.connect(lambda: self._check_all(True))
+        files_header.addWidget(self.check_all)
+        self.check_none = QtWidgets.QPushButton("None")
+        self.check_none.setObjectName("link")
+        self.check_none.clicked.connect(lambda: self._check_all(False))
+        files_header.addWidget(self.check_none)
+        root.addLayout(files_header)
         self.files = QtWidgets.QTreeWidget()
         self.files.setHeaderLabels(["File", "Format", "Color space", "Size"])
         self.files.setRootIsDecorated(False)
         self.files.setAlternatingRowColors(True)
         self.files.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
         self.files.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.files.setUniformRowHeights(True)
+        self.files.itemChanged.connect(self._on_file_checked)
+        self.files.itemExpanded.connect(self._remember_expanded)
+        self.files.itemCollapsed.connect(self._remember_expanded)
         header_view = self.files.header()
         header_view.setStretchLastSection(False)
         header_view.setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
@@ -371,7 +435,7 @@ class ExportWindow(QtWidgets.QDialog):
         scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         scroll.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.AdjustToContents)
         scroll.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
-        scroll.setMaximumHeight(self.fontMetrics().lineSpacing() * 5 + 4)
+        self.issues_scroll = scroll
         self.issues.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
         issues_layout = QtWidgets.QVBoxLayout(self.issues_frame)
         issues_layout.setContentsMargins(10, 8, 10, 8)
@@ -405,10 +469,16 @@ class ExportWindow(QtWidgets.QDialog):
             return
         self.state = data
         project = data["project"]
-        bits = project["bits"]
-        self.project.setText(
-            "%s  ·  %d × %d  ·  %d-bit layers"
-            % (os.path.basename(project["path"]) or project["name"], project["width"], project["height"], bits)
+        parts = [os.path.basename(project["path"]) or project["name"]]
+        objects, tiles = project.get("objects", []), project.get("tiles", [])
+        parts.append(plural(len(objects), "object"))
+        if tiles:
+            parts.append(plural(len(tiles), "UDIM tile"))
+        parts.append("%d × %d" % (project["width"], project["height"]))
+        parts.append("%d-bit layers" % project["bits"])
+        self.project.setText("  ·  ".join(parts))
+        self.project.setToolTip(
+            "Objects: %s%s" % (", ".join(objects), "\nUDIM tiles: %s" % ", ".join(tiles) if tiles else "")
         )
 
         widgets = (self.preset, self.space, self.mode, self.padding, self.dir)
@@ -472,6 +542,7 @@ class ExportWindow(QtWidgets.QDialog):
             "dir": self.dir.text().strip(),
             "mode": self.mode.currentIndex(),
             "padding": self.padding.isChecked(),
+            "skip": [list(k) for k in sorted(self.skipped)],
         }
 
     def _on_preset(self):
@@ -494,7 +565,8 @@ class ExportWindow(QtWidgets.QDialog):
             QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(self.exported))
 
     def _set_enabled(self, enabled):
-        for w in (self.preset, self.space, self.mode, self.padding, self.dir, self.browse):
+        for w in (self.preset, self.space, self.mode, self.padding, self.dir, self.browse, self.files, self.group,
+                  self.check_all, self.check_none):
             w.setEnabled(enabled)
         if enabled and self.state is not None:
             self.space.setEnabled(self.state["ocio"]["ready"])
@@ -550,24 +622,8 @@ class ExportWindow(QtWidgets.QDialog):
         self._update_export_button()
 
     def _show_report(self, report):
-        self.files.clear()
-        issues = []
-        if report is not None:
-            for f in report.get("files", []):
-                item = QtWidgets.QTreeWidgetItem(
-                    [
-                        os.path.basename(f["path"]),
-                        format_label(f),
-                        f.get("color_space", ""),
-                        size_label(f.get("size_estimate", 0)),
-                    ]
-                )
-                item.setToolTip(0, f["path"] + ("\nReplaces an existing file" if f.get("exists") else ""))
-                item.setTextAlignment(3, QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-                if f.get("exists"):
-                    item.setForeground(0, QtGui.QBrush(QtGui.QColor(WARNING)))
-                self.files.addTopLevelItem(item)
-            issues = report.get("issues", [])
+        self._show_files(report)
+        issues = [i for i in (report or {}).get("issues", []) if i.get("level") in SHOWN_LEVELS and i.get("code") != "exists"]
         if issues:
             lines = []
             for blocking, message in group_issues(issues):
@@ -576,23 +632,166 @@ class ExportWindow(QtWidgets.QDialog):
                     % (ERROR if blocking else WARNING, "✕" if blocking else "!", html.escape(message))
                 )
             self.issues.setText("<br>".join(lines))
+            self._fit_issues(len(lines))
             self.issues_frame.show()
         else:
             self.issues_frame.hide()
+        self._update_summary()
+
+    def _fit_issues(self, lines):
+        """Hauteur des lignes affichées, 5 au plus (au-delà, défilement)."""
+        width = max(100, self.issues_scroll.viewport().width() or self.width() - 60)
+        height = self.issues.heightForWidth(width)
+        cap = self.fontMetrics().lineSpacing() * 5 + 4
+        self.issues_scroll.setFixedHeight(min(cap, height if height > 0 else self.fontMetrics().lineSpacing() * lines))
+
+    # -- liste des fichiers
+
+    def _show_files(self, report):
+        """Arbre des fichiers à cocher. Un seul jeu (pas d'objets ni de tuiles) : liste simple ; sinon groupé par map ou
+        par objet / tuile, groupes fermés, avec une case pour tout le groupe."""
+        tree = self.files
+        scroll = tree.verticalScrollBar().value()
+        tree.blockSignals(True)
+        tree.clear()
+        files = (report or {}).get("files", [])
+        sets = {(f.get("variant", ""), f.get("udim", "")) for f in files}
+        grouped = len(sets) > 1
+        for w in (self.group_label, self.group):
+            w.setVisible(grouped)
+        for w in (self.check_all, self.check_none):
+            w.setVisible(bool(files))
+        self.composition.setText(composition(files, self.mode.currentIndex()) if files else "")
+        tree.setRootIsDecorated(grouped)
+        by_map = self.group.currentData() == "map"
+        if not grouped:
+            for f in files:
+                tree.addTopLevelItem(self._file_item(f, os.path.basename(f["path"])))
+        else:
+            groups = {}
+            for f in files:
+                key = f.get("texture", "") if by_map else set_label(f)
+                groups.setdefault(key, []).append(f)
+            for name, members in groups.items():
+                if by_map:
+                    members.sort(key=lambda f: (f.get("variant", ""), int(f.get("udim") or 0)))
+                parent = QtWidgets.QTreeWidgetItem([name, "", "", ""])
+                parent.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsAutoTristate)
+                font = parent.font(0)
+                font.setWeight(QtGui.QFont.DemiBold)
+                parent.setFont(0, font)
+                parent.setData(0, FILE_KEY_ROLE, ("group", name))
+                if by_map:
+                    parent.setText(1, format_label(members[0]))
+                    parent.setText(2, members[0].get("color_space", ""))
+                parent.setTextAlignment(3, QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+                tree.addTopLevelItem(parent)
+                for f in members:
+                    parent.addChild(self._file_item(f, os.path.basename(f["path"]), in_group=by_map))
+                parent.setExpanded(("group", name) in self.expanded)
+        self._refresh_groups()
+        tree.blockSignals(False)
+        tree.verticalScrollBar().setValue(scroll)
+
+    def _file_item(self, f, label, in_group=False):
+        # Dans un groupe par map, format et espace sont ceux du groupe : pas répétés sur chaque ligne.
+        item = QtWidgets.QTreeWidgetItem(
+            [label, "" if in_group else format_label(f), "" if in_group else f.get("color_space", ""),
+             size_label(f.get("size_estimate", 0))]
+        )
+        item.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemNeverHasChildren)
+        key = file_key(f)
+        item.setData(0, FILE_KEY_ROLE, key)
+        item.setData(3, FILE_KEY_ROLE, f.get("size_estimate", 0))
+        item.setData(1, FILE_KEY_ROLE, bool(f.get("exists")))
+        item.setCheckState(0, QtCore.Qt.Unchecked if key in self.skipped else QtCore.Qt.Checked)
+        item.setToolTip(0, f["path"] + ("\nReplaces an existing file" if f.get("exists") else ""))
+        item.setTextAlignment(3, QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        if f.get("exists"):
+            item.setForeground(0, QtGui.QBrush(QtGui.QColor(WARNING)))
+        return item
+
+    def _leaves(self):
+        tree = self.files
+        for i in range(tree.topLevelItemCount()):
+            top = tree.topLevelItem(i)
+            if top.childCount() == 0:
+                yield top
+            for k in range(top.childCount()):
+                yield top.child(k)
+
+    def _refresh_groups(self):
+        """Taille cochée et « 5/7 » de chaque groupe."""
+        tree = self.files
+        for i in range(tree.topLevelItemCount()):
+            top = tree.topLevelItem(i)
+            n = top.childCount()
+            if n == 0:
+                continue
+            checked = [top.child(k) for k in range(n) if top.child(k).checkState(0) == QtCore.Qt.Checked]
+            name = top.data(0, FILE_KEY_ROLE)[1]
+            top.setText(0, "%s  (%d of %d)" % (name, len(checked), n) if len(checked) != n else "%s  (%d)" % (name, n))
+            top.setText(3, size_label(sum(c.data(3, FILE_KEY_ROLE) or 0 for c in checked)))
+
+    def _remember_expanded(self, item):
+        key = item.data(0, FILE_KEY_ROLE)
+        if item.isExpanded():
+            self.expanded.add(key)
+        else:
+            self.expanded.discard(key)
+
+    def _on_file_checked(self, item, column):
+        if column != 0:
+            return
+        skipped = set(self.skipped)
+        for leaf in self._leaves():
+            key = leaf.data(0, FILE_KEY_ROLE)
+            if leaf.checkState(0) == QtCore.Qt.Checked:
+                skipped.discard(key)
+            else:
+                skipped.add(key)
+        if skipped == self.skipped:
+            return
+        self.skipped = skipped
+        self.files.blockSignals(True)
+        self._refresh_groups()
+        self.files.blockSignals(False)
+        self._update_summary()
+        self.schedule()  # existants, place disque : seulement les fichiers cochés
+
+    def _check_all(self, checked):
+        self.files.blockSignals(True)
+        for leaf in self._leaves():
+            leaf.setCheckState(0, QtCore.Qt.Checked if checked else QtCore.Qt.Unchecked)
+        self.files.blockSignals(False)
+        self._on_file_checked(None, 0)
+
+    def _update_summary(self):
+        report = self.report
         if report is None:
             self.summary.setText("")
             return
-        count = len(report.get("files", []))
-        blocking = sum(1 for i in issues if i.get("level") == "blocking")
+        issues = report.get("issues", [])
+        blocking = [i for i in issues if i.get("level") == "blocking"]
         if blocking:
+            only = blocking[0]["message"] if len(blocking) == 1 and blocking[0].get("code") == "no_selection" else None
             self.summary.setText(
-                '<span style="color:%s">Blocked: %d problem%s</span>' % (ERROR, blocking, "s" if blocking > 1 else "")
+                '<span style="color:%s">%s</span>'
+                % (ERROR, "No file selected" if only else "Blocked: %s" % plural(len(blocking), "problem"))
             )
-        else:
-            self.summary.setText(
-                "%d file%s  ·  %s uncompressed"
-                % (count, "s" if count != 1 else "", size_label(report.get("total_size", 0)))
-            )
+            return
+        leaves = list(self._leaves())
+        chosen = [l for l in leaves if l.checkState(0) == QtCore.Qt.Checked]
+        size = sum(l.data(3, FILE_KEY_ROLE) or 0 for l in chosen)
+        replaced = sum(1 for l in chosen if l.data(1, FILE_KEY_ROLE))
+        text = "%s%s  ·  %s uncompressed" % (
+            len(chosen) if len(chosen) == len(leaves) else "%d of %d" % (len(chosen), len(leaves)),
+            " file" if len(leaves) == 1 else " files",
+            size_label(size),
+        )
+        if replaced:
+            text += '  ·  <span style="color:%s">%s replaced</span>' % (WARNING, plural(replaced, "existing file"))
+        self.summary.setText(text)
 
     # -- export
 
@@ -617,10 +816,10 @@ class ExportWindow(QtWidgets.QDialog):
         elif data.get("ok"):
             report = data.get("report") or {}
             self.exported = report.get("destination")
-            count = len(report.get("files", []))
+            count = sum(1 for f in report.get("files", []) if not f.get("skip"))
             self.summary.setText(
-                '<span style="color:%s">Exported %d file%s with %s</span>'
-                % (SUCCESS, count, "s" if count != 1 else "", preset_label(report.get("preset", "")))
+                '<span style="color:%s">Exported %s with %s</span>'
+                % (SUCCESS, plural(count, "file"), preset_label(report.get("preset", "")))
             )
             self.cancel.setText("Close")
             self.reveal.show()
@@ -632,6 +831,7 @@ class ExportWindow(QtWidgets.QDialog):
             if message:
                 self.summary.setText('<span style="color:%s">%s</span>' % (ERROR, html.escape(message.splitlines()[0])))
                 self.issues.setText(html.escape(message).replace("\n", "<br>"))
+                self._fit_issues(message.count("\n") + 1)
                 self.issues_frame.show()
         self._update_export_button()
         if self.test is not None:
@@ -667,11 +867,20 @@ class ExportWindow(QtWidgets.QDialog):
             self.space.setCurrentIndex(self.space.findData(t["color_space"]))
         self.mode.setCurrentIndex(t.get("mode", 0))
         self.padding.setChecked(t.get("padding", False))
+        self.skipped = {tuple(k) for k in t.get("skip", [])}
+        self.group.setCurrentIndex(max(0, self.group.findData(t.get("group", "map"))))
         self.dir.setText(t["dir"])
 
     def _finish_test(self):
         self.test_log["summary"] = self.summary.text()
-        self.test_log["files"] = [self.files.topLevelItem(i).text(0) for i in range(self.files.topLevelItemCount())]
+        self.test_log["files"] = [l.text(0) for l in self._leaves() if l.checkState(0) == QtCore.Qt.Checked]
+        self.test_log["skipped"] = [l.text(0) for l in self._leaves() if l.checkState(0) != QtCore.Qt.Checked]
+        tree = self.files
+        self.test_log["groups"] = [tree.topLevelItem(i).text(0) for i in range(tree.topLevelItemCount())
+                                   if tree.topLevelItem(i).childCount() > 0]
+        self.test_log["composition"] = self.composition.text()
+        self.test_log["project"] = self.project.text()
+        self.test_log["issues"] = self.issues.text() if not self.issues_frame.isHidden() else ""
         with open(self.test["result"], "w") as f:
             json.dump(self.test_log, f, indent=1)
         self.close()

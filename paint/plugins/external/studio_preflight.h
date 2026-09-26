@@ -5,8 +5,8 @@
 // (studio_export.c) ; ce module ne regarde que le disque (existence, droits, espace libre). Sans dépendance à
 // ArmorPaint : testable hors de l'app.
 //
-// Deux niveaux : bloquant (l'export n'a pas lieu) et avertissement (l'export a lieu, le rapport et le manifeste le
-// mentionnent).
+// Trois niveaux : bloquant (l'export n'a pas lieu), avertissement (l'export a lieu ; montré à l'artiste) et note (choix
+// du preset que l'artiste connaît déjà : 8 bits, JPG, espace... ; seulement dans le rapport et le manifeste).
 
 #include "studio_preset.h"
 #include <stdbool.h>
@@ -21,6 +21,7 @@ typedef struct {
 	int                            height;
 	uint64_t                       raw_size; // échantillons avant compression (estimation haute)
 	bool                           exists;   // renseigné par studio_preflight_run
+	bool                           skip;     // décoché dans la fenêtre : ni vérifié ni écrit, listé dans le rapport
 } studio_plan_file_t;
 
 typedef struct {
@@ -45,6 +46,7 @@ typedef struct {
 
 typedef struct {
 	bool  blocking;
+	bool  note; // ni bloquant ni montré à l'artiste
 	char *code; // identifiant stable ("not_writable"...)
 	char *message;
 } studio_issue_t;
@@ -59,6 +61,7 @@ typedef struct {
 void studio_preflight_run(studio_plan_t *plan, studio_report_t *report);
 // Ajoute un problème (utilisé aussi par la colle pour ce qu'elle seule voit).
 void studio_report_add(studio_report_t *report, bool blocking, const char *code, const char *format, ...);
+void studio_report_note(studio_report_t *report, const char *code, const char *format, ...);
 void studio_report_free(studio_report_t *report);
 
 // Rapport lisible (malloc) : résumé, problèmes, liste des fichiers avec leur taille estimée.

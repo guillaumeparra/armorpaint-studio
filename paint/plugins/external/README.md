@@ -417,7 +417,12 @@ presets upstream, avec les mêmes définitions.
 
    | Bloquant | Avertissement |
    |---|---|
-   | nommage impossible (template ShotGrid), aucun calque visible, aucun fichier, résolution hors show, chemins en double, fichier existant (`block`), dossier non inscriptible, espace disque insuffisant, PNG > 2 Gio, TIFF non compressé > 4 Gio, espace OCIO inconnu ou OCIO indisponible (A3) | calques masqués ignorés, profondeur supérieure à celle des calques, hauteur en 8 bits, données en JPG, EXR `srgb` ou non linéaire, couleur linéaire en 8 bits, données converties vers un espace couleur et inversement (A3), maillage UDIM exporté hors mode tuile, tuiles UDIM manquantes, fichier existant (`warn`), marge disque faible |
+   | nommage impossible (template ShotGrid), aucun calque visible, aucun fichier, aucun fichier coché (B6), résolution hors show, chemins en double, fichier existant (`block`), dossier non inscriptible, espace disque insuffisant, PNG > 2 Gio, TIFF non compressé > 4 Gio, espace OCIO inconnu ou OCIO indisponible (A3) | maillage UDIM exporté hors mode tuile, tuiles UDIM manquantes, fichier existant (`warn`), marge disque faible, TIFF compressé > 4 Gio |
+
+   Les **notes** (niveau `note`) décrivent des choix du preset, pas des erreurs : calques masqués ignorés, hauteur en
+   8 bits, données en JPG, EXR `srgb` ou non linéaire, couleur linéaire en 8 bits, données converties vers un espace
+   couleur et inversement (A3). Elles vont dans le rapport et le manifeste, pas à l'écran. Une profondeur supérieure
+   à celle des calques n'est plus signalée.
 
 3. **Écriture.** Pour chaque variante, les calques aplatis sont relus une fois. Chaque texture est composée en
    parallèle (`STUDIO_EXPORT_THREADS`), encodée, puis écrite en `<fichier>.studio-tmp`. Une texture uniforme est
@@ -451,20 +456,31 @@ une fenêtre Qt à la place de la boîte d'export d'ArmorPaint (patch `export-wi
 - **Color space** : « From preset », ou un espace OCIO imposé aux textures de couleur ; les données restent brutes.
 - **Layers** : Visible, Selected, Per Object, Per UDIM Tile, et la marge (padding) de l'upstream.
 - **Destination** : dossier ; défaut : celui du dernier export, sinon celui du projet.
-- **Files** : le préflight, recalculé à chaque changement, sans rien écrire : fichiers, formats, espaces, tailles
-  (un fichier existant est en orange), puis les problèmes, regroupés. Un problème bloquant désactive Export.
+- **Files** : le préflight, recalculé à chaque changement, sans rien écrire. Chaque fichier se coche ou se décoche
+  avant l'export ; un fichier décoché n'est ni vérifié ni écrit. Avec des tuiles UDIM, des objets ou des atlas, la
+  liste est groupée par map ou par objet / tuile, avec une case par groupe (décocher `height` retire toutes ses
+  tuiles). En tête, ce que représentent les fichiers (« 9 maps × 7 UDIM tiles ») ; la ligne du projet donne ses objets
+  et ses tuiles. Un fichier existant est en orange et compté dans le résumé.
+- **Problèmes** : les bloquants (qui désactivent Export) et quelques avertissements utiles (tuiles UDIM manquantes,
+  maillage UDIM hors mode par tuile, place disque). Les choix du preset que les graphistes connaissent (profondeur,
+  8 bits, JPG, espace) sont des **notes** : dans le rapport et le manifeste, jamais affichées.
 
-Un export abouti devient l'export courant d'ArmorPaint (dossier, preset, mode, marge, espace) : Ctrl+E le refait
+Un export abouti devient l'export courant d'ArmorPaint (dossier, preset, mode, marge, espace, fichiers décochés) :
+Ctrl+E le refait
 sans rouvrir la fenêtre. Cancel ne change rien. Rouvrir la fenêtre pendant qu'elle est ouverte la ramène devant. Elle
 se ferme quand ArmorPaint quitte. Sa taille suit l'échelle de l'interface d'ArmorPaint (`STUDIO_UI_SCALE`, transmis
 par l'app). Si elle ne démarre pas (Python sans PySide6), ArmorPaint le dit, avec la fin de la sortie d'erreur.
+
+**Un jeu de maps par matériau.** À l'import OBJ ou FBX, « Split By: Material » crée un objet par matériau. En mode
+Per Object, ArmorPaint écrit un jeu par objet qui a au moins un calque qui lui est propre (masque d'objet du calque) ;
+les calques partagés vont dans chaque jeu. Sans calque propre à un objet, Per Object donne un seul jeu.
 
 L'onglet Presets (éditeur de presets upstream), l'onglet Atlases et « Pack into project » de la boîte d'export ne
 sont plus accessibles. La résolution et la profondeur sont affichées, pas modifiables : elles restent celles du
 projet. Pas encore sous Windows (`studio_proc`).
 
 **Protocole**, une ligne JSON par message sur stdin et stdout de la fenêtre (détail dans `studio_export_window.h`) :
-requêtes `state`, `preflight` et `export` (`args` : `preset`, `color_space`, `dir`, `mode`, `padding`), réponses
+requêtes `state`, `preflight` et `export` (`args` : `preset`, `color_space`, `dir`, `mode`, `padding`, `skip`), réponses
 `{"id", "ok", "data" | "error"}`, évènement `{"event": "raise", "mode"}`. Un autre outil peut remplacer la fenêtre
 par `STUDIO_EXPORT_WINDOW`. `STUDIO_EXPORT_WINDOW_TEST=<choix.json>` la fait tourner sans intervention (bancs).
 
@@ -479,12 +495,15 @@ char *studio_export_last_report(void);                              // rapport J
 int   studio_export_is_studio_preset(char *name);
 char *studio_export_color_space(void);              // espace imposé aux couleurs ; "" : celui du preset
 int   studio_export_set_color_space(char *name);     // "" : celui du preset ; 0 si inconnu d'OCIO (gardé, l'export sera bloqué)
+char *studio_export_skip(void);                      // fichiers décochés : lignes "<texture>\t<variant>\t<tuile>"
+void  studio_export_set_skip(char *keys);            // "" : tous les fichiers ; gardé pour les exports suivants
 void  studio_export_window_show(void);               // ouvre la fenêtre d'export, ou la ramène devant
 int   studio_export_window_is_open(void);
 ```
 
 Le rapport JSON contient `ok`, `preset`, `color_space_override`, `destination`, la résolution, `total_size`, `manifest`, `files[]` (chemin,
-texture, format, profondeur, compression, taille estimée, `exists`) et `issues[]` (`level`, `code`, `message`). En
+texture, `variant`, `udim`, format, profondeur, compression, taille estimée, `exists`, `skip`) et `issues[]` (`level` :
+`blocking`, `warning` ou `note` ; `code`, `message`). En
 ligne de commande, `ArmorPaint projet.arm --background --export-textures exr16 arnold <dossier>` utilise le preset
 studio. Chaque texture garde son propre format. Le type fixe seulement la profondeur de travail des calques
 aplatis (`png`/`jpg` : 8 bits, `exr16` : half, `exr32` : float), comme dans l'upstream. Pour une sortie 16 ou
@@ -649,7 +668,8 @@ STUDIO_TEST_TK_CORE=<tk-core> .tests/sg.sh [dossier de travail]   # ShotGrid (C2
 .tests/ocio_app.sh [dossier]           # OCIO dans l'app : configuration par défaut, $OCIO, $OCIO invalide, API de scripting
 .tests/ocio_export_app.sh [dossier]    # export OCIO (A3) dans l'app : pixels = PyOpenColorIO, préflight, manifeste, cas bloquants
 .tests/ocio_view_app.sh [dossier]      # viewport OCIO (A2) dans l'app : compositeur = PyOpenColorIO, menu (API), rechargement, variables
-.tests/export_window_app.sh [dossier]  # fenêtre d'export (B6) dans l'app, Qt offscreen : état, préflight, export, blocage, réouverture ; PY=<python PySide6>
+.tests/export_window_app.sh [dossier]  # fenêtre d'export (B6) dans l'app, Qt offscreen : état, préflight, export, fichiers décochés, blocage, réouverture ; PY=<python PySide6>
+<python PySide6> .tests/export_window_ui.py [dossier]  # fenêtre d'export contre un faux ArmorPaint : liste groupée (tuiles UDIM, objets), cases, décomptes, problèmes affichés
 ```
 
 `ocio.sh` compare au bit près à PyOpenColorIO, la roue officielle à la même version, installée dans `.ocio/venv`

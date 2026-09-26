@@ -49,3 +49,9 @@ const char *studio_export_last_error(void); // "titre\ntexte" du dernier échec,
 // chargée ; il est gardé quand même, et l'export sera bloqué avec la raison. Défaut : STUDIO_EXPORT_COLOR_SPACE.
 const char *studio_export_color_space(void); // "" : celui du preset
 bool        studio_export_set_color_space(const char *name);
+
+// Fichiers décochés : une ligne "<texture>\t<variant>\t<tuile>" par fichier (texture du preset, objet ou atlas, tuile
+// UDIM ; "" si sans), comme "texture", "variant" et "udim" du rapport. Ils restent dans le rapport ("skip": true) mais
+// ne sont ni vérifiés ni écrits. "" : tous les fichiers. Gardé pour les exports suivants (Ctrl+E).
+const char *studio_export_skip(void);
+void        studio_export_set_skip(const char *keys);

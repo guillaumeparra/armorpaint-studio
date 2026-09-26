@@ -414,6 +414,20 @@ static struct {
 // celui du preset. Gardé pour la session : les préférences le porteront au lot A5.
 static char *color_override = NULL;
 
+// Fichiers décochés (fenêtre d'export, script) : "\n<texture>\t<variant>\t<tuile>\n..." ; NULL : tous. Gardé pour Ctrl+E.
+static char *skip_keys = NULL;
+
+static bool is_skipped(const char *texture, const char *variant, const char *udim) {
+	if (skip_keys == NULL) {
+		return false;
+	}
+	char *key = string_tmp("\n%s\t%s\t%s\n", texture, variant, udim);
+	return strstr(skip_keys, key) != NULL;
+}
+
+// Au moins un fichier coché pour cette texture du preset (sinon ses vérifications OCIO ne concernent rien).
+static bool texture_selected(const studio_preset_texture_t *t);
+
 static void add_note(const char *format, ...) {
 	char    message[512];
 	va_list args;
@@ -1415,6 +1429,7 @@ static void plan_variant(const char *variant, const char *udim) {
 		      .width    = w,
 		      .height   = h,
 		      .raw_size = studio_image_raw_size(w, h, t->channels, t->bits),
+		      .skip     = is_skipped(t->name, variant, udim),
         };
 	}
 }
@@ -1426,6 +1441,15 @@ static int find_plan(const char *path, const studio_preset_texture_t *t) {
 		}
 	}
 	return -1;
+}
+
+static bool texture_selected(const studio_preset_texture_t *t) {
+	for (int i = 0; i < ex.file_count; ++i) {
+		if (ex.files[i].texture == t && !ex.files[i].skip) {
+			return true;
+		}
+	}
+	return false;
 }
 
 static void write_variant(const char *variant, const char *udim) {
@@ -1469,6 +1493,10 @@ static void write_variant(const char *variant, const char *udim) {
 			free(error);
 			return;
 		}
+		if (ex.files[index].skip) {
+			free(path);
+			continue;
+		}
 		void  *data = NULL;
 		size_t size = 0;
 		if (encode_texture(&src, t, &data, &size)) {
@@ -1498,7 +1526,7 @@ static uint32_t color_vars(const studio_preset_texture_t *t, uint32_t *all) {
 static void check_ocio(studio_report_t *r) {
 	for (int i = 0; i < ex.preset->texture_count; ++i) {
 		const studio_preset_texture_t *t = &ex.preset->textures[i];
-		if (t->color != STUDIO_COLOR_OCIO) {
+		if (t->color != STUDIO_COLOR_OCIO || !texture_selected(t)) {
 			continue;
 		}
 		if (!studio_ocio_ready()) {
@@ -1517,7 +1545,7 @@ static void check_ocio(studio_report_t *r) {
 		uint32_t colors = color_vars(t, &vars);
 		if (studio_ocio_is_data(cs) == 1) {
 			if (colors != 0) {
-				studio_report_add(r, false, "ocio_color_as_data", "%s: colour written to the data colorspace '%s': "
+				studio_report_note(r, "ocio_color_as_data", "%s: colour written to the data colorspace '%s': "
 				                  "values as stored by ArmorPaint (gamma 2.2 encoded)", t->name, cs);
 			}
 			continue;
@@ -1533,17 +1561,17 @@ static void check_ocio(studio_report_t *r) {
 			continue;
 		}
 		if (vars != 0 && colors == 0) {
-			studio_report_add(r, false, "ocio_data_as_color", "%s: data channels converted to the colour space "
+			studio_report_note(r, "ocio_data_as_color", "%s: data channels converted to the colour space "
 			                  "'%s': use a data colorspace (Raw) to keep their values", t->name, cs);
 		}
 		const char *enc    = studio_ocio_encoding(cs);
 		bool        linear = enc != NULL && strcmp(enc, "scene-linear") == 0;
 		if (t->format == STUDIO_FORMAT_EXR && enc != NULL && enc[0] != 0 && !linear) {
-			studio_report_add(r, false, "exr_not_linear", "%s: EXR in '%s' (%s encoding), renderers expect "
+			studio_report_note(r, "exr_not_linear", "%s: EXR in '%s' (%s encoding), renderers expect "
 			                  "scene-linear values", t->name, cs, enc);
 		}
 		if (t->bits == 8 && linear && colors != 0) {
-			studio_report_add(r, false, "linear_8bit", "%s: scene-linear colour ('%s') in 8 bits: banding in dark "
+			studio_report_note(r, "linear_8bit", "%s: scene-linear colour ('%s') in 8 bits: banding in dark "
 			                  "values, use an encoded colorspace (sRGB - Texture) or 16 bits", t->name, cs);
 		}
 	}
@@ -1633,7 +1661,9 @@ bool studio_export_begin(char *path, bool bake_material) {
 	}
 	else {
 		for (int i = 0; i < last_report.count; ++i) {
-			report(false, "Texture export: %s", last_report.issues[i].message);
+			if (!last_report.issues[i].note) {
+				report(false, "Texture export: %s", last_report.issues[i].message);
+			}
 		}
 	}
 	free(text);
@@ -1776,6 +1806,23 @@ bool studio_export_set_color_space(const char *name) {
 	return color_override == NULL || studio_ocio_resolve(color_override) != NULL;
 }
 
+const char *studio_export_skip(void) {
+	return skip_keys != NULL ? skip_keys + 1 : "";
+}
+
+void studio_export_set_skip(const char *keys) {
+	free(skip_keys);
+	skip_keys = NULL;
+	if (keys == NULL || keys[0] == 0) {
+		return;
+	}
+	size_t len = strlen(keys);
+	skip_keys  = malloc(len + 3);
+	if (skip_keys != NULL) { // bornée par des \n : chaque ligne se cherche entière
+		snprintf(skip_keys, len + 3, "\n%s%s", keys, keys[len - 1] == '\n' ? "" : "\n");
+	}
+}
+
 bool studio_export_is_studio_preset(const char *name) {
 	entry_t *e = find_entry(name);
 	return e != NULL && e->installed;
@@ -1811,6 +1858,17 @@ static minic_val_t mn_studio_export_color_space(minic_val_t *a, int n) {
 	return minic_val_ptr((void *)studio_export_color_space());
 }
 
+static minic_val_t mn_studio_export_skip(minic_val_t *a, int n) {
+	(void)a;
+	(void)n;
+	return minic_val_ptr((void *)studio_export_skip());
+}
+
+static minic_val_t mn_studio_export_set_skip(minic_val_t *a, int n) {
+	studio_export_set_skip(minic_arg_p(a, n, 0));
+	return minic_val_int(0);
+}
+
 static minic_val_t mn_studio_export_set_color_space(minic_val_t *a, int n) {
 	return minic_val_int(studio_export_set_color_space(minic_arg_p(a, n, 0)) ? 1 : 0);
 }
@@ -1833,5 +1891,7 @@ void studio_export_init(void) {
 	minic_register("studio_export_is_studio_preset", "i(p)", mn_studio_export_is_studio_preset);
 	minic_register("studio_export_color_space", "p()", mn_studio_export_color_space);
 	minic_register("studio_export_set_color_space", "i(p)", mn_studio_export_set_color_space);
+	minic_register("studio_export_skip", "p()", mn_studio_export_skip);
+	minic_register("studio_export_set_skip", "v(p)", mn_studio_export_set_skip);
 #endif
 }

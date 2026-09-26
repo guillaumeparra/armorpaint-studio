@@ -80,24 +80,37 @@ void studio_format_size(uint64_t bytes, char *out, size_t out_size) {
 
 // ---- Problèmes -------------------------------------------------------------------------------------------------------
 
-void studio_report_add(studio_report_t *report, bool blocking, const char *code, const char *format, ...) {
+static void add_issue(studio_report_t *report, bool blocking, bool note, const char *code, const char *format,
+                      va_list args) {
 	studio_issue_t *grow = realloc(report->issues, sizeof(studio_issue_t) * (size_t)(report->count + 1));
 	if (grow == NULL) {
 		return;
 	}
 	report->issues = grow;
-	char    message[1024];
-	va_list args;
-	va_start(args, format);
+	char message[1024];
 	vsnprintf(message, sizeof(message), format, args);
-	va_end(args);
 	studio_issue_t *issue = &report->issues[report->count++];
 	issue->blocking       = blocking;
+	issue->note           = note;
 	issue->code           = strdup(code);
 	issue->message        = strdup(message);
 	if (blocking) {
 		report->blocking++;
 	}
+}
+
+void studio_report_add(studio_report_t *report, bool blocking, const char *code, const char *format, ...) {
+	va_list args;
+	va_start(args, format);
+	add_issue(report, blocking, false, code, format, args);
+	va_end(args);
+}
+
+void studio_report_note(studio_report_t *report, const char *code, const char *format, ...) {
+	va_list args;
+	va_start(args, format);
+	add_issue(report, false, true, code, format, args);
+	va_end(args);
 }
 
 void studio_report_free(studio_report_t *report) {
@@ -137,7 +150,7 @@ static bool reads_var(const studio_preset_texture_t *t, int var) {
 // Une seule fois par texture du preset (les tuiles et objets répètent les mêmes textures).
 static bool first_of_texture(const studio_plan_t *plan, int index) {
 	for (int i = 0; i < index; ++i) {
-		if (plan->files[i].texture == plan->files[index].texture) {
+		if (!plan->files[i].skip && plan->files[i].texture == plan->files[index].texture) {
 			return false;
 		}
 	}
@@ -148,6 +161,9 @@ static void check_textures(studio_plan_t *plan, studio_report_t *r) {
 	for (int i = 0; i < plan->file_count; ++i) {
 		studio_plan_file_t            *f = &plan->files[i];
 		const studio_preset_texture_t *t = f->texture;
+		if (f->skip) {
+			continue;
+		}
 		size_t raw = studio_image_raw_size(f->width, f->height, t->channels, t->bits);
 		if (t->format == STUDIO_FORMAT_PNG && (uint64_t)raw + (uint64_t)f->height > STUDIO_PNG_MAX_RAW) {
 			studio_report_add(r, true, "png_too_large", "%s: %dx%d %d-bit PNG is over the %d MB the PNG encoder "
@@ -164,22 +180,20 @@ static void check_textures(studio_plan_t *plan, studio_report_t *r) {
 		if (!first_of_texture(plan, i)) {
 			continue;
 		}
-		if (t->bits > plan->source_bits && !(t->format == STUDIO_FORMAT_EXR && plan->source_bits >= 16)) {
-			studio_report_add(r, false, "bits_above_source", "%s: written in %d bits from %d-bit layers (Project > "
-			                  "bits per channel): no extra precision", t->name, t->bits, plan->source_bits);
-		}
+		// Choix du preset : notes, pas des avertissements. Une profondeur supérieure à celle des calques n'est pas
+		// signalée : les graphistes le savent.
 		if (t->bits == 8 && reads_var(t, STUDIO_VAR_HEIGHT)) {
-			studio_report_add(r, false, "height_8bit", "%s: height in 8 bits (256 levels): stepping in displacement, "
+			studio_report_note(r, "height_8bit", "%s: height in 8 bits (256 levels): stepping in displacement, "
 			                  "use 16 bits or more", t->name);
 		}
 		if (t->format == STUDIO_FORMAT_JPG && is_data_texture(t)) {
-			studio_report_add(r, false, "jpg_data", "%s: data map in lossy JPG", t->name);
+			studio_report_note(r, "jpg_data", "%s: data map in lossy JPG", t->name);
 		}
 		if (t->format == STUDIO_FORMAT_EXR && t->color == STUDIO_COLOR_SRGB) {
-			studio_report_add(r, false, "exr_srgb", "%s: sRGB-encoded EXR, renderers expect linear values", t->name);
+			studio_report_note(r, "exr_srgb", "%s: sRGB-encoded EXR, renderers expect linear values", t->name);
 		}
 		if (t->bits == 8 && t->color == STUDIO_COLOR_LINEAR && !is_data_texture(t)) {
-			studio_report_add(r, false, "linear_8bit", "%s: linear colour in 8 bits: banding in dark values, use "
+			studio_report_note(r, "linear_8bit", "%s: linear colour in 8 bits: banding in dark values, use "
 			                  "srgb or 16 bits", t->name);
 		}
 	}
@@ -222,11 +236,14 @@ static void check_paths(studio_plan_t *plan, studio_report_t *r) {
 	if (paths == NULL) {
 		return;
 	}
+	int count = 0;
 	for (int i = 0; i < plan->file_count; ++i) {
-		paths[i] = plan->files[i].path;
+		if (!plan->files[i].skip) {
+			paths[count++] = plan->files[i].path;
+		}
 	}
-	qsort(paths, (size_t)plan->file_count, sizeof(char *), compare_strings);
-	for (int i = 1; i < plan->file_count; ++i) {
+	qsort(paths, (size_t)count, sizeof(char *), compare_strings);
+	for (int i = 1; i < count; ++i) {
 		if (strcmp(paths[i], paths[i - 1]) == 0 && (i < 2 || strcmp(paths[i], paths[i - 2]) != 0)) {
 			studio_report_add(r, true, "duplicate_path", "several textures would be written to %s: add <channel>, "
 			                  "<variant> or <UDIM> to the naming", paths[i]);
@@ -239,7 +256,7 @@ static void check_paths(studio_plan_t *plan, studio_report_t *r) {
 	const char *first    = NULL;
 	for (int i = 0; i < plan->file_count; ++i) {
 		plan->files[i].exists = studio_fs_exists(plan->files[i].path);
-		if (plan->files[i].exists) {
+		if (plan->files[i].exists && !plan->files[i].skip) {
 			first = first != NULL ? first : plan->files[i].path;
 			existing++;
 		}
@@ -255,6 +272,9 @@ static void check_paths(studio_plan_t *plan, studio_report_t *r) {
 	char **dirs      = calloc((size_t)(plan->file_count > 0 ? plan->file_count : 1), sizeof(char *));
 	int    dir_count = 0;
 	for (int i = 0; dirs != NULL && i < plan->file_count; ++i) {
+		if (plan->files[i].skip) {
+			continue;
+		}
 		char *dir = studio_fs_dirname(plan->files[i].path);
 		bool  seen = false;
 		for (int j = 0; dir != NULL && j < dir_count && !seen; ++j) {
@@ -267,7 +287,7 @@ static void check_paths(studio_plan_t *plan, studio_report_t *r) {
 		dirs[dir_count++] = dir;
 		uint64_t largest = 0, total = 0;
 		for (int j = i; j < plan->file_count; ++j) {
-			char *other = studio_fs_dirname(plan->files[j].path);
+			char *other = plan->files[j].skip ? NULL : studio_fs_dirname(plan->files[j].path);
 			if (other != NULL && strcmp(other, dir) == 0) {
 				largest = plan->files[j].raw_size > largest ? plan->files[j].raw_size : largest;
 				total += plan->files[j].raw_size;
@@ -310,8 +330,17 @@ void studio_preflight_run(studio_plan_t *plan, studio_report_t *report) {
 		studio_report_add(report, true, "no_files", "nothing to export (%s mode found no object, tile or atlas)",
 		                  plan->mode != NULL ? plan->mode : "this");
 	}
+	else {
+		int selected = 0;
+		for (int i = 0; i < plan->file_count; ++i) {
+			selected += plan->files[i].skip ? 0 : 1;
+		}
+		if (selected == 0) {
+			studio_report_add(report, true, "no_selection", "no file selected");
+		}
+	}
 	if (plan->hidden_layers > 0) {
-		studio_report_add(report, false, "hidden_layers", "%d hidden layer%s not exported", plan->hidden_layers,
+		studio_report_note(report, "hidden_layers", "%d hidden layer%s not exported", plan->hidden_layers,
 		                  plan->hidden_layers > 1 ? "s" : "");
 	}
 	if (p->resolution_count > 0) {
@@ -332,7 +361,7 @@ void studio_preflight_run(studio_plan_t *plan, studio_report_t *report) {
 	}
 	report->total_size = 0;
 	for (int i = 0; i < plan->file_count; ++i) {
-		report->total_size += plan->files[i].raw_size;
+		report->total_size += plan->files[i].skip ? 0 : plan->files[i].raw_size;
 	}
 	check_textures(plan, report);
 	check_udim(plan, report);
@@ -362,7 +391,8 @@ char *studio_report_text(const studio_plan_t *plan, const studio_report_t *repor
 		for (int i = 0; i < report->count; ++i) {
 			const studio_issue_t *issue = &report->issues[i];
 			if (issue->blocking == (pass == 0)) {
-				sb_printf(&b, "%s %s\n", issue->blocking ? "[blocking]" : "[warning] ", issue->message);
+				sb_printf(&b, "%s %s\n", issue->blocking ? "[blocking]" : issue->note ? "[note]    " : "[warning] ",
+				          issue->message);
 			}
 		}
 	}
@@ -377,7 +407,7 @@ char *studio_report_text(const studio_plan_t *plan, const studio_report_t *repor
 		sb_printf(&b, "  %s  (%s %d-bit %s%s%s, %s, <= %s%s)\n", f->path, studio_format_name(t->format), t->bits,
 		          channels_name(t->channels), t->compression != NULL ? " " : "",
 		          t->compression != NULL ? t->compression : "", studio_preset_color(t), size,
-		          f->exists ? ", replaces existing" : "");
+		          f->skip ? ", not selected" : f->exists ? ", replaces existing" : "");
 	}
 	if (plan->manifest_path != NULL) {
 		sb_printf(&b, "Manifest: %s\n", plan->manifest_path);
@@ -430,13 +460,13 @@ char *studio_report_json(const studio_plan_t *plan, const studio_report_t *repor
 		}
 		sb_printf(&b, ", \"color_space\": ");
 		sb_quote(&b, studio_preset_color(t)); // nom OCIO : texte libre
-		sb_printf(&b, ", \"size_estimate\": %llu, \"exists\": %s}", (unsigned long long)f->raw_size,
-		          f->exists ? "true" : "false");
+		sb_printf(&b, ", \"size_estimate\": %llu, \"exists\": %s, \"skip\": %s}", (unsigned long long)f->raw_size,
+		          f->exists ? "true" : "false", f->skip ? "true" : "false");
 	}
 	sb_printf(&b, "], \"issues\": [");
 	for (int i = 0; i < report->count; ++i) {
 		sb_printf(&b, "%s{\"level\": \"%s\", \"code\": ", i > 0 ? ", " : "",
-		          report->issues[i].blocking ? "blocking" : "warning");
+		          report->issues[i].blocking ? "blocking" : report->issues[i].note ? "note" : "warning");
 		sb_quote(&b, report->issues[i].code);
 		sb_printf(&b, ", \"message\": ");
 		sb_quote(&b, report->issues[i].message);

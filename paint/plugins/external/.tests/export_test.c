@@ -654,7 +654,13 @@ static void test_preflight(const char *work) {
 	CHECK(has_issue(&r, "height_8bit", false), "8-bit height");
 	CHECK(has_issue(&r, "jpg_data", false), "jpg data");
 	CHECK(has_issue(&r, "exr_srgb", false), "exr srgb");
-	CHECK(has_issue(&r, "bits_above_source", false), "16-bit from 8-bit layers");
+	CHECK(!has_issue(&r, "bits_above_source", false), "16-bit from 8-bit layers: not reported (graphists know)");
+	for (int i = 0; i < r.count; ++i) {
+		const char *code = r.issues[i].code;
+		bool        note = strcmp(code, "hidden_layers") == 0 || strcmp(code, "height_8bit") == 0 ||
+		            strcmp(code, "jpg_data") == 0 || strcmp(code, "exr_srgb") == 0;
+		CHECK(r.issues[i].note == note, "%s: %s", code, note ? "note" : "not a note");
+	}
 	CHECK(!has_issue(&r, "disk_full", true), "enough space");
 	CHECK(files[2].exists && !files[0].exists, "exists flags");
 	char *text = studio_report_text(&plan, &r);
@@ -680,6 +686,17 @@ static void test_preflight(const char *work) {
 	plan.udim_mesh = plan.per_tile = false;
 	studio_preflight_run(&plan, &r);
 	CHECK(has_issue(&r, "exists", true), "overwrite block");
+	studio_report_free(&r);
+	// Fichier décoché : ni vérifié (existant) ni compté ; seul, rien à exporter.
+	files[2].skip = true;
+	studio_preflight_run(&plan, &r);
+	CHECK(!has_issue(&r, "exists", true) && has_issue(&r, "no_selection", true) && r.total_size == 0,
+	      "skipped file: not checked, no selection");
+	json = studio_report_json(&plan, &r);
+	CHECK(json != NULL && strcmp(studio_json_text(studio_json_find(json, "/files/0/skip")), "true") == 0,
+	      "json skip flag");
+	free(json);
+	files[2].skip = false;
 	studio_report_free(&r);
 	plan.files = &files[0];
 	studio_preflight_run(&plan, &r);
