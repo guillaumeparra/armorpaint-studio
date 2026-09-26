@@ -364,3 +364,87 @@ pour les plugins. Porter alors `studio_export.c` dessus. Si `export_texture_run`
 **Non couvert.** L'export par tuile UDIM et par objet n'a pas été rejoué dans l'app : il faut un maillage à tuiles ou
 des masques d'objet. Le plan et le préflight de ces modes sont testés hors app. Le mode « pack into project » garde
 l'écriture upstream.
+
+---
+
+## obj-global-indices
+
+| | |
+|---|---|
+| Fichier | `base/sources/iron_obj.c` (`obj_parse` et ses lecteurs `read_int`, `read_face`, `read_float`, `read_string`, `skip_whitespace`) |
+| Commit studio | `252f9fc3` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-26) |
+| Trouvé | 2026-09-26, `ArmorPaint --background tiles.obj` : EXC_BAD_ACCESS dans `obj_parse` (rc 139) |
+
+**Bug.** Les indices d'un OBJ sont globaux au fichier : une face de l'objet 2 peut utiliser un `vn` (ou un `vt`,
+un `v`) déclaré sous l'objet 1. C'est valide, et courant quand un exporteur factorise les normales. En split par
+objet (le défaut, et le mode UDIM), `obj_parse()` jetait pourtant les `v`/`vt`/`vn` à chaque nouvelle part et
+retranchait à ses indices le nombre d'éléments des parts précédentes (« Assumes separate vertex data per object »).
+L'indice `1` de l'objet 2 devenait négatif, puis énorme en `uint32_t` : lecture hors du tampon, plantage.
+
+Deux autres effets de la même hypothèse :
+- le format de face (`v`, `v/t`, `v//n`, `v/t/n`) était deviné d'après les `vt`/`vn` lus dans la part : un objet
+  sans `vn` propre lisait `f 5/5/1` comme `v/t` puis traitait `/1` comme un nouveau sommet ;
+- aucun indice n'était vérifié. Un OBJ tronqué ou malformé (indice hors bornes, nul, en avant, face à moins de 3
+  ou plus de 512 sommets, nom d'objet de plus de 255 caractères, fichier coupé en milieu de ligne) débordait
+  `va`/`ua`/`na`, `buf`, `str` ou le tampon du fichier.
+
+**Correctif.**
+- Les `v`/`vt`/`vn` sont gardés d'une part à l'autre quel que soit le split (le split par matériau le faisait
+  déjà) et libérés par la dernière part. Les indices restent globaux, sans décalage ; les indices négatifs (relatifs
+  à la fin de la liste, norme OBJ) sont résolus.
+- `read_face()` lit la syntaxe de chaque sommet de la face au lieu de la deviner, et `obj_index()` convertit chaque
+  indice en rendant `-1` s'il est absent ou hors bornes.
+- `check_face()` : une face dont une position est invalide, ou qui a moins de 3 ou plus de 512 sommets, est
+  ignorée (avertissement « Skipped faces with invalid vertex indices », une fois par import). Une face dont un uv
+  ou une normale est invalide garde sa géométrie : ses uvs pointent sur le `vt` 0, comme le remplissage upstream
+  des faces sans uv, et si une face de la part n'a pas de normale, les normales de la part sont calculées.
+- Uvs et normales sont empilés au même rythme que les positions (`push_corner`) : plus de lecture de
+  `nor_indices` au-delà de sa taille quand certaines faces n'ont pas de normale.
+- Toutes les lectures s'arrêtent à `bytes_length` ; `read_int()` borne `buf` et sature au lieu de déborder ;
+  `read_string()` tronque le nom à 255 caractères.
+- L'échelle de packing (`scale_pos`) couvre les positions déclarées dans la part, comme l'upstream, plus celles
+  d'objets précédents qu'elle utilise (sans quoi le packing int16 débordait). En split par matériau, elle reste
+  calculée sur toutes les positions lues, comme l'upstream.
+
+Sur un OBJ à données séparées par objet — tout ce que l'upstream lisait sans planter — la sortie est identique,
+part par part, octet pour octet (étape 1 du banc).
+
+**Test.** `.tests/obj.sh` (hors app, ASan/UBSan, compare à `main:base/sources/iron_obj.c`) :
+1. `valid/` : 10 fichiers (sphères en `v`, `v/t`, `v//n`, `v/t/n`, CRLF, usemtl, triangles, n-gones concaves,
+   grille UDIM), splits objet, matériau et UDIM : sortie identique à l'upstream ;
+2. `shared/` : faces sur les `vn` / `vt` / `v` d'un objet précédent (triangles, quads, n-gone, indices relatifs,
+   positions réutilisées plus grandes que celles de la part) : sortie identique à la version à données séparées
+   lue par l'upstream ;
+3. `bad/` : 15 fichiers malformés, aucune erreur ;
+4. fuzz : 1 000 mutations de `valid/` et `shared/` en splits objet et matériau. Au 2026-09-26 : **0 plantage**
+   contre 1 413 pour l'upstream (heap-buffer-overflow, use-after-free, BUS, SEGV) ; à 3 000 mutations, 0 contre
+   4 251.
+
+Dans l'app :
+
+```bash
+ArmorPaint --background tiles.obj                    # le fichier du bug : rc 0 (139 avant)
+ArmorPaint --background tiles.obj --script .tests/obj_names.c   # tile.1001 et tile.1002, 6 indices chacun
+```
+
+`obj_names.c` parcourt `script_get_context()->paint_object` et ses `base->children` et affiche nom et
+`data->index_array->length`. Résultats au 2026-09-26 : le fichier du bug, les quads et le n-gone partagés, et
+les 25 fichiers `shared/` et `bad/` du banc sortent tous en rc 0 ; les sphères à 3 objets (`v/t/n` et usemtl) et
+les n-gones donnent les mêmes objets, avec les mêmes nombres d'indices, qu'avant le patch.
+
+**Signes que l'upstream l'a corrigé.** `vind_off` / `tind_off` / `nind_off` disparaissent, ou `array_free` de
+`pos_temp` n'est plus appelé pour chaque part en split objet. Rejouer alors `.tests/obj.sh` avec
+`STUDIO_UPSTREAM=main` sur une copie de `main` **sans** le patch (étape `shared/`).
+
+**Non couvert.**
+- En split par objet, les `v`/`vt`/`vn` de tout le fichier restent en mémoire jusqu'à la dernière part (l'upstream
+  ne gardait que ceux de la part courante) : de l'ordre de la taille du fichier, comme en split par matériau.
+- `read_float()` : l'exposant (`1e10`) est calculé dans un `int` par multiplications successives, qui débordent
+  au-delà de 9 et bouclent `exp` fois — un exposant énorme prend du temps sans planter. UBSan le signale pendant le
+  fuzz (`iron_obj.c:140`), seul UB restant. Le packing int16 des coordonnées hors bornes (`float-cast-overflow`,
+  saturé sur arm64) n'est pas non plus traité. Ces deux points relèvent de la lecture des flottants, hors du
+  périmètre des indices.
+- `import_obj_parse()` pousse la première part même sans face (fichier dont le premier objet n'a pas de face
+  valide) : l'import aboutit (rc 0) avec un objet vide, comportement upstream inchangé.
+- Le split UDIM (`obj_parse(…, udim)`) n'a été vérifié qu'hors app, le mode ne se règle que dans l'UI.

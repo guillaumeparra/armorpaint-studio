@@ -427,6 +427,7 @@ Point d'injection upstream : `STUDIO-PATCH(studio-export)` (PATCHES.md).
 ```sh
 .tests/run.sh [dossier de travail]     # EXR (B1) ; FUZZ=<n> pour le nombre de mutations
 .tests/proc.sh [dossier de travail]    # processus (C1)
+.tests/obj.sh [dossier de travail]     # import OBJ (patch obj-global-indices) ; FUZZ=<n> pour le nombre de mutations
 STUDIO_TEST_TK_CORE=<tk-core> .tests/sg.sh [dossier de travail]   # ShotGrid (C2), noms des exports (B3) ; STUDIO_TEST_TK_APPS pour le moteur (C3)
 .tests/export.sh [dossier de travail]  # export studio (B2, B4, B5) hors app : encodeurs relus par libpng/libtiff, expressions, presets, préflight ; FUZZ=<n>
 .tests/export_app.sh [dossier]         # export studio dans l'app : scripts, --export-textures, pixels = upstream, manifeste, atomicité
