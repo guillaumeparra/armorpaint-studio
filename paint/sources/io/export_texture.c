@@ -69,6 +69,12 @@ static void export_texture_write_texture(char *file, buffer_t *pixels, i32 type,
 		iron_write_jpg(file, pixels, res_x, res_y, format, math_floor(g_context->format_quality));
 	}
 	else { // Exr
+#ifdef WITH_EXTERNAL // STUDIO-PATCH(studio-exr): EXR written by tinyexr in external/ (compression, alpha, metadata), see external/PATCHES.md
+		bool studio_exr_write_texture(char *path, buffer_t *pixels, int width, int height, int bits, int type, int off);
+		if (studio_exr_write_texture(file, pixels, res_x, res_y, bits, type, off)) {
+			return;
+		}
+#endif
 		buffer_t *b = export_exr_run(res_x, res_y, pixels, bits, type, off);
 		iron_file_save_bytes(file, b, b->length);
 		array_free(b);
