@@ -15,6 +15,7 @@ project_t *main() {
 		add_shaders(project, "external/*.shader");
 		add_assets(project, "external/assets/*", "data/{name}", 0);
 		add_define(project, "WITH_EXTERNAL");
+		add_project(project, "external/.project"); // STUDIO-PATCH(external-project)
 	}
 
 	return project;
