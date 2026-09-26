@@ -322,6 +322,9 @@ vec4_t uniforms_ext_vec4_link(object_t *object, shader_data_t *mat, char *link) 
 	else if (string_equals(link, "_select_mask")) {
 		return (vec4_t){g_context->select_x1, g_context->select_y1, g_context->select_x2, g_context->select_y2};
 	}
+	else if (string_equals(link, "_ocio_lut_data")) { // STUDIO-PATCH(ocio-viewport): OCIO off unless a plugin links it
+		return (vec4_t){0.0, 0.0, 0.0, 0.0};
+	}
 
 	return vec4_nan();
 }
@@ -526,6 +529,10 @@ gpu_texture_t *uniforms_ext_tex_link(object_t *object, shader_data_t *mat, char 
 			return rt->_image;
 		}
 		return lut_image;
+	}
+	if (string_equals(link, "_ocio_lut_tex")) { // STUDIO-PATCH(ocio-viewport): unused while _ocio_lut_data.x is 0
+		render_target_t *rt = any_map_get(render_path_render_targets, "empty_white");
+		return rt->_image;
 	}
 	return NULL;
 }

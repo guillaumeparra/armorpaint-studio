@@ -3024,7 +3024,7 @@ scene_t *startup_get_scene(void) {
 				ve->data                       = "float2";
 				sc->vertex_elements->buffer[0] = ve;
 			}
-			sc->constants = (shader_const_t_array_t *)any_array_create(6);
+			sc->constants = (shader_const_t_array_t *)any_array_create(7); // STUDIO-PATCH(ocio-viewport): 7, was 6
 			{
 				shader_const_t *c        = (shader_const_t *)calloc(1, sizeof(shader_const_t));
 				c->name                  = "vignette_strength";
@@ -3067,7 +3067,14 @@ scene_t *startup_get_scene(void) {
 				c->link                  = "_gamma_strength";
 				sc->constants->buffer[5] = c;
 			}
-			sc->texture_units = (tex_unit_t_array_t *)any_array_create(2);
+			{ // STUDIO-PATCH(ocio-viewport): OCIO display LUT, linked by plugins/external/studio_ocio_view.c
+				shader_const_t *c        = (shader_const_t *)calloc(1, sizeof(shader_const_t));
+				c->name                  = "ocio_lut_data";
+				c->type                  = "float4";
+				c->link                  = "_ocio_lut_data";
+				sc->constants->buffer[6] = c;
+			}
+			sc->texture_units = (tex_unit_t_array_t *)any_array_create(3); // STUDIO-PATCH(ocio-viewport): 3, was 2
 			{
 				tex_unit_t *tu               = (tex_unit_t *)calloc(1, sizeof(tex_unit_t));
 				tu->name                     = "tex";
@@ -3078,6 +3085,12 @@ scene_t *startup_get_scene(void) {
 				tu->name                     = "lut_tex";
 				tu->link                     = "_lut_tex";
 				sc->texture_units->buffer[1] = tu;
+			}
+			{ // STUDIO-PATCH(ocio-viewport)
+				tex_unit_t *tu               = (tex_unit_t *)calloc(1, sizeof(tex_unit_t));
+				tu->name                     = "ocio_lut_tex";
+				tu->link                     = "_ocio_lut_tex";
+				sc->texture_units->buffer[2] = tu;
 			}
 			sd->contexts->buffer[0] = sc;
 		}
