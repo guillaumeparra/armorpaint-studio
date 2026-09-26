@@ -1,5 +1,8 @@
 
 #include "global.h"
+#ifndef IRON_WINDOWS
+#include <unistd.h> // STUDIO-PATCH(args-cwd-paths): getcwd
+#endif
 
 bool  args_use                    = false;
 char *args_asset_path             = "";
@@ -18,6 +21,23 @@ bool  args_script                 = false;
 char *args_script_path            = "";
 
 static char *args_path(char *path) {
+	// STUDIO-PATCH(args-cwd-paths): resolve relative paths against the caller's working directory
+	// (asset loads would resolve them against the app folder), see external/PATCHES.md
+#if defined(IRON_WINDOWS) || defined(IRON_LINUX) || defined(IRON_MACOS)
+	if (!data_is_abs(path)) {
+		char cwd[1024];
+#ifdef IRON_WINDOWS
+		wchar_t wcwd[1024];
+		DWORD   n  = GetCurrentDirectoryW(1024, wcwd);
+		bool    ok = n > 0 && n < 1024 && WideCharToMultiByte(CP_UTF8, 0, wcwd, -1, cwd, 1024, NULL, NULL) > 0;
+#else
+		bool ok = getcwd(cwd, sizeof(cwd)) != NULL;
+#endif
+		if (ok) {
+			return string("%s%s%s", cwd, PATH_SEP, starts_with(path, "./") ? path + 2 : path);
+		}
+	}
+#endif
 	if (data_is_abs(path) || data_is_up(path) || starts_with(path, "./")) {
 		return string_copy(path);
 	}
