@@ -11,6 +11,7 @@
 #include "engine.h"
 #include "../../sources/types.h"
 #include "studio_json.h"
+#include "studio_udim.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,8 +21,20 @@
 extern context_t *g_context;
 extern project_t *g_project;
 extern int        plugins_split_by; // paint/plugins/plugins.c : découpage lu par l'import FBX
+extern bool       ui_box_show;
+extern char      *ui_box_title;
+extern char      *console_message;
+extern float      console_message_timer;
+extern i32        base_bits;
 void              layers_set_object_mask(void);
 void              import_mesh_run(char *path, bool clear_layers, bool replace_existing, bool keep_camera);
+i32               util_mesh_udim_tile(char *name);
+bool              util_mesh_udim_active(void);
+i32               util_mesh_atlas_stride(void);
+i32               config_get_texture_res_x(void);
+i32               config_get_texture_res_y(void);
+void              console_info(char *s);
+void              console_log(char *s);
 
 #define DEFAULT_NAME "Atlas 1"
 #define MAX_NAME     64
@@ -294,6 +307,37 @@ bool studio_atlas_limit_layer(int atlas) {
 	return true;
 }
 
+// ---- Conseil de résolution après un import UDIM ----------------------------------------------------------------------
+
+void studio_udim_import_hint(void) {
+	if (!util_mesh_udim_active()) {
+		return;
+	}
+	bool seen[1000] = {0}; // Tuile - 1000, util_mesh_udim_tile() rend 1001 à 1999
+	int  tiles      = 0;
+	for (int i = 0; i < object_count(); ++i) {
+		i32 tile = util_mesh_udim_tile(g_project->_->paint_objects->buffer[i]->base->name);
+		if (tile > 1000 && tile < 2000 && !seen[tile - 1000]) {
+			seen[tile - 1000] = true;
+			tiles++;
+		}
+	}
+	int stride = util_mesh_atlas_stride();
+	int bits   = base_bits == TEXTURE_BITS_BITS8 ? 8 : base_bits == TEXTURE_BITS_BITS16 ? 16 : 32;
+	// Au-delà de stride × stride tuiles (64), les autres n'ont pas de case : util_mesh.c le dit déjà (udim-tile-limit)
+	char *hint = studio_udim_hint(tiles < stride * stride ? tiles : stride * stride, stride, config_get_texture_res_x(), config_get_texture_res_y(), bits);
+	if (hint == NULL) {
+		return;
+	}
+	if (console_message_timer > 0) {
+		console_log(hint); // Un message de l'import (refus, objets sans tuile, tuiles de trop) reste dans la barre d'état
+	}
+	else {
+		console_info(hint);
+	}
+	free(hint);
+}
+
 // ---- Scripting (minic) -----------------------------------------------------------------------------------------------
 
 #ifdef WITH_EVAL
@@ -347,6 +391,19 @@ static minic_val_t mn_studio_import_mesh(minic_val_t *a, int n) {
 	return minic_val_int(1);
 }
 
+// Titre de la boîte de dialogue ouverte, "" sans boîte : un script batch voit qu'ArmorPaint attend quelqu'un (dépliage
+// des uv proposé après l'import d'un maillage sans uv, par exemple).
+static minic_val_t mn_studio_dialog_title(minic_val_t *a, int n) {
+	(void)a, (void)n;
+	return minic_val_ptr(string_copy(ui_box_show && ui_box_title != NULL ? ui_box_title : ""));
+}
+
+// Message de la barre d'état, "" s'il est effacé : ce que l'artiste a sous les yeux après une action.
+static minic_val_t mn_studio_status_message(minic_val_t *a, int n) {
+	(void)a, (void)n;
+	return minic_val_ptr(string_copy(console_message_timer > 0 && console_message != NULL ? console_message : ""));
+}
+
 // Limite le calque courant à l'objet index (ordre de studio_atlases), -1 : partagé. 1 si fait.
 static minic_val_t mn_studio_layer_set_object(minic_val_t *a, int n) {
 	int           index = (int)minic_arg_i(a, n, 0);
@@ -371,6 +428,8 @@ void studio_atlas_init(void) {
 	minic_register("studio_atlases", "p()", mn_studio_atlases);
 	minic_register("studio_set_atlases", "p(p)", mn_studio_set_atlases);
 	minic_register("studio_import_mesh", "i(p,i)", mn_studio_import_mesh);
+	minic_register("studio_dialog_title", "p()", mn_studio_dialog_title);
+	minic_register("studio_status_message", "p()", mn_studio_status_message);
 	minic_register("studio_layer_set_atlas", "i(i)", mn_studio_layer_set_atlas);
 	minic_register("studio_layer_set_object", "i(i)", mn_studio_layer_set_object);
 #endif

@@ -64,6 +64,7 @@ i32                     config_get_texture_res_y(void);
 char                   *config_get_sha(void);
 char                   *project_filepath_get(void);
 i32                     util_mesh_udim_tile(char *name);
+i32                     util_mesh_udim_slot(i32 tile);
 bool                    util_mesh_udim_active(void);
 void                    export_texture_run(char *path, bool bake_material);
 void                    console_info(char *s);
@@ -285,6 +286,8 @@ static struct {
 	int                 file_count;
 	char              **tiles;
 	int                 tile_count;
+	int                 tiles_without_slot; // au-delà des 64 cases de l'atlas (patch udim-tile-limit)
+	const char         *first_without_slot; // dans tiles
 	int                 layer_count;
 	int                 hidden_layers;
 	bool                layers_counted;
@@ -372,11 +375,13 @@ static void reset_plan(void) {
 		free(ex.tiles[i]);
 	}
 	free(ex.tiles);
-	ex.tiles          = NULL;
-	ex.tile_count     = 0;
-	ex.layer_count    = 0;
-	ex.hidden_layers  = 0;
-	ex.layers_counted = false;
+	ex.tiles              = NULL;
+	ex.tile_count         = 0;
+	ex.tiles_without_slot = 0;
+	ex.first_without_slot = NULL;
+	ex.layer_count        = 0;
+	ex.hidden_layers      = 0;
+	ex.layers_counted     = false;
 	free(ex.naming_error);
 	ex.naming_error = NULL;
 	free(ex.file_base);
@@ -1457,6 +1462,15 @@ static void collect_tiles(void) {
 			ex.tiles[ex.tile_count++] = strdup(tile);
 		}
 	}
+	// Au-delà de 64 tuiles, les dernières n'ont pas de case dans l'atlas des calques : rien à exporter pour elles
+	for (int k = 0; k < ex.tile_count; ++k) {
+		if (util_mesh_udim_active() && ex.tiles[k] != NULL && util_mesh_udim_slot(atoi(ex.tiles[k])) < 0) {
+			ex.tiles_without_slot++;
+			if (ex.first_without_slot == NULL || atoi(ex.tiles[k]) < atoi(ex.first_without_slot)) {
+				ex.first_without_slot = ex.tiles[k];
+			}
+		}
+	}
 }
 
 static void plan_variant(const char *variant, const char *udim) {
@@ -1732,22 +1746,24 @@ bool studio_export_begin(char *path, bool bake_material) {
 	collect_tiles();
 
 	studio_plan_t plan = {
-	    .preset         = ex.preset,
-	    .files          = ex.files,
-	    .file_count     = ex.file_count,
-	    .width          = config_get_texture_res_x(),
-	    .height         = config_get_texture_res_y(),
-	    .source_bits    = ex.source_bits,
-	    .mode           = bake_material ? "bake material" : mode_name(),
-	    .udim_mesh      = util_mesh_udim_active() || ex.tile_count > 0,
-	    .per_tile       = g_context->layers_export == EXPORT_MODE_PER_UDIM_TILE && !bake_material,
-	    .tiles          = (const char *const *)ex.tiles,
-	    .tile_count     = ex.tile_count,
-	    .layer_count    = bake_material ? 1 : ex.layer_count,
-	    .hidden_layers  = bake_material ? 0 : ex.hidden_layers,
-	    .naming_error   = ex.naming_error,
-	    .destination    = path,
-	    .color_override = color_override,
+	    .preset             = ex.preset,
+	    .files              = ex.files,
+	    .file_count         = ex.file_count,
+	    .width              = config_get_texture_res_x(),
+	    .height             = config_get_texture_res_y(),
+	    .source_bits        = ex.source_bits,
+	    .mode               = bake_material ? "bake material" : mode_name(),
+	    .udim_mesh          = util_mesh_udim_active() || ex.tile_count > 0,
+	    .per_tile           = g_context->layers_export == EXPORT_MODE_PER_UDIM_TILE && !bake_material,
+	    .tiles              = (const char *const *)ex.tiles,
+	    .tile_count         = ex.tile_count,
+	    .tiles_without_slot = ex.tiles_without_slot,
+	    .first_without_slot = ex.first_without_slot,
+	    .layer_count        = bake_material ? 1 : ex.layer_count,
+	    .hidden_layers      = bake_material ? 0 : ex.hidden_layers,
+	    .naming_error       = ex.naming_error,
+	    .destination        = path,
+	    .color_override     = color_override,
 	};
 	char *manifest = NULL;
 	if (ex.preset->manifest && ex.file_count > 0) {
@@ -1783,6 +1799,10 @@ bool studio_export_begin(char *path, bool bake_material) {
 	}
 	ex.phase = PHASE_WRITING;
 	return true;
+}
+
+bool studio_export_planning(void) {
+	return ex.phase == PHASE_PLANNING;
 }
 
 bool studio_export_layers(char *path, char *base, char *f, char *udim, slot_layer_t_array_t *layers) {

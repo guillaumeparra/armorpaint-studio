@@ -36,6 +36,8 @@ typedef struct {
 	bool                   per_tile;         // l'export est fait par tuile
 	const char *const     *tiles;            // tuiles trouvées sur les objets ("1001"...)
 	int                    tile_count;
+	int                    tiles_without_slot; // au-delà des 64 cases de l'atlas des calques : ni peintes ni exportées
+	const char            *first_without_slot; // la plus petite d'entre elles
 	int                    layer_count;      // calques exportés
 	int                    hidden_layers;    // calques masqués, donc ignorés
 	const char            *naming_error;     // échec du nommage (template ShotGrid...), bloquant

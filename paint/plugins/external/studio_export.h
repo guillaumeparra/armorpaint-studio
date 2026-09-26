@@ -29,6 +29,8 @@ bool studio_export_begin(char *path, bool bake_material);
 bool studio_export_layers(char *path, char *base, char *f, char *udim, struct slot_layer_t_array *layers);
 // Avant "Textures exported" : false -> pas de message upstream (échec, ou fin de la passe à blanc).
 bool studio_export_end(void);
+// Passe à blanc en cours : export_texture_run_layers tait ce que le préflight signale déjà (STUDIO-PATCH(udim-tile-limit)).
+bool studio_export_planning(void);
 
 // Rapport JSON du dernier préflight ("" si aucun).
 const char *studio_export_last_report(void);

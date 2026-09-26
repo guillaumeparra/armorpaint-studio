@@ -225,6 +225,12 @@ static void check_textures(studio_plan_t *plan, studio_report_t *r) {
 }
 
 static void check_udim(studio_plan_t *plan, studio_report_t *r) {
+	if (plan->tiles_without_slot > 0) {
+		studio_report_add(r, true, "udim_tile_limit",
+		                  "%d UDIM tiles past the 64 of the layers, from %s on: they are "
+		                  "not painted",
+		                  plan->tiles_without_slot, plan->first_without_slot != NULL ? plan->first_without_slot : "?");
+	}
 	if (plan->udim_mesh && !plan->per_tile) {
 		studio_report_add(r, false, "udim_not_per_tile", "the mesh has UDIM tiles but the export is not per tile "
 		                  "(Export > Layers: per UDIM tile): all tiles go into one texture set");
