@@ -6,6 +6,7 @@
 #include <OpenColorIO/OpenColorIO.h>
 
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <new>
 #include <string>
@@ -270,6 +271,25 @@ STUDIO_OCIO_EXPORT const char *studio_ocio_lib_view_name(studio_ocio_lib_config_
 			return nullptr;
 		}
 		return cfg->config->getView(display, i);
+	});
+}
+
+STUDIO_OCIO_EXPORT const char *studio_ocio_lib_view_colorspace(studio_ocio_lib_config_t *cfg, const char *display,
+                                                               const char *view) {
+	return guarded<const char *>(nullptr, [&]() -> const char * {
+		if (!check(cfg != nullptr && !is_empty(display) && !is_empty(view), "null config, empty display or view")) {
+			return nullptr;
+		}
+		const char *cs = cfg->config->getDisplayViewColorSpaceName(display, view);
+		if (!check(!is_empty(cs), "unknown display/view")) {
+			return nullptr;
+		}
+		// Vue d'une view_transform partagée : son espace d'affichage porte le nom du display.
+		if (strcmp(cs, OCIO::OCIO_VIEW_USE_DISPLAY_NAME) == 0) {
+			cs = display;
+		}
+		OCIO::ConstColorSpaceRcPtr c = cfg->config->getColorSpace(cs);
+		return check(c != nullptr, "display colorspace not found") ? c->getName() : nullptr;
 	});
 }
 

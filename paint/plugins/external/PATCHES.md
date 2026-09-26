@@ -686,3 +686,45 @@ n'est pas liée.
 **Signes que l'upstream l'a changé.** Un conflit sur `paint/plugins/project.c`, ou un nouveau mécanisme upstream
 pour qu'`external/` déclare ses bibliothèques (par exemple un `add_project(project, "external")` ou un
 `external/project.c` évalué). Le préférer alors et déplacer `.project/project.c` à l'endroit attendu.
+
+---
+
+## ocio-viewport
+
+| | |
+|---|---|
+| Fichiers | `paint/shaders/compositor_pass.shader`, `paint/sources/startup.c` (shader data `compositor_pass`), `paint/sources/uniforms.c` (`uniforms_ext_vec4_link`, `uniforms_ext_tex_link`) |
+| Commit studio | `165d52d0` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-26) |
+| Injection | shader : 1 constante `float4 ocio_lut_data`, 1 texture `ocio_lut_tex`, la fonction `ocio_shaper` et un bloc de lecture de LUT 3D (~35 lignes) ; `startup.c` : la constante et l'unité de texture déclarées (7 constantes, 3 textures) ; `uniforms.c` : des valeurs neutres pour les deux liens (7 lignes) |
+
+**Motif.** Le lot A2 affiche le viewport à travers la transformation display/view/look d'OCIO. Le compositeur
+d'ArmorPaint applique en dur un tonemap filmique (Hejl) qui encode aussi le gamma, ou une LUT `.cube` (8 bits,
+entrée bornée à [0, 1] après un `pow(0.4545)`). Aucun des deux ne peut porter une vue ACES : il faut une LUT 3D
+en half, avec une mise en forme logarithmique de l'entrée HDR, lue par le shader.
+
+**Correctif.** Le shader lit `ocio_lut_data` (nœuds, colonnes et rangées de la grille de tuiles). Si `x > 0` et
+que le viewport fait un tonemap (`tonemap_strength > 0` : modes Lit et Path Trace), la couleur passe par la courbe
+ACEScct puis par la LUT (interpolation trilinéaire : bilinéaire matériel dans deux tuiles, puis mélange), à la place
+du tonemap filmique. La LUT `.cube` s'applique ensuite sur les valeurs d'affichage, sans le `pow(0.4545)` : tonemap
+et `.cube` ne sont plus exclusifs quand OCIO est actif. Le format de la LUT est décrit dans
+`external/studio_ocio_lut.h`, et `studio_ocio_lut_sample()` en est la réplique CPU. `uniforms.c` rend `(0, 0, 0, 0)`
+et la texture `empty_white` : sans plugin, le constant buffer ne garde pas les restes d'un autre draw et le
+compositeur se comporte comme upstream. Le plugin (`external/studio_ocio_view.c`) chaîne `uniforms_vec4_links` et
+`uniforms_tex_links` pour fournir la vraie LUT.
+
+**Test.** `.tests/ocio_view_app.sh` : des couleurs passent par le vrai compositeur (`studio_ocio_view_probe`,
+cible 1 × 1) et sont comparées à PyOpenColorIO (≤ 0,14/255 sur les vues SDR ACES 2.0, Un-tone-mapped, avec look,
+Display P3). Désactivé (`studio_ocio_view_set_enabled(0)`, qui rend les mêmes valeurs neutres que `uniforms.c`),
+la sortie est le tonemap filmique de Hejl. En mode couleur de base, l'entrée ressort telle quelle. Sans le patch, le
+plugin se construit mais le compositeur reste filmique : les comparaisons à PyOpenColorIO échouent.
+
+**Signes que l'upstream l'a changé.** Un conflit sur `compositor_pass.shader` ou sur la shader data
+`compositor_pass` de `startup.c` (constantes ajoutées : l'ordre des constantes fixe leurs offsets, garder
+`ocio_lut_data` en dernier) ; un nouveau tonemap (AgX, ACES) ou une gestion couleur upstream (OCIO, LUT 3D half) :
+comparer, et retirer le patch si l'upstream offre une LUT 3D HDR qu'un plugin peut remplir. Le shader généré se
+vérifie dans `paint/build/out/data/compositor_pass.vert.metal`.
+
+**Non couvert.** Les sphères d'environnement (`render_envsphere.c`, `render_pathsphere.c`, désactivées par défaut)
+gardent leur propre tonemap filmique. Les aperçus de matériaux qui passent par le compositeur en mode Lit suivent
+la vue OCIO, comme le viewport.

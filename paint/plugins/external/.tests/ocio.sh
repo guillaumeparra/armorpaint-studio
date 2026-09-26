@@ -1,5 +1,5 @@
 #!/bin/sh
-# Banc de test du lot A1, hors de l'app, sous ASan/UBSan : gestion couleur OCIO (studio_ocio.c et libstudio_ocio).
+# Banc de test des lots A1 et A2, hors de l'app, sous ASan/UBSan : gestion couleur OCIO (studio_ocio.c et libstudio_ocio).
 #
 # Usage : .tests/ocio.sh [dossier de travail]
 # Variables : OCIO_TEST_CONFIGS="<config> …" configurations de plus à comparer (par exemple celle du studio) ;
@@ -57,6 +57,8 @@ CFLAGS="-std=c11 -O1 -g -Wall -Wno-unused-function $SAN -I$EXT"
 # shellcheck disable=SC2086
 if [ -n "$STATIC" ]; then
 	cc $CFLAGS -DWITH_STUDIO_OCIO_STATIC "$T/ocio_test.c" "$EXT/studio_ocio.c" "$STATIC" -o "$W/ocio_static"
+	cc $CFLAGS -DWITH_STUDIO_OCIO_STATIC "$T/ocio_view_test.c" "$EXT/studio_ocio.c" "$EXT/studio_ocio_lut.c" "$STATIC" \
+		-o "$W/ocio_view"
 fi
 # La variante dlopen appelle aussi l'ABI directement (ref, errors) : liée à la même bibliothèque, que dlopen retrouve.
 # shellcheck disable=SC2086
@@ -121,6 +123,14 @@ for v in ${STATIC:+static} dlopen; do
 	OCIO=$W/garbage.ocio run $v unavailable "garbage.ocio (\$OCIO) rejected"
 	OCIO=$W/cfg/invalid.ocio run $v unavailable "missing_space"
 done
+
+if [ -n "$STATIC" ]; then
+	echo "== LUT du viewport (lot A2)"
+	"$W/ocio_view" unit
+	for c in ocio://studio-config-latest ocio://cg-config-latest; do
+		OCIO=$c "$W/ocio_view" accuracy
+	done
+fi
 
 echo "== dlopen : bibliothèque absente ou incompatible"
 if [ "$(uname -s)" = Darwin ]; then

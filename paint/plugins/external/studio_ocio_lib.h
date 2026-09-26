@@ -15,7 +15,7 @@
 // appeler studio_ocio_lib_apply() en même temps sur le même processeur (sur des pixels disjoints).
 
 // Incrémenté à chaque changement incompatible : studio_ocio.c refuse une bibliothèque d'une autre version.
-#define STUDIO_OCIO_LIB_ABI 2 // 2 : studio_ocio_lib_identify_builtin
+#define STUDIO_OCIO_LIB_ABI 3 // 2 : studio_ocio_lib_identify_builtin ; 3 : studio_ocio_lib_view_colorspace
 
 #ifdef __cplusplus
 extern "C" {
@@ -68,6 +68,8 @@ const char *studio_ocio_lib_default_display(studio_ocio_lib_config_t *cfg);
 const char *studio_ocio_lib_default_view(studio_ocio_lib_config_t *cfg, const char *display);
 int         studio_ocio_lib_view_count(studio_ocio_lib_config_t *cfg, const char *display);
 const char *studio_ocio_lib_view_name(studio_ocio_lib_config_t *cfg, const char *display, int i);
+// Espace d'affichage d'une view (nom canonique), pour son encodage (sdr-video, hdr-video) ; NULL si inconnue.
+const char *studio_ocio_lib_view_colorspace(studio_ocio_lib_config_t *cfg, const char *display, const char *view);
 
 // Processeur CPU d'un espace vers un autre (noms, alias ou rôles).
 studio_ocio_lib_proc_t *studio_ocio_lib_proc_colorspace(studio_ocio_lib_config_t *cfg, const char *src,

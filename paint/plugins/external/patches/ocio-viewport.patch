@@ -1,0 +1,150 @@
+diff --git a/paint/shaders/compositor_pass.shader b/paint/shaders/compositor_pass.shader
+index f5853505..d18b3ff0 100644
+--- a/paint/shaders/compositor_pass.shader
++++ b/paint/shaders/compositor_pass.shader
+@@ -6,6 +6,7 @@ cbuffer constants {
+ 	float lut_size;
+ 	float contrast_strength;
+ 	float gamma_strength;
++	float4 ocio_lut_data; // STUDIO-PATCH(ocio-viewport): nodes, tile columns, tile rows, 0 ; nodes 0 = OCIO off
+ };
+ 
+ sampler sampler_linear;
+@@ -14,6 +15,8 @@ tex2d tex;
+ 
+ tex2d lut_tex;
+ 
++tex2d ocio_lut_tex; // STUDIO-PATCH(ocio-viewport): OCIO display transform, 3D LUT in tiles (plugins/external/studio_ocio_lut.h)
++
+ // tex2d histogram;
+ 
+ struct vert_in {
+@@ -43,6 +46,16 @@ float3 tonemap_filmic(float3 color) {
+ 	return (x * (x * 6.2 + 0.5)) / (x * (x * 6.2 + 1.7) + 0.06);
+ }
+ 
++// STUDIO-PATCH(ocio-viewport): ACEScct curve, the LUT input shaper (studio_ocio_lut_shaper) ; kong writes the literals
++// with 6 decimals, < 1e-6 from the CPU curve, far below a LUT cell (1/128)
++float ocio_shaper(float x) {
++	float y = (log(max(x, 0.0078125)) * 1.4426950408889634 + 9.72) / 17.52;
++	if (x <= 0.0078125) {
++		y = 10.5402377416545 * x + 0.0729055341958355;
++	}
++	return y;
++}
++
+ float4 frag(vert_out input) {
+ 	float4 color = sample_lod(tex, sampler_linear, input.tex, 0.0);
+ 
+@@ -59,9 +72,34 @@ float4 frag(vert_out input) {
+ 	// float expo = 2.0 - clamp(length(sample_lod(histogram, sampler_linear, float2(0.5, 0.5), 0.0).rgb), 0.0, 1.0);
+ 	// color.rgb *= pow(expo, auto_exposure_strength * 2.0);
+ 
++	// STUDIO-PATCH(ocio-viewport): OCIO display transform instead of the filmic tonemap, then the .cube lut on the display
++	// values ; same sampling as studio_ocio_lut_sample
++	bool ocio = constants.ocio_lut_data.x > 0.0 && constants.tonemap_strength > 0.0;
++	if (ocio) {
++		float n = constants.ocio_lut_data.x;
++		float cols = constants.ocio_lut_data.y;
++		float r_o = min(max(ocio_shaper(color.x), 0.0), 1.0) * (n - 1.0);
++		float g_o = min(max(ocio_shaper(color.y), 0.0), 1.0) * (n - 1.0);
++		float b_o = min(max(ocio_shaper(color.z), 0.0), 1.0) * (n - 1.0);
++		float c0 = floor(b_o);
++		float c1 = min(c0 + 1.0, n - 1.0);
++		float c_frac = b_o - c0;
++		float ty0 = floor((c0 + 0.5) / cols);
++		float ty1 = floor((c1 + 0.5) / cols);
++		float w = cols * n;
++		float h = constants.ocio_lut_data.z * n;
++		float2 uv0 = float2(((c0 - ty0 * cols) * n + r_o + 0.5) / w, (ty0 * n + g_o + 0.5) / h);
++		float2 uv1 = float2(((c1 - ty1 * cols) * n + r_o + 0.5) / w, (ty1 * n + g_o + 0.5) / h);
++		float4 o0 = sample_lod(ocio_lut_tex, sampler_linear, uv0, 0.0);
++		float4 o1 = sample_lod(ocio_lut_tex, sampler_linear, uv1, 0.0);
++		color.rgb = lerp(o0.rgb, o1.rgb, float3(c_frac, c_frac, c_frac));
++	}
++
+ 	if (constants.lut_size > 0.0) {
+ 		// .cube lut color grading
+-		color.rgb = pow(max(color.rgb, float3(0.0, 0.0, 0.0)), float3(0.4545, 0.4545, 0.4545));
++		if (!ocio) { // STUDIO-PATCH(ocio-viewport): OCIO output is already display encoded
++			color.rgb = pow(max(color.rgb, float3(0.0, 0.0, 0.0)), float3(0.4545, 0.4545, 0.4545));
++		}
+ 		float r_s = min(max(color.x, 0.0), 1.0) * (constants.lut_size - 1.0);
+ 		float g_s = min(max(color.y, 0.0), 1.0) * (constants.lut_size - 1.0);
+ 		float b_s = min(max(color.z, 0.0), 1.0) * (constants.lut_size - 1.0);
+@@ -76,7 +114,7 @@ float4 frag(vert_out input) {
+ 		float4 s1 = sample_lod(lut_tex, sampler_linear, float2(u1, v), 0.0);
+ 		color.rgb = lerp(s0.rgb, s1.rgb, float3(b_frac, b_frac, b_frac));
+ 	}
+-	else {
++	else if (!ocio) { // STUDIO-PATCH(ocio-viewport)
+ 		// Tonemap with gamma
+ 		color.rgb = lerp(color.rgb, tonemap_filmic(color.rgb), constants.tonemap_strength);
+ 	}
+diff --git a/paint/sources/startup.c b/paint/sources/startup.c
+index e27e821f..801bf4e6 100644
+--- a/paint/sources/startup.c
++++ b/paint/sources/startup.c
+@@ -3024,7 +3024,7 @@ scene_t *startup_get_scene(void) {
+ 				ve->data                       = "float2";
+ 				sc->vertex_elements->buffer[0] = ve;
+ 			}
+-			sc->constants = (shader_const_t_array_t *)any_array_create(6);
++			sc->constants = (shader_const_t_array_t *)any_array_create(7); // STUDIO-PATCH(ocio-viewport): 7, was 6
+ 			{
+ 				shader_const_t *c        = (shader_const_t *)calloc(1, sizeof(shader_const_t));
+ 				c->name                  = "vignette_strength";
+@@ -3067,7 +3067,14 @@ scene_t *startup_get_scene(void) {
+ 				c->link                  = "_gamma_strength";
+ 				sc->constants->buffer[5] = c;
+ 			}
+-			sc->texture_units = (tex_unit_t_array_t *)any_array_create(2);
++			{ // STUDIO-PATCH(ocio-viewport): OCIO display LUT, linked by plugins/external/studio_ocio_view.c
++				shader_const_t *c        = (shader_const_t *)calloc(1, sizeof(shader_const_t));
++				c->name                  = "ocio_lut_data";
++				c->type                  = "float4";
++				c->link                  = "_ocio_lut_data";
++				sc->constants->buffer[6] = c;
++			}
++			sc->texture_units = (tex_unit_t_array_t *)any_array_create(3); // STUDIO-PATCH(ocio-viewport): 3, was 2
+ 			{
+ 				tex_unit_t *tu               = (tex_unit_t *)calloc(1, sizeof(tex_unit_t));
+ 				tu->name                     = "tex";
+@@ -3079,6 +3086,12 @@ scene_t *startup_get_scene(void) {
+ 				tu->link                     = "_lut_tex";
+ 				sc->texture_units->buffer[1] = tu;
+ 			}
++			{ // STUDIO-PATCH(ocio-viewport)
++				tex_unit_t *tu               = (tex_unit_t *)calloc(1, sizeof(tex_unit_t));
++				tu->name                     = "ocio_lut_tex";
++				tu->link                     = "_ocio_lut_tex";
++				sc->texture_units->buffer[2] = tu;
++			}
+ 			sd->contexts->buffer[0] = sc;
+ 		}
+ 		scene->shader_datas->buffer[4] = sd;
+diff --git a/paint/sources/uniforms.c b/paint/sources/uniforms.c
+index 2fa0abc3..ac01b16a 100644
+--- a/paint/sources/uniforms.c
++++ b/paint/sources/uniforms.c
+@@ -322,6 +322,9 @@ vec4_t uniforms_ext_vec4_link(object_t *object, shader_data_t *mat, char *link)
+ 	else if (string_equals(link, "_select_mask")) {
+ 		return (vec4_t){g_context->select_x1, g_context->select_y1, g_context->select_x2, g_context->select_y2};
+ 	}
++	else if (string_equals(link, "_ocio_lut_data")) { // STUDIO-PATCH(ocio-viewport): OCIO off unless a plugin links it
++		return (vec4_t){0.0, 0.0, 0.0, 0.0};
++	}
+ 
+ 	return vec4_nan();
+ }
+@@ -527,6 +530,10 @@ gpu_texture_t *uniforms_ext_tex_link(object_t *object, shader_data_t *mat, char
+ 		}
+ 		return lut_image;
+ 	}
++	if (string_equals(link, "_ocio_lut_tex")) { // STUDIO-PATCH(ocio-viewport): unused while _ocio_lut_data.x is 0
++		render_target_t *rt = any_map_get(render_path_render_targets, "empty_white");
++		return rt->_image;
++	}
+ 	return NULL;
+ }
+ 

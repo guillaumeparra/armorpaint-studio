@@ -39,6 +39,7 @@ char *path_data(void);
 	X(const char *, default_view, (studio_ocio_lib_config_t *, const char *))                                          \
 	X(int, view_count, (studio_ocio_lib_config_t *, const char *))                                                     \
 	X(const char *, view_name, (studio_ocio_lib_config_t *, const char *, int))                                        \
+	X(const char *, view_colorspace, (studio_ocio_lib_config_t *, const char *, const char *))                         \
 	X(studio_ocio_lib_proc_t *, proc_colorspace, (studio_ocio_lib_config_t *, const char *, const char *))             \
 	X(studio_ocio_lib_proc_t *, proc_display,                                                                          \
 	  (studio_ocio_lib_config_t *, const char *, const char *, const char *, const char *, int))                       \
@@ -54,7 +55,8 @@ static struct {
 } lib;
 #undef STUDIO_OCIO_FIELD
 
-// Processeurs par couple (src, dst) tels que demandés. Un échec est gardé aussi (proc NULL) : il n'est journalisé
+// Processeurs par couple (src, dst) tels que demandés ; pour un processeur d'affichage, dst est la clé
+// "\x1fdisplay\x1fview\x1flook" (aucun nom d'espace ne commence par \x1f). Un échec est gardé aussi (proc NULL) : il n'est journalisé
 // qu'une fois, et un nom inconnu ne recrée pas un processeur à chaque ligne d'une texture.
 #define CACHE_MAX 64
 typedef struct {
@@ -180,8 +182,11 @@ static void find_working_space(void) {
 	}
 }
 
+static int generation; // studio_ocio_generation
+
 bool studio_ocio_reload(const char *config_path) {
 	pthread_mutex_lock(&mutex);
+	generation++;
 	if (lib.loaded) {
 		unload_config();
 	}
@@ -229,6 +234,10 @@ void studio_ocio_shutdown(void) {
 	}
 	snprintf(status, sizeof(status), "OCIO shut down");
 	pthread_mutex_unlock(&mutex);
+}
+
+int studio_ocio_generation(void) {
+	return generation;
 }
 
 bool studio_ocio_ready(void) {
@@ -308,6 +317,19 @@ const char *studio_ocio_view_name(const char *display, int i) {
 	return config != NULL ? lib.view_name(config, display, i) : NULL;
 }
 
+const char *studio_ocio_view_colorspace(const char *display, const char *view) {
+	return config != NULL ? lib.view_colorspace(config, display, view) : NULL;
+}
+
+int studio_ocio_view_is_hdr(const char *display, const char *view) {
+	const char *cs = studio_ocio_view_colorspace(display, view);
+	if (cs == NULL) {
+		return -1;
+	}
+	const char *enc = lib.encoding(config, cs);
+	return enc != NULL && (strcmp(enc, "hdr-video") == 0 || strcmp(enc, "edr-video") == 0) ? 1 : 0;
+}
+
 const char *studio_ocio_working_space(void) {
 	return config != NULL ? working : NULL;
 }
@@ -336,7 +358,9 @@ const char *studio_ocio_colorspace_from_path(const char *p) {
 	return config != NULL ? lib.colorspace_from_path(config, p) : NULL;
 }
 
-static studio_ocio_lib_proc_t *get_proc(const char *src, const char *dst) {
+// display NULL : processeur d'espace à espace src → dst ; sinon processeur d'affichage, dst étant sa clé.
+static studio_ocio_lib_proc_t *get_proc_ex(const char *src, const char *dst, const char *display, const char *view,
+                                           const char *look) {
 	if (config == NULL || src == NULL || dst == NULL) {
 		return NULL;
 	}
@@ -349,9 +373,18 @@ static studio_ocio_lib_proc_t *get_proc(const char *src, const char *dst) {
 			return proc;
 		}
 	}
-	proc = lib.proc_colorspace(config, src, dst);
-	if (proc == NULL) {
-		iron_log("studio: ocio: no transform from \"%s\" to \"%s\": %s", src, dst, lib.error());
+	if (display != NULL) {
+		proc = lib.proc_display(config, src, display, view, look, 0);
+		if (proc == NULL) {
+			iron_log("studio: ocio: no display transform from \"%s\" to \"%s\" / \"%s\" (look \"%s\"): %s", src,
+			         display, view, look != NULL ? look : "", lib.error());
+		}
+	}
+	else {
+		proc = lib.proc_colorspace(config, src, dst);
+		if (proc == NULL) {
+			iron_log("studio: ocio: no transform from \"%s\" to \"%s\": %s", src, dst, lib.error());
+		}
 	}
 	if (cache_len == CACHE_MAX) { // plein : on évince le plus ancien (en pratique, quelques couples par export)
 		if (cache[0].proc != NULL) {
@@ -379,6 +412,22 @@ static studio_ocio_lib_proc_t *get_proc(const char *src, const char *dst) {
 	return proc;
 }
 
+static studio_ocio_lib_proc_t *get_proc(const char *src, const char *dst) {
+	return get_proc_ex(src, dst, NULL, NULL, NULL);
+}
+
+static studio_ocio_lib_proc_t *get_display_proc(const char *src, const char *display, const char *view, const char *look) {
+	if (display == NULL || view == NULL) {
+		return NULL;
+	}
+	char key[1024];
+	int  len = snprintf(key, sizeof(key), "\x1f%s\x1f%s\x1f%s", display, view, look != NULL ? look : "");
+	if (len < 0 || len >= (int)sizeof(key)) {
+		return NULL;
+	}
+	return get_proc_ex(src, key, display, view, look);
+}
+
 bool studio_ocio_transform(float *pixels, int width, int height, int channels, const char *src, const char *dst) {
 	if (pixels == NULL || width <= 0 || height <= 0 || (channels != 3 && channels != 4)) {
 		return false;
@@ -404,6 +453,31 @@ bool studio_ocio_transform(float *pixels, int width, int height, int channels, c
 
 const char *studio_ocio_transform_id(const char *src, const char *dst) {
 	studio_ocio_lib_proc_t *proc = get_proc(src, dst);
+	return proc != NULL ? lib.proc_cache_id(proc) : NULL;
+}
+
+bool studio_ocio_display_transform(float *pixels, int width, int height, int channels, const char *src,
+                                   const char *display, const char *view, const char *look) {
+	if (pixels == NULL || width <= 0 || height <= 0 || (channels != 3 && channels != 4)) {
+		return false;
+	}
+	studio_ocio_lib_proc_t *proc = get_display_proc(src, display, view, look);
+	if (proc == NULL) {
+		return false;
+	}
+	if (lib.proc_is_noop(proc) == 1) {
+		return true;
+	}
+	if (!lib.apply(proc, pixels, width, height, channels, 0)) {
+		iron_log("studio: ocio: display transform \"%s\" -> \"%s\" / \"%s\" failed: %s", src, display, view,
+		         lib.error());
+		return false;
+	}
+	return true;
+}
+
+const char *studio_ocio_display_transform_id(const char *src, const char *display, const char *view, const char *look) {
+	studio_ocio_lib_proc_t *proc = get_display_proc(src, display, view, look);
 	return proc != NULL ? lib.proc_cache_id(proc) : NULL;
 }
 

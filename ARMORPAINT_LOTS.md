@@ -114,7 +114,7 @@ OCIO est du C++ ; le projet est du C. Il faut une couche `extern "C"`.
 - **Différent du plan.** Le build passe par `.project/project.c` et non par le bloc `external` de `project.js`.
   `studio_ocio_transform` ne prend que du float32 : les exports 8/16 bits convertissent avant l'encodage (A3).
 
-### A2 — Viewport : display transform · **5 j**
+### A2 — Viewport : display transform · **5 j** — ✅ **fait le 2026-09-26** (macOS)
 
 - Point d'injection : le compositor. OCIO génère du GLSL ; le projet utilise `kong` → MSL/HLSL/SPIR-V. **Deux options** :
   - **a)** Utiliser la LUT 3D générée par OCIO (`getGpuLut3D`) et l'injecter dans le chemin LUT existant, en remplaçant le stockage 8 bits par du **RGBA half ou float** et en supprimant le clamp 0-1 ([import_lut.c:78](paint/sources/io/import_lut.c:78), [compositor_pass.kong:67](paint/shaders/compositor_pass.kong:67)). **Recommandé** — réutilise l'existant, ~3 j.
@@ -126,6 +126,34 @@ OCIO est du C++ ; le projet est du C. Il faut une couche `extern "C"`.
 **Injection upstream** : ~3 lignes dans `compositor_pass.kong` + 2 dans `uniforms.c`.
 
 **Livrable** : le viewport affiche via la chaîne OCIO du studio ; changement de view à chaud.
+
+✅ **Fait le 2026-09-26** (macOS).
+- **Rendu.** En modes Lit et Path Trace, le compositeur remplace le tonemap filmique par la transformation
+  display/view/look d'OCIO, depuis l'espace de travail. Elle est calculée sur le CPU par le processeur exact d'OCIO
+  en une LUT 3D 129³ RGBA half, avec une mise en forme ACEScct de l'entrée HDR (`external/studio_ocio_lut.c`), puis
+  interpolée par le shader. Environ 0,1 s par calcul. La LUT `.cube` s'applique après, sur les valeurs d'affichage.
+- **Patch upstream `ocio-viewport`** : `compositor_pass.shader`, `startup.c` (une constante, une texture) et
+  `uniforms.c` (valeurs neutres : sans plugin, le compositeur est celui d'upstream). Le plugin
+  (`external/studio_ocio_view.c`) chaîne les liens d'uniformes.
+- **UI** : menu Color (case OCIO Viewport, sous-menus Display, View, Look ; vues HDR marquées). Variables
+  `STUDIO_OCIO_VIEWPORT`, `STUDIO_OCIO_DISPLAY`, `_VIEW`, `_LOOK` ; API minic. Nouvelle fonction de l'ABI (v3) :
+  l'espace d'affichage d'une vue, qui repère les vues HDR.
+- **Précision** contre OCIO exact : gris ≤ 0,3/255 ; 99,9 % des couleurs ≤ 2,3/255 en sRGB ACES 2.0 (≤ 4/255 sur
+  les autres displays SDR) ; maximum 8,9/255 en sRGB (17,5/255 en P3-D65) sur des couleurs très saturées, que la
+  compression de gamut ACES 2.0 traite selon la teinte. Tableau complet dans le README.
+- **Tests.** `.tests/ocio.sh` lance `ocio_view_test.c` (half, courbe, tuiles, interpolation exacte d'une LUT
+  linéaire, précision de chaque view sur 400 000 couleurs, configurations studio et CG). `.tests/ocio_view_app.sh`,
+  dans l'app : des couleurs passent par le vrai compositeur et sont comparées à PyOpenColorIO (≤ 0,14/255), puis le
+  choix, les erreurs, le retour au filmique, le mode couleur de base, le rechargement de configuration et les
+  variables d'environnement.
+- **Différent du plan.**
+  - Pas de LUT générée par OCIO : `getGpuLut3D` est l'API d'OCIO v1, et le shader GPU d'OCIO v2 pour ACES 2.0
+    est analytique (320 lignes, deux tables 1D), sans LUT 3D. La LUT est échantillonnée depuis le processeur CPU,
+    pour toute vue et tout look.
+  - La LUT `.cube` d'upstream n'est pas modifiée : la LUT OCIO a sa propre texture half et sa propre lecture.
+  - Menu Color dans la barre de menus plutôt que la barre de statut (le point d'injection `menubar-hook` existait).
+  - Le choix n'est pas mémorisé : préférences et projet au lot A5. Les sphères d'environnement gardent leur tonemap
+    filmique. Traduire le shader GPU d'OCIO en kong (sans erreur de LUT) reste une piste pour A6, si un show en a besoin.
 
 ### A3 — Export : transform par texture · **6 j** — ✅ **fait le 2026-09-26** (macOS)
 

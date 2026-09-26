@@ -136,7 +136,9 @@ def main():
         out.append("display\t" + d)
         out.append("default_view\t%s\t%s" % (d, cfg.getDefaultView(d)))
         for v in cfg.getViews(d):
-            out.append("view\t%s\t%s" % (d, v))
+            cs = cfg.getDisplayViewColorSpaceName(d, v)
+            cs = cfg.getColorSpace(d if cs == OCIO.OCIO_VIEW_USE_DISPLAY_NAME else cs).getName()
+            out.append("view\t%s\t%s\t%s" % (d, v, cs))
     out.append("default_display\t" + cfg.getDefaultDisplay())
     for look in cfg.getLookNames():
         out.append("look\t" + look)

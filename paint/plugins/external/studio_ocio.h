@@ -22,6 +22,9 @@ void studio_ocio_init(void); // external_init() : charge la bibliothèque et la 
 // Recharge la configuration : config_path NULL ou "" pour l'ordre par défaut. Rend studio_ocio_ready().
 bool        studio_ocio_reload(const char *config_path);
 void        studio_ocio_shutdown(void);
+// Incrémenté à chaque rechargement : les noms rendus avant (displays, views…) ne sont plus valides, les caches des
+// appelants (LUT du viewport) sont à refaire.
+int         studio_ocio_generation(void);
 bool        studio_ocio_ready(void);
 const char *studio_ocio_status(void);        // état lisible : versions et configuration, ou la raison de l'échec
 const char *studio_ocio_config_source(void); // fichier ou URI chargé ; "" si aucun
@@ -40,6 +43,11 @@ const char *studio_ocio_display_default(void);
 const char *studio_ocio_view_default(const char *display);
 int         studio_ocio_view_count(const char *display);
 const char *studio_ocio_view_name(const char *display, int i);
+const char *studio_ocio_view_colorspace(const char *display, const char *view); // espace d'affichage ; NULL si inconnue
+// 1 si l'espace d'affichage de la view est encodé hdr-video (PQ, HLG…) ou edr-video (Display P3 HDR d'Apple, au-delà
+// de 1), 0 sinon, -1 si inconnue. Le viewport
+// d'ArmorPaint sort en 8 bits SDR : une view HDR n'y a pas de sens.
+int studio_ocio_view_is_hdr(const char *display, const char *view);
 
 // Espace de travail : celui des couleurs d'ArmorPaint une fois décodées. Le sélecteur de couleur, les calques et le
 // viewport upstream travaillent en primaires Rec.709 encodées gamma 2.2 : décodées, c'est « Linear Rec.709 (sRGB) »,
@@ -61,3 +69,9 @@ const char *studio_ocio_colorspace_from_path(const char *p); // file_rules de la
 bool studio_ocio_transform(float *pixels, int width, int height, int channels, const char *src, const char *dst);
 // Empreinte de la transformation src → dst (manifeste d'export) ; NULL si indisponible.
 const char *studio_ocio_transform_id(const char *src, const char *dst);
+
+// Lot A2 : transformation d'affichage, de l'espace src vers display/view, avec un look (NULL ou "" : aucun). Même
+// contrat que studio_ocio_transform ; le cache est commun.
+bool        studio_ocio_display_transform(float *pixels, int width, int height, int channels, const char *src,
+                                          const char *display, const char *view, const char *look);
+const char *studio_ocio_display_transform_id(const char *src, const char *display, const char *view, const char *look);

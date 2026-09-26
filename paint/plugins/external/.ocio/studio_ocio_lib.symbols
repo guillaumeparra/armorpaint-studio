@@ -26,3 +26,4 @@ _studio_ocio_lib_proc_is_noop
 _studio_ocio_lib_resolve
 _studio_ocio_lib_view_count
 _studio_ocio_lib_view_name
+_studio_ocio_lib_view_colorspace

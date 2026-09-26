@@ -4,6 +4,7 @@
 #include "studio_export_naming.h"
 #include "studio_exr.h"
 #include "studio_ocio.h"
+#include "studio_ocio_view.h"
 #include "studio_shotgrid.h"
 #include "studio_workfiles.h"
 
@@ -14,6 +15,7 @@ void external_init(void) {
 	iron_log("studio: external %s loaded", STUDIO_VERSION);
 	studio_exr_init();
 	studio_ocio_init();
+	studio_ocio_view_init();
 	studio_exec_init();
 	studio_shotgrid_init();
 	studio_workfiles_init();

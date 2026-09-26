@@ -226,6 +226,8 @@ static int mode_ref(const char *path) {
 			      s(studio_ocio_view_name(f[1], view_index)), f[2]);
 			view_index++;
 			CHECK(studio_ocio_view_count(f[1]) >= view_index, "view count of %s", f[1]);
+			CHECK(same(studio_ocio_view_colorspace(f[1], f[2]), f[3]), "display colorspace of %s / %s: %s, expected %s",
+			      f[1], f[2], s(studio_ocio_view_colorspace(f[1], f[2])), f[3]);
 		}
 		else if (strcmp(f[0], "from_path") == 0) {
 			CHECK(same(studio_ocio_colorspace_from_path(f[1]), f[2]), "from_path %s: %s, expected %s", f[1],
@@ -314,6 +316,11 @@ static int mode_errors(void) {
 	      "colorspace index out of range");
 	CHECK(studio_ocio_view_count(NULL) == 0 && studio_ocio_view_count("nope") == 0, "views of an invalid display");
 	CHECK(studio_ocio_view_name("nope", 0) == NULL && studio_ocio_view_default(NULL) == NULL, "view of an invalid display");
+	CHECK(studio_ocio_view_colorspace("nope", "x") == NULL && studio_ocio_view_is_hdr("nope", "x") == -1,
+	      "display colorspace of an invalid display");
+	CHECK(studio_ocio_view_is_hdr("sRGB - Display", "ACES 2.0 - SDR 100 nits (Rec.709)") == 0 &&
+	          studio_ocio_view_is_hdr("Rec.2100-PQ - Display", "ACES 2.0 - HDR 1000 nits (P3 D65)") == 1,
+	      "view_is_hdr");
 	CHECK(studio_ocio_colorspace_from_path(NULL) == NULL, "from_path(NULL)");
 	float special[8] = {NAN, INFINITY, -INFINITY, 1, 1e38f, -1e38f, 1e-45f, 0};
 	CHECK(studio_ocio_transform(special, 2, 1, 4, "ACEScg", "sRGB - Texture"), "NaN/Inf rejected");
@@ -353,6 +360,12 @@ static int mode_errors(void) {
 	CHECK(studio_ocio_lib_default_view(c, NULL) == NULL && has_error(), "default_view(NULL)");
 	CHECK(studio_ocio_lib_view_count(c, "") == -1 && has_error(), "view_count(\"\")");
 	CHECK(studio_ocio_lib_view_name(c, "sRGB - Display", 99) == NULL && has_error(), "view_name(99)");
+	CHECK(studio_ocio_lib_view_colorspace(c, "sRGB - Display", "nope") == NULL && has_error(), "view_colorspace(nope)");
+	CHECK(studio_ocio_lib_view_colorspace(c, NULL, "x") == NULL && has_error(), "view_colorspace(NULL)");
+	// Vue partagée à <USE_DISPLAY_NAME> : l'espace porte le nom de l'affichage.
+	CHECK(same(studio_ocio_lib_view_colorspace(c, "sRGB - Display", "ACES 2.0 - SDR 100 nits (Rec.709)"), "sRGB - Display"),
+	      "view_colorspace of a shared view: %s",
+	      s(studio_ocio_lib_view_colorspace(c, "sRGB - Display", "ACES 2.0 - SDR 100 nits (Rec.709)")));
 	CHECK(studio_ocio_lib_proc_colorspace(c, "ACEScg", "nope") == NULL && strstr(studio_ocio_lib_error(), "nope") != NULL,
 	      "unknown dst: %s", studio_ocio_lib_error());
 	CHECK(studio_ocio_lib_proc_colorspace(NULL, "ACEScg", "Raw") == NULL && has_error(), "proc on NULL config");
