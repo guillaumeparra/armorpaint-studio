@@ -517,7 +517,7 @@ worktree) :
   **0 plantage, 0 UB** (studio `252f9fc3` sur le même fuzz : 620 `signed integer overflow` en `iron_obj.c:140`,
   upstream : 1 393 plantages) ; 3 000 mutations : 0 plantage, 0 UB.
 
-Dans l'app (chemins absolus : un chemin relatif ne se résout pas et fait planter l'import, bug upstream distinct) :
+Dans l'app (chemins absolus ; un chemin relatif faisait planter l'import avant [args-cwd-paths](#args-cwd-paths)) :
 
 ```bash
 ArmorPaint <w>/exp/grid.obj --background --script .tests/obj_scale.c       # comme grid.ref.obj
@@ -559,3 +559,103 @@ du dossier.
 
 **Signes que l'upstream l'a changé.** Un conflit sur `.gitignore` au merge d'`upstream`. Garder alors leurs nouvelles
 lignes, et le commentaire marqueur à la place de celle d'`external`.
+
+---
+
+## args-cwd-paths
+
+| | |
+|---|---|
+| Fichier | `paint/sources/args.c` (`args_path`, include `<unistd.h>`) |
+| Commit studio | `d7e5bfb7` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-26) |
+| Trouvé | 2026-09-26, `ArmorPaint --background grid.obj` (chemin relatif) : EXC_BAD_ACCESS dans `obj_parse` (rc 139) |
+
+**Bug.** Un chemin relatif passé en ligne de commande n'est jamais résolu contre le dossier courant de l'appelant.
+`args_path()` transforme `grid.obj` en `./grid.obj`, puis `iron_file_reader_open()` le résout contre le dossier de
+l'app : `Contents/Resources/out/` sur macOS, le dossier du binaire (`fileslocation`) sur Linux et Windows. Le fichier
+n'est pas trouvé, et l'import plante sur le blob NULL (voir [import-null-guards](#import-null-guards)). Même cause
+pour `--script foo.c` (« Invalid script path ») et un projet `.arm` relatif. Seuls les dossiers d'export
+(`--export-textures`, `--export-mesh`), écrits par `fopen` direct, suivaient le dossier courant.
+
+**Correctif.** Sur Windows, Linux et macOS, `args_path()` préfixe un chemin non absolu par `getcwd()`
+(`GetCurrentDirectoryW` converti en UTF-8 sur Windows) et un `/` ; un `./` de tête est retiré. Les chemins absolus
+sont inchangés. Si le dossier courant est illisible (ou plus long que 1 023 caractères), et sur Android, iOS et
+wasm, le comportement upstream est gardé.
+
+Deux patches touchent `args.c` : `background-export.patch` (bas du fichier) et celui-ci (`args_path()`, en haut),
+indépendants. Pour régénérer celui-ci : `git diff d7e5bfb7^ d7e5bfb7 -- paint/sources/args.c` (ou le commit qui
+l'a refait).
+
+**Test.** `.tests/import_app.sh` (section « chemins relatifs ») : `grid.obj --script names.c`,
+`./grid.obj --script ./names.c` et, depuis un sous-dossier, `../grid.obj --script ../names.c` importent la grille
+(`root=grid idx=6`). Avant le patch : rc 139 pour les trois. Vérifié aussi à la main : `--export-textures png
+generic out` relatif écrit les 5 mêmes PNG dans `./out` qu'avant le patch.
+
+**Signes que l'upstream l'a corrigé.** `args_path()` appelle `getcwd`, `realpath` ou un équivalent, ou
+`iron_file_reader_open()` ne préfixe plus les chemins relatifs par le dossier de l'app. Rejouer la section
+« chemins relatifs » de `.tests/import_app.sh` sur `upstream` sans le patch.
+
+**Non couvert.**
+- Changement de comportement sur Linux et Windows : un chemin relatif désignait jusqu'ici un fichier du dossier
+  du binaire, il désigne maintenant un fichier du dossier courant (comme sur tout outil en ligne de commande).
+- Lancé par `open -a ArmorPaint --args grid.obj` (macOS), le dossier courant est `/` : passer des chemins absolus.
+- Testé sur macOS uniquement ; la branche Windows (`GetCurrentDirectoryW`) n'a pas été compilée.
+
+---
+
+## import-null-guards
+
+| | |
+|---|---|
+| Fichier | `paint/sources/io/import_mesh.c` (`import_mesh_run`), `paint/sources/io/import_obj.c` (`import_obj_run`), `paint/sources/io/import_texture.c` (`import_texture_run`), `paint/plugins/io_fbx/io_fbx.c` (`io_fbx_parse`) |
+| Commit studio | `33bd8667` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-26) |
+| Trouvé | 2026-09-26, même commande qu'[args-cwd-paths](#args-cwd-paths) : `obj_parse` (`iron_obj.c:269`) ← `import_obj_parse` ← `import_mesh_run` ← `import_asset_run` ← `args_run_on_next_frame` |
+
+**Bug.** `data_get_blob()` rend NULL pour un fichier absent ou illisible, et la plupart des importeurs
+déréférencent le blob sans le vérifier. Au 2026-09-26, en `--background` avec un chemin absolu :
+- mesh absent ou illisible (`chmod 000`) : `.obj` (`obj_parse`), `.fbx` (`import_fbx`), `.gltf` / `.glb`
+  (`import_gltf_glb`) : rc 139 ;
+- texture absente : `.psd`, `.tiff`, `.svg` (importeurs de `plugins.c`) : rc 139 ;
+- fichier lisible mais invalide : `.gltf` / `.glb` rejeté par cgltf, `io_gltf_parse()` rend NULL et
+  `import_mesh_run()` lit `mesh->name` ; `.fbx` rejeté par ufbx, `io_fbx_parse()` lit la scène NULL : rc 139.
+
+Déjà sains : `.arm` (`import_arm_run_project` affiche « Could not open file »), `.png` / `.hdr`
+(l'importeur par défaut rend NULL, `import_texture_run()` s'arrête), `.exr` (importeur studio : « EXR import:
+cannot read »), `.blend` (vérifie l'OBJ exporté par Blender), l'API de script (`script_import_asset`,
+`script_append_mesh` testent `iron_file_exists`).
+
+**Correctif.**
+- `import_mesh_run()` vérifie, avant de choisir l'importeur, que le fichier s'ouvre
+  (`iron_file_exists(data_resolve_path(path))`, la même résolution que `data_get_blob()`), sinon affiche
+  « Could not open file <path>. », comme `import_arm_run_project()`. Couvre tous les formats de mesh, plugins et
+  importeurs de script compris, et tous les appelants (`import_asset_run`, boîte d'import, `project_reimport_mesh`
+  sur un mesh déplacé).
+- `import_mesh_run()` affiche « Could not import file <path>. » si l'importeur rend NULL pour la première part ;
+  `io_fbx_parse()` rend NULL quand `ufbx_load_memory()` échoue.
+- `import_obj_run()` vérifie son blob (appelé aussi par l'import `.blend`).
+- `import_texture_run()` fait la même vérification avant d'appeler un importeur de plugin (pas pour l'importeur
+  par défaut ni pour une texture déjà en cache, ce qui garde les calques PSD, mis en cache sous un chemin fictif).
+
+**Test.** `.tests/import_app.sh` : fichiers absents (`obj fbx gltf glb psd tiff svg`) et `noread.obj`
+(`chmod 000`) → « Could not open file », rc 0 ; `bad.gltf`, `bad.glb`, `bad.fbx` (contenu `garbage`) → « Could not
+import file », rc 0 ; non-régression : `grid.obj`, `tri.gltf`, `tri.glb`, `quad.fbx` (FBX ASCII) donnent les
+mêmes objets et nombres d'indices, `red.png` / `.svg` / `.tiff` / `.psd` (générés par `sips`) « Texture imported ».
+Au 2026-09-26 : tout passe ; le même script sur le build d'avant les deux patches (`70cece4b`) : 14 échecs, tous en
+rc 139, et la section de non-régression identique.
+
+**Signes que l'upstream l'a corrigé.** `import_obj_run()` ou les importeurs de `paint/plugins/plugins.c` testent
+`b == NULL`, ou `data_get_blob()` ne rend plus NULL (blob vide, erreur remontée). Rejouer `.tests/import_app.sh`
+sur `upstream` sans le patch.
+
+**Non couvert.**
+- Les importeurs de `paint/plugins/plugins.c` et `paint/assets/plugins/import_stl.c` ne testent toujours pas leur
+  blob : protégés seulement par la vérification en amont (`import_mesh_run`, `import_texture_run`). Un nouvel
+  appelant qui ne passerait pas par ces fonctions planterait encore.
+- Fichier supprimé entre la vérification et la lecture : non traité.
+- Parts suivantes (`has_next`) : un importeur qui rendrait NULL après la première part planterait encore.
+- Un `.fbx` sans aucun mesh valide (`raw->name` NULL) n'a pas été testé.
+- Polices (`import_font_run`) et sons (`import_sound_run`) ne vérifient pas le fichier ; ils ne sont joignables que
+  par glisser-déposer ou le navigateur de fichiers (la ligne de commande ne les accepte pas, l'API de script teste
+  `iron_file_exists`), donc avec un fichier qui existe.

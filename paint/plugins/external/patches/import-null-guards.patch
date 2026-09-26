@@ -1,0 +1,72 @@
+diff --git a/paint/plugins/io_fbx/io_fbx.c b/paint/plugins/io_fbx/io_fbx.c
+index 04eed473..4c3dabaf 100644
+--- a/paint/plugins/io_fbx/io_fbx.c
++++ b/paint/plugins/io_fbx/io_fbx.c
+@@ -503,6 +503,9 @@ void *io_fbx_parse(char *buf, size_t size) {
+ 	if (active_base_scene == NULL) {
+ 		ufbx_load_opts opts = {.generate_missing_normals = true};
+ 		active_base_scene = active_eval_scene = ufbx_load_memory(buf, size, &opts, NULL);
++		if (active_base_scene == NULL) { // STUDIO-PATCH(import-null-guards): not an fbx, see external/PATCHES.md
++			return NULL;
++		}
+ 		active_tex1                           = true;
+ 		for (size_t i = 0; i < active_eval_scene->nodes.count; ++i) {
+ 			ufbx_node *n = active_eval_scene->nodes.data[i];
+diff --git a/paint/sources/io/import_mesh.c b/paint/sources/io/import_mesh.c
+index cdebffa0..8921b952 100644
+--- a/paint/sources/io/import_mesh.c
++++ b/paint/sources/io/import_mesh.c
+@@ -18,6 +18,12 @@ void import_mesh_run(char *path, bool _clear_layers, bool replace_existing, bool
+ 		}
+ 	}
+ 
++	// STUDIO-PATCH(import-null-guards): the importers dereference the blob without checking it, see external/PATCHES.md
++	if (!iron_file_exists(data_resolve_path(path))) {
++		console_error(string("Could not open file %s.", path));
++		return;
++	}
++
+ 	import_mesh_clear_layers = _clear_layers;
+ 	import_mesh_no_reset     = keep_camera;
+ 	import_mesh_append       = !replace_existing;
+@@ -40,6 +46,10 @@ void import_mesh_run(char *path, bool _clear_layers, bool replace_existing, bool
+ 		raw_mesh_t *(*importer)(char *path) = any_map_get(import_mesh_importers, ext);
+ 
+ 		raw_mesh_t *mesh = importer(path);
++		if (mesh == NULL) { // STUDIO-PATCH(import-null-guards)
++			console_error(string("Could not import file %s.", path));
++			return;
++		}
+ 		if (string_equals(mesh->name, "")) {
+ 			mesh->name = string_copy(path_base_name(path));
+ 		}
+diff --git a/paint/sources/io/import_obj.c b/paint/sources/io/import_obj.c
+index e2ff76d0..1b39ede6 100644
+--- a/paint/sources/io/import_obj.c
++++ b/paint/sources/io/import_obj.c
+@@ -3,6 +3,10 @@
+ 
+ void import_obj_run(char *path, bool replace_existing) {
+ 	buffer_t *b = data_get_blob(path);
++	if (b == NULL) { // STUDIO-PATCH(import-null-guards)
++		console_error(string("Could not open file %s.", path));
++		return;
++	}
+ 	import_obj_parse(b, replace_existing);
+ 	data_delete_blob(path);
+ }
+diff --git a/paint/sources/io/import_texture.c b/paint/sources/io/import_texture.c
+index b38f9800..f4fed04e 100644
+--- a/paint/sources/io/import_texture.c
++++ b/paint/sources/io/import_texture.c
+@@ -46,6 +46,10 @@ void import_texture_run(char *path, bool hdr_as_envmap) {
+ 	if (importer == NULL || cached) {
+ 		image = import_texture_default_importer(path);
+ 	}
++	else if (!iron_file_exists(data_resolve_path(path))) { // STUDIO-PATCH(import-null-guards): the plugin importers dereference the blob
++		console_error(string("Could not open file %s.", path));
++		return;
++	}
+ 	else {
+ 		image = importer(path);
+ 	}
