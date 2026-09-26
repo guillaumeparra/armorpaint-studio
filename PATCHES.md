@@ -205,3 +205,32 @@ porter `studio_workfiles_init()` et retirer le patch.
 
 **Non couvert.** L'UI tactile (`g_config->touch_ui`) : sa barre est une rangée d'icônes, les catégories ajoutées
 n'y apparaissent pas. Les raccourcis Ctrl/Cmd+Alt+O et S de `studio_workfiles.c` restent disponibles.
+
+---
+
+## tab-name-bounds
+
+| | |
+|---|---|
+| Fichier | `base/sources/iron_ui.c` (`ui_tab`, `ui_set_hovered_tab_name`) |
+| Commit studio | `ac87d69c` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-26) |
+| Trouvé | 2026-09-26, plantage `ArmorPaint-2026-09-26-134607.ips` (`__chk_fail_overflow` dans `ui_set_hovered_tab_name`) |
+
+**Bug.** Le titre de l'onglet Console est le dernier message du log (`tab_console_draw` : `"%s        "`). Un
+message de 248 caractères ou plus — un chemin long, une ligne `studio: shotgrid:` — dépasse les 256 octets de
+`tab_names[i]` : `ui_tab()` le copie par `strcpy`, qui déborde en silence sur l'onglet suivant (sur `tab_colors`
+pour le 16e). Si la souris survole alors la fenêtre, `ui_set_hovered_tab_name()` le recopie dans
+`hovered_tab_name[256]`, et le `strcpy` vérifié de macOS tue l'app.
+
+**Correctif.** Les deux copies passent par `snprintf` borné à la taille du tampon. Un titre trop long est tronqué ;
+les noms comparés par `context_in_*()` (« Layers », « Materials »…) sont courts et inchangés.
+
+**Test.** Console dans la barre latérale, lancer la démo Workfiles (`.tests/demo_workfiles.sh`) : les lignes de
+démarrage du sidecar dépassent 256 caractères. Survoler la Console pendant qu'elles s'affichent en titre : sans le
+patch, plantage `__chk_fail_overflow` ; avec, titre tronqué.
+
+**Signes que l'upstream l'a corrigé.** `strcpy` disparu de `ui_tab()` / `ui_set_hovered_tab_name()`, ou
+`tab_console_draw()` qui tronque le message.
+
+**Non couvert.** Les autres `strcpy` d'`iron_ui.c` n'ont pas été audités.
