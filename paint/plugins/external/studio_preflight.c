@@ -157,6 +157,26 @@ static bool first_of_texture(const studio_plan_t *plan, int index) {
 	return true;
 }
 
+// Résolutions standard du preset ("resolutions"), fichier par fichier : chaque texture a la sienne.
+static void check_resolution(const studio_plan_t *plan, const studio_plan_file_t *f, studio_report_t *r) {
+	const studio_preset_t *p  = plan->preset;
+	bool                   ok = p->resolution_count == 0;
+	for (int i = 0; i < p->resolution_count && !ok; ++i) {
+		ok = p->resolutions[i].width == f->width && p->resolutions[i].height == f->height;
+	}
+	if (ok) {
+		return;
+	}
+	char   list[256] = "";
+	size_t len       = 0;
+	for (int i = 0; i < p->resolution_count && len + 24 < sizeof(list); ++i) {
+		len += (size_t)snprintf(list + len, sizeof(list) - len, "%s%dx%d", i > 0 ? ", " : "", p->resolutions[i].width,
+		                        p->resolutions[i].height);
+	}
+	studio_report_add(r, true, "resolution", "%s: %dx%d is not a %s standard (%s): change its resolution, or Project > "
+	                  "Texture resolution", f->texture->name, f->width, f->height, p->name, list);
+}
+
 static void check_textures(studio_plan_t *plan, studio_report_t *r) {
 	for (int i = 0; i < plan->file_count; ++i) {
 		studio_plan_file_t            *f = &plan->files[i];
@@ -179,6 +199,11 @@ static void check_textures(studio_plan_t *plan, studio_report_t *r) {
 		}
 		if (!first_of_texture(plan, i)) {
 			continue;
+		}
+		check_resolution(plan, f, r);
+		if (f->width > plan->width || f->height > plan->height) {
+			studio_report_note(r, "upscaled", "%s: %dx%d from %dx%d layers (upscaled)", t->name, f->width, f->height,
+			                   plan->width, plan->height);
 		}
 		// Choix du preset : notes, pas des avertissements. Une profondeur supérieure à celle des calques n'est pas
 		// signalée : les graphistes le savent.
@@ -319,7 +344,6 @@ static void check_paths(studio_plan_t *plan, studio_report_t *r) {
 }
 
 void studio_preflight_run(studio_plan_t *plan, studio_report_t *report) {
-	const studio_preset_t *p = plan->preset;
 	if (plan->naming_error != NULL) {
 		studio_report_add(report, true, "naming", "%s", plan->naming_error);
 	}
@@ -342,22 +366,6 @@ void studio_preflight_run(studio_plan_t *plan, studio_report_t *report) {
 	if (plan->hidden_layers > 0) {
 		studio_report_note(report, "hidden_layers", "%d hidden layer%s not exported", plan->hidden_layers,
 		                  plan->hidden_layers > 1 ? "s" : "");
-	}
-	if (p->resolution_count > 0) {
-		bool ok = false;
-		for (int i = 0; i < p->resolution_count && !ok; ++i) {
-			ok = p->resolutions[i].width == plan->width && p->resolutions[i].height == plan->height;
-		}
-		if (!ok) {
-			char   list[256] = "";
-			size_t len       = 0;
-			for (int i = 0; i < p->resolution_count && len + 24 < sizeof(list); ++i) {
-				len += (size_t)snprintf(list + len, sizeof(list) - len, "%s%dx%d", i > 0 ? ", " : "",
-				                        p->resolutions[i].width, p->resolutions[i].height);
-			}
-			studio_report_add(report, true, "resolution", "texture resolution %dx%d is not a %s standard (%s): change "
-			                  "Project > Texture resolution", plan->width, plan->height, p->name, list);
-		}
 	}
 	report->total_size = 0;
 	for (int i = 0; i < plan->file_count; ++i) {
@@ -404,7 +412,8 @@ char *studio_report_text(const studio_plan_t *plan, const studio_report_t *repor
 		const studio_preset_texture_t *t = f->texture;
 		char                           size[32];
 		studio_format_size(f->raw_size, size, sizeof(size));
-		sb_printf(&b, "  %s  (%s %d-bit %s%s%s, %s, <= %s%s)\n", f->path, studio_format_name(t->format), t->bits,
+		sb_printf(&b, "  %s  (%dx%d %s %d-bit %s%s%s, %s, <= %s%s)\n", f->path, f->width, f->height,
+		          studio_format_name(t->format), t->bits,
 		          channels_name(t->channels), t->compression != NULL ? " " : "",
 		          t->compression != NULL ? t->compression : "", studio_preset_color(t), size,
 		          f->skip ? ", not selected" : f->exists ? ", replaces existing" : "");
@@ -450,8 +459,8 @@ char *studio_report_json(const studio_plan_t *plan, const studio_report_t *repor
 		sb_quote(&b, f->variant);
 		sb_printf(&b, ", \"udim\": ");
 		sb_quote(&b, f->udim);
-		sb_printf(&b, ", \"format\": \"%s\", \"bits\": %d, \"channels\": %d, \"compression\": ",
-		          studio_format_name(t->format), t->bits, t->channels);
+		sb_printf(&b, ", \"width\": %d, \"height\": %d, \"format\": \"%s\", \"bits\": %d, \"channels\": %d, "
+		          "\"compression\": ", f->width, f->height, studio_format_name(t->format), t->bits, t->channels);
 		if (t->compression != NULL) {
 			sb_quote(&b, t->compression);
 		}

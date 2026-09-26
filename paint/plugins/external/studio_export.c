@@ -124,11 +124,14 @@ static void show_text(const char *title, const char *text, bool error) {
 
 // ---- Registre des presets --------------------------------------------------------------------------------------------
 
+// Presets studio : les fichiers de STUDIO_EXPORT_PRESETS (dossiers ou .json), puis data/studio_preset_<nom>.json. Ils
+// sont seulement lus, relus à chaque export et à chaque ouverture de la fenêtre : rien n'est écrit ni installé (les
+// presets upstream d'export_presets/ ne sont pas touchés). Ceux que l'artiste enregistre vivent dans le sidecar du
+// projet, que tient la fenêtre d'export (studio_export_set_preset).
 typedef struct {
 	char *name;
 	char *path;
-	bool  installed; // stub présent dans export_presets : le preset figure dans la liste d'export
-	bool  shipped;   // livré avec l'app (data/studio_preset_<nom>.json) : remplacé à chaque build
+	bool  shipped; // livré avec l'app (data/studio_preset_<nom>.json)
 } entry_t;
 
 static entry_t *entries     = NULL;
@@ -217,125 +220,18 @@ static void scan_dir(const char *dir, const char *prefix) {
 	}
 }
 
-typedef struct {
-	char *name;
-	char  sha[65];
-} owned_t;
-
-static char *registry_path(void) {
-	return string_tmp("%s%sstudio_presets_generated.txt", path_data(), SEP);
-}
-
-// Stubs écrits par une session précédente : "nom<TAB>sha256 du stub" par ligne.
-static owned_t *read_registry(int *count) {
-	*count        = 0;
-	char    *text = studio_fs_read(registry_path(), NULL);
-	owned_t *list = NULL;
-	for (char *line = text; line != NULL && *line != 0;) {
-		char *nl = strchr(line, '\n');
-		if (nl != NULL) {
-			*nl = 0;
-		}
-		char *tab = strchr(line, '\t');
-		if (tab != NULL && strlen(tab + 1) == 64) {
-			*tab          = 0;
-			owned_t *grow = realloc(list, sizeof(owned_t) * (size_t)(*count + 1));
-			if (grow != NULL) {
-				list = grow;
-				list[*count].name = strdup(line);
-				memcpy(list[*count].sha, tab + 1, 65);
-				(*count)++;
-			}
-		}
-		line = nl != NULL ? nl + 1 : NULL;
-	}
-	free(text);
-	return list;
-}
-
-static const char *owned_sha(owned_t *list, int count, const char *name) {
-	for (int i = 0; i < count; ++i) {
-		if (strcmp(list[i].name, name) == 0) {
-			return list[i].sha;
-		}
-	}
-	return NULL;
-}
-
-static char *stub_path(const char *name) {
-	return string_tmp("%s%sexport_presets%s%s.json", path_data(), SEP, SEP, name);
-}
-
-// Chaque preset studio valide reçoit un stub upstream dans export_presets/ (liste d'export, ligne de commande). Un preset
-// upstream du même nom n'est jamais écrasé : seuls les fichiers que le registre attribue au studio (même empreinte) sont
-// remplacés ou retirés.
-static void install_presets(void) {
-	int      owned_count = 0;
-	owned_t *owned       = read_registry(&owned_count);
-	char    *registry    = strdup("");
+static void clear_entries(void) {
 	for (int i = 0; i < entry_count; ++i) {
-		entry_t         *e = &entries[i];
-		char             err[512];
-		studio_preset_t *p = studio_preset_load(e->path, e->name, err, sizeof(err));
-		if (p == NULL) {
-			report(true, "Studio export preset %s: %s", e->name, err);
-			continue;
-		}
-		char *stub = studio_preset_stub(p);
-		studio_preset_free(p);
-		if (stub == NULL) {
-			continue;
-		}
-		char        stub_sha[65], disk_sha[65];
-		const char *target = stub_path(e->name);
-		const char *mine   = owned_sha(owned, owned_count, e->name);
-		studio_sha256_hex(stub, strlen(stub), stub_sha);
-		bool exists = studio_fs_exists(target);
-		if (exists && (mine == NULL || !studio_sha256_file(target, disk_sha) || strcmp(disk_sha, mine) != 0)) {
-			report(true, "Studio export preset %s not installed: export_presets/%s.json is not a studio file (an ArmorPaint "
-			             "preset, or edited in the Presets tab); rename one of them", e->name, e->name);
-			// Déjà attribué au studio mais modifié à la main : on le garde dans le registre pour ne pas le perdre de vue.
-			if (mine != NULL) {
-				char *line = string_tmp("%s%s\t%s\n", registry, e->name, mine);
-				free(registry);
-				registry = strdup(line);
-			}
-			free(stub);
-			continue;
-		}
-		if (!exists || strcmp(disk_sha, stub_sha) != 0) {
-			studio_naming_make_parent(target);
-			if (!studio_fs_write(target, stub, strlen(stub))) {
-				report(true, "Studio export preset %s: cannot write %s", e->name, target);
-				free(stub);
-				continue;
-			}
-		}
-		e->installed = true;
-		char *line   = string_tmp("%s%s\t%s\n", registry, e->name, stub_sha);
-		free(registry);
-		registry = strdup(line);
-		free(stub);
+		free(entries[i].name);
+		free(entries[i].path);
 	}
-	// Stubs d'anciens presets studio (retirés de STUDIO_EXPORT_PRESETS...) : supprimés s'ils sont intacts.
-	for (int i = 0; i < owned_count; ++i) {
-		if (find_entry(owned[i].name) == NULL) {
-			char disk_sha[65];
-			if (studio_sha256_file(stub_path(owned[i].name), disk_sha) && strcmp(disk_sha, owned[i].sha) == 0) {
-				studio_fs_remove(stub_path(owned[i].name));
-				iron_log("studio: export preset %s removed from the export list", owned[i].name);
-			}
-		}
-		free(owned[i].name);
-	}
-	free(owned);
-	if (registry != NULL && !studio_fs_write(registry_path(), registry, strlen(registry))) {
-		report(true, "Studio export presets: cannot write %s", registry_path());
-	}
-	free(registry);
+	free(entries);
+	entries     = NULL;
+	entry_count = 0;
 }
 
-static void load_registry(void) {
+static void scan_presets(void) {
+	clear_entries();
 	const char *env = getenv("STUDIO_EXPORT_PRESETS");
 	if (env != NULL) {
 		char *list = strdup(env);
@@ -353,19 +249,13 @@ static void load_registry(void) {
 				free(name);
 			}
 			else if (item[0] != 0) {
-				report(true, "STUDIO_EXPORT_PRESETS: %s is neither a folder nor a .json file", item);
+				iron_log("studio: STUDIO_EXPORT_PRESETS: %s is neither a folder nor a .json file", item);
 			}
 			item = next != NULL ? next + 1 : NULL;
 		}
 		free(list);
 	}
 	scan_dir(path_data(), "studio_preset_");
-	install_presets();
-	int installed = 0;
-	for (int i = 0; i < entry_count; ++i) {
-		installed += entries[i].installed ? 1 : 0;
-	}
-	iron_log("studio: %d studio export preset%s in the export list", installed, installed > 1 ? "s" : "");
 }
 
 // ---- État d'un export ------------------------------------------------------------------------------------------------
@@ -386,6 +276,7 @@ static struct {
 	char            *override;       // preset imposé par un script
 	bool             args_consumed;  // --export-textures : le preset de la ligne de commande ne sert qu'une fois
 	studio_preset_t *preset;
+	char            *overrides; // chosen.overrides appliqués à ce preset, NULL sinon
 	char            *dir;
 
 	studio_plan_file_t *files;
@@ -410,6 +301,16 @@ static struct {
 	bool  last_ok;
 } ex;
 
+// Preset studio de l'export courant (fenêtre d'export, script) : repris par Ctrl+E. json : un preset qui n'est pas dans
+// les dossiers de presets (sidecar du projet), source : d'où il vient (manifeste). overrides : bits et résolution par
+// texture (studio_preset_apply_overrides).
+static struct {
+	char *name;
+	char *json;
+	char *source;
+	char *overrides;
+} chosen = {0};
+
 // Espace imposé aux textures de couleur des presets studio (fenêtre d'export, STUDIO_EXPORT_COLOR_SPACE, script) ; NULL :
 // celui du preset. Gardé pour la session : les préférences le porteront au lot A5.
 static char *color_override = NULL;
@@ -422,7 +323,8 @@ static bool is_skipped(const char *texture, const char *variant, const char *udi
 		return false;
 	}
 	char *key = string_tmp("\n%s\t%s\t%s\n", texture, variant, udim);
-	return strstr(skip_keys, key) != NULL;
+	char *all = string_tmp("\n%s\t*\t*\n", texture); // map désactivée : tous ses fichiers
+	return strstr(skip_keys, key) != NULL || strstr(skip_keys, all) != NULL;
 }
 
 // Au moins un fichier coché pour cette texture du preset (sinon ses vérifications OCIO ne concernent rien).
@@ -498,12 +400,15 @@ static void finish(void) {
 	reset_plan();
 	studio_preset_free(ex.preset);
 	ex.preset = NULL;
+	free(ex.overrides);
+	ex.overrides = NULL;
 	free(ex.dir);
 	ex.dir   = NULL;
 	ex.phase = PHASE_IDLE;
 }
 
-// Preset choisi pour cet export : celui d'un script, puis celui de --export-textures, puis celui de la boîte d'export.
+// Preset choisi pour cet export : celui d'une requête (fenêtre, script), puis celui de --export-textures, puis celui de
+// l'export courant, puis celui de la boîte d'export (un preset upstream).
 static const char *current_preset_name(void) {
 	if (ex.override != NULL) {
 		return ex.override;
@@ -511,6 +416,9 @@ static const char *current_preset_name(void) {
 	if (args_export_textures && !ex.args_consumed && args_export_textures_preset != NULL &&
 	    args_export_textures_preset[0] != 0) {
 		return args_export_textures_preset;
+	}
+	if (chosen.name != NULL) {
+		return chosen.name;
 	}
 	if (box_export_files != NULL && box_export_preset_index >= 0 && box_export_preset_index < (i32)box_export_files->length) {
 		return box_export_files->buffer[box_export_preset_index];
@@ -760,11 +668,74 @@ typedef enum { OUT_U8, OUT_U16, OUT_HALF, OUT_F32 } out_kind_t;
 
 #define ROWS_PER_JOB 32
 
+// Mise à la résolution de la texture, séparable : pour chaque pixel de sortie, les pixels source et leur poids. Réduction :
+// moyenne par zone (chaque pixel source compte pour la part qu'il couvre) ; agrandissement : bilinéaire.
+typedef struct {
+	int   *first;  // premier pixel source de chaque pixel de sortie
+	int   *count;  // nombre de pixels source
+	float *weight; // poids, max par pixel de sortie
+	int    max;
+} taps_t;
+
+static void taps_free(taps_t *t) {
+	free(t->first);
+	free(t->count);
+	free(t->weight);
+}
+
+static bool taps_make(taps_t *t, int src, int dst) {
+	double scale = (double)src / (double)dst;
+	t->max       = src > dst ? (int)ceil(scale) + 1 : 2;
+	t->first     = malloc(sizeof(int) * (size_t)dst);
+	t->count     = malloc(sizeof(int) * (size_t)dst);
+	t->weight    = calloc((size_t)dst * (size_t)t->max, sizeof(float));
+	if (t->first == NULL || t->count == NULL || t->weight == NULL) {
+		taps_free(t);
+		return false;
+	}
+	for (int i = 0; i < dst; ++i) {
+		float *w = t->weight + (size_t)i * (size_t)t->max;
+		if (src > dst) {
+			double a = i * scale, b = (i + 1) * scale;
+			int    j0 = (int)floor(a), j1 = (int)ceil(b);
+			j1          = j1 > src ? src : j1;
+			t->first[i] = j0;
+			t->count[i] = j1 - j0;
+			for (int j = j0; j < j1; ++j) {
+				double lo = j > a ? j : a, hi = j + 1 < b ? j + 1 : b;
+				w[j - j0] = (float)((hi - lo) / scale);
+			}
+		}
+		else {
+			double center = (i + 0.5) * scale - 0.5;
+			int    j0     = (int)floor(center);
+			float  f      = (float)(center - j0);
+			if (j0 < 0) {
+				j0 = 0;
+				f  = 0.0f;
+			}
+			if (j0 >= src - 1) {
+				j0 = src - 1;
+				f  = 0.0f;
+			}
+			t->first[i] = j0;
+			t->count[i] = f > 0.0f ? 2 : 1;
+			w[0]        = 1.0f - f;
+			w[1]        = f;
+		}
+	}
+	return true;
+}
+
 typedef struct {
 	const sources_t               *src;
 	const studio_preset_texture_t *t;
 	out_kind_t                     kind;
 	int                            out_channels; // t->channels, ou 4 en EXR (RGBA)
+	int                            width;        // taille du fichier (studio_preset_output_size)
+	int                            height;
+	taps_t                         tx, ty;       // si elle diffère de celle des calques
+	bool                           resample;
 	void                          *out;
 	uint32_t                       vars;
 	int                            depth;
@@ -776,25 +747,57 @@ typedef struct {
 	bool                           ocio_failed;
 } compose_t;
 
+// Canaux de la texture pour la ligne y des calques (largeur des calques), avant tout encodage.
+static void eval_row(compose_t *c, int y, float **rows, float *scratch, float **res, const bool *constant,
+                     const float *value) {
+	int w = c->src->width;
+	for (int v = 0; v < STUDIO_VAR_COUNT; ++v) {
+		if (rows[v] != NULL) {
+			load_row(c->src, v, y, c->decode, rows[v]);
+		}
+	}
+	for (int k = 0; k < c->out_channels; ++k) {
+		if (constant[k]) {
+			for (int x = 0; x < w; ++x) {
+				res[k][x] = value[k];
+			}
+		}
+		else {
+			studio_expr_eval(c->t->exprs[k], w, (const float *const *)rows, res[k], scratch);
+		}
+	}
+}
+
 static void compose_job(void *ctx, int job) {
 	compose_t                     *c  = ctx;
 	const studio_preset_texture_t *t  = c->t;
-	int                            w  = c->src->width;
+	int                            sw = c->src->width;
+	int                            w  = c->width;
 	int                            y0 = job * ROWS_PER_JOB;
-	int y1 = y0 + ROWS_PER_JOB < c->src->height ? y0 + ROWS_PER_JOB : c->src->height;
+	int y1 = y0 + ROWS_PER_JOB < c->height ? y0 + ROWS_PER_JOB : c->height;
 	float *rows[STUDIO_VAR_COUNT] = {0};
-	float *scratch = malloc(sizeof(float) * (size_t)w * (size_t)(c->depth > 0 ? c->depth : 1));
-	float *res[4]  = {0};
+	float *scratch = malloc(sizeof(float) * (size_t)sw * (size_t)(c->depth > 0 ? c->depth : 1));
+	float *res[4]  = {0}; // ligne du fichier
+	float *src[4]  = {0}; // ligne des calques, quand la taille diffère
 	float *rgb     = c->ocio_dst != NULL ? malloc(sizeof(float) * 3 * (size_t)w) : NULL;
 	bool   ok      = scratch != NULL && (c->ocio_dst == NULL || rgb != NULL);
 	for (int k = 0; ok && k < c->out_channels; ++k) {
-		res[k] = malloc(sizeof(float) * (size_t)w);
-		ok     = res[k] != NULL;
+		res[k] = malloc(sizeof(float) * (size_t)(c->resample ? w : sw));
+		src[k] = c->resample ? malloc(sizeof(float) * (size_t)sw) : res[k];
+		ok     = res[k] != NULL && src[k] != NULL;
 	}
 	for (int v = 0; ok && v < STUDIO_VAR_COUNT; ++v) {
 		if (c->vars & (1u << v)) {
-			rows[v] = malloc(sizeof(float) * (size_t)w);
+			rows[v] = malloc(sizeof(float) * (size_t)sw);
 			ok      = rows[v] != NULL;
+		}
+	}
+	bool  constant[4] = {false};
+	float value[4]    = {0};
+	for (int k = 0; k < c->out_channels; ++k) {
+		constant[k] = k >= t->channels || studio_expr_constant(t->exprs[k], &value[k]);
+		if (k >= t->channels) { // canaux RGBA de l'EXR au-delà de ceux de la texture
+			value[k] = k == 3 ? 1.0f : 0.0f;
 		}
 	}
 	float(*mm)[2] = c->minmax[job];
@@ -803,34 +806,39 @@ static void compose_job(void *ctx, int job) {
 		mm[k][1] = -INFINITY;
 	}
 	for (int y = y0; ok && y < y1; ++y) {
-		for (int v = 0; v < STUDIO_VAR_COUNT; ++v) {
-			if (rows[v] != NULL) {
-				load_row(c->src, v, y, c->decode, rows[v]);
-			}
+		if (!c->resample) {
+			eval_row(c, y, rows, scratch, res, constant, value);
 		}
-		for (int k = 0; k < c->out_channels; ++k) {
-			float *r        = res[k];
-			float  value    = 0.0f;
-			bool  constant = k >= t->channels;
-			if (constant) { // canaux RGBA de l'EXR au-delà de ceux de la texture
-				value = k == 3 ? 1.0f : 0.0f;
-			}
-			else if (studio_expr_constant(t->exprs[k], &value)) {
-				constant = true;
-			}
-			if (constant) {
+		else {
+			for (int k = 0; k < c->out_channels; ++k) {
 				for (int x = 0; x < w; ++x) {
-					r[x] = value;
+					res[k][x] = constant[k] ? value[k] : 0.0f;
 				}
 			}
-			else {
-				studio_expr_eval(t->exprs[k], w, (const float *const *)rows, r, scratch);
-				// srgb : encodage du résultat, jamais de l'alpha ni d'une constante.
-				if (t->color == STUDIO_COLOR_SRGB && k < 3) {
+			const float *wy = c->ty.weight + (size_t)y * (size_t)c->ty.max;
+			for (int j = 0; j < c->ty.count[y]; ++j) {
+				eval_row(c, c->ty.first[y] + j, rows, scratch, src, constant, value);
+				for (int k = 0; k < c->out_channels; ++k) {
+					if (constant[k]) {
+						continue;
+					}
 					for (int x = 0; x < w; ++x) {
-						r[x] = r[x] > 0.0f ? powf(r[x], 1.0f / 2.2f) : 0.0f;
+						const float *wx  = c->tx.weight + (size_t)x * (size_t)c->tx.max;
+						const float *s   = src[k] + c->tx.first[x];
+						float        sum = 0.0f;
+						for (int i = 0; i < c->tx.count[x]; ++i) {
+							sum += s[i] * wx[i];
+						}
+						res[k][x] += wy[j] * sum;
 					}
 				}
+			}
+		}
+		// srgb : encodage du résultat (après la mise à la taille, qui moyenne des valeurs linéaires), jamais de
+		// l'alpha ni d'une constante.
+		for (int k = 0; t->color == STUDIO_COLOR_SRGB && k < 3 && k < c->out_channels; ++k) {
+			for (int x = 0; !constant[k] && x < w; ++x) {
+				res[k][x] = res[k][x] > 0.0f ? powf(res[k][x], 1.0f / 2.2f) : 0.0f;
 			}
 		}
 		// OCIO : le RGB entier, constantes comprises (une matrice mélange les canaux) ; une texture d'un canal passe
@@ -897,6 +905,9 @@ static void compose_job(void *ctx, int job) {
 	}
 	free(scratch);
 	for (int k = 0; k < 4; ++k) {
+		if (src[k] != res[k]) {
+			free(src[k]);
+		}
 		free(res[k]);
 	}
 	free(rgb);
@@ -956,8 +967,22 @@ static bool encode_texture(const sources_t *src, const studio_preset_texture_t *
 	bool       exr   = t->format == STUDIO_FORMAT_EXR;
 	out_kind_t kind  = t->bits == 8 ? OUT_U8 : exr && t->bits == 16 ? OUT_HALF : t->bits == 16 ? OUT_U16 : OUT_F32;
 	int        oc    = exr ? 4 : t->channels;
-	size_t     bytes = (size_t)src->width * (size_t)src->height * (size_t)oc * (size_t)(t->bits / 8);
-	compose_t  c     = {.src = src, .t = t, .kind = kind, .out_channels = oc, .decode = t->color != STUDIO_COLOR_RAW};
+	int        w, h;
+	studio_preset_output_size(t, src->width, src->height, &w, &h);
+	size_t    bytes = (size_t)w * (size_t)h * (size_t)oc * (size_t)(t->bits / 8);
+	compose_t c     = {.src          = src,
+	                   .t            = t,
+	                   .kind         = kind,
+	                   .out_channels = oc,
+	                   .width        = w,
+	                   .height       = h,
+	                   .resample     = w != src->width || h != src->height,
+	                   .decode       = t->color != STUDIO_COLOR_RAW};
+	if (c.resample && (!taps_make(&c.tx, src->width, w) || !taps_make(&c.ty, src->height, h))) {
+		taps_free(&c.tx);
+		fail("%s: out of memory", t->name);
+		return false;
+	}
 	if (t->color == STUDIO_COLOR_OCIO) { // validé par check_ocio avant l'écriture ; revérifié : la config a pu changer
 		int data = studio_ocio_is_data(t->color_space);
 		c.decode = data == 0;
@@ -974,16 +999,20 @@ static bool encode_texture(const sources_t *src, const studio_preset_texture_t *
 		c.vars |= studio_expr_vars(t->exprs[k]);
 		c.depth = studio_expr_depth(t->exprs[k]) > c.depth ? studio_expr_depth(t->exprs[k]) : c.depth;
 	}
-	int jobs = (src->height + ROWS_PER_JOB - 1) / ROWS_PER_JOB;
+	int jobs = (h + ROWS_PER_JOB - 1) / ROWS_PER_JOB;
 	c.out    = malloc(bytes);
 	c.minmax = malloc(sizeof(float[4][2]) * (size_t)jobs);
 	if (c.out == NULL || c.minmax == NULL) {
 		free(c.out);
 		free(c.minmax);
+		taps_free(&c.tx);
+		taps_free(&c.ty);
 		fail("%s: out of memory (%zu MB)", t->name, bytes >> 20);
 		return false;
 	}
 	exr_parallel_for(thread_count(), jobs, compose_job, &c);
+	taps_free(&c.tx);
+	taps_free(&c.ty);
 	if (c.failed || c.ocio_failed) {
 		free(c.out);
 		free(c.minmax);
@@ -1027,12 +1056,11 @@ static bool encode_texture(const sources_t *src, const studio_preset_texture_t *
 	if (exr) {
 		int type = t->channels == 1 ? 2 : t->channels == 3 ? 1 : 3;
 		int comp = t->compression != NULL ? studio_exr_compression_from_name(t->compression) : -1;
-		ok = studio_exr_encode_texture(c.out, bytes, src->width, src->height, t->bits, type, 0, comp, data, size, err,
-		                               sizeof(err));
+		ok = studio_exr_encode_texture(c.out, bytes, w, h, t->bits, type, 0, comp, data, size, err, sizeof(err));
 	}
 	else if (t->format == STUDIO_FORMAT_JPG) {
 		jpg_buf_t b = {0};
-		ok          = stbi_write_jpg_to_func(jpg_write, &b, src->width, src->height, t->channels, c.out, t->quality) != 0 &&
+		ok          = stbi_write_jpg_to_func(jpg_write, &b, w, h, t->channels, c.out, t->quality) != 0 &&
 		     !b.failed;
 		if (ok) {
 			*data = b.data;
@@ -1045,8 +1073,8 @@ static bool encode_texture(const sources_t *src, const studio_preset_texture_t *
 	}
 	else {
 		studio_image_t img = {.pixels   = c.out,
-		                      .width    = src->width,
-		                      .height   = src->height,
+		                      .width    = w,
+		                      .height   = h,
 		                      .channels = t->channels,
 		                      .bits     = t->bits,
 		                      .level    = studio_preset_deflate_level(t->compression),
@@ -1223,7 +1251,8 @@ static char *manifest_json(const char *dir, const studio_report_t *r) {
 	else {
 		put(&b, "null");
 	}
-	put(&b, "},\n");
+	// Réglages de l'export par-dessus le preset (bits, résolution par texture) : l'objet validé, tel quel.
+	put(&b, ", \"overrides\": %s},\n", ex.overrides != NULL ? ex.overrides : "null");
 	put(&b, "  \"resolution\": [%d, %d],\n  \"source_bits\": %d,\n  \"mode\": \"%s\",\n", config_get_texture_res_x(),
 	    config_get_texture_res_y(), ex.source_bits, mode_name());
 	const char *tmpl = studio_export_naming_template();
@@ -1266,7 +1295,8 @@ static char *manifest_json(const char *dir, const studio_report_t *r) {
 		put_quoted(&b, f->variant);
 		put(&b, ", \"udim\": ");
 		put_quoted(&b, f->udim);
-		put(&b, ", \"format\": \"%s\", \"bits\": %d, \"compression\": ", studio_format_name(t->format), t->bits);
+		put(&b, ", \"resolution\": [%d, %d], \"format\": \"%s\", \"bits\": %d, \"compression\": ", f->width, f->height,
+		    studio_format_name(t->format), t->bits);
 		if (t->compression != NULL) {
 			put_quoted(&b, t->compression);
 		}
@@ -1401,10 +1431,11 @@ static void collect_tiles(void) {
 }
 
 static void plan_variant(const char *variant, const char *udim) {
-	int w = config_get_texture_res_x(), h = config_get_texture_res_y();
 	for (int i = 0; i < ex.preset->texture_count; ++i) {
-		const studio_preset_texture_t *t     = &ex.preset->textures[i];
-		char                          *error = NULL;
+		const studio_preset_texture_t *t = &ex.preset->textures[i];
+		int                            w, h;
+		studio_preset_output_size(t, config_get_texture_res_x(), config_get_texture_res_y(), &w, &h);
+		char *error = NULL;
 		char                          *path  = texture_path(ex.dir, variant, udim, t, &error);
 		if (path == NULL) {
 			if (ex.naming_error == NULL) {
@@ -1577,6 +1608,20 @@ static void check_ocio(studio_report_t *r) {
 	}
 }
 
+// "{}" (la fenêtre envoie ses réglages même vides) : rien à appliquer, null au manifeste.
+static bool empty_object(const char *json) {
+	while (*json == ' ' || *json == '\t' || *json == '\n' || *json == '\r') {
+		++json;
+	}
+	if (*json++ != '{') {
+		return false;
+	}
+	while (*json == ' ' || *json == '\t' || *json == '\n' || *json == '\r') {
+		++json;
+	}
+	return *json == '}';
+}
+
 bool studio_export_begin(char *path, bool bake_material) {
 	if (ex.phase != PHASE_IDLE) {
 		return true; // passe interne (plan) : l'upstream déroule ses boucles, studio_export_layers intercepte
@@ -1585,9 +1630,14 @@ bool studio_export_begin(char *path, bool bake_material) {
 	if (args_export_textures) {
 		ex.args_consumed = true;
 	}
-	entry_t *e = find_entry(name);
-	if (e == NULL || !e->installed) {
-		return true; // preset upstream
+	bool     inline_preset = name != NULL && chosen.json != NULL && chosen.name != NULL && strcmp(chosen.name, name) == 0;
+	entry_t *e             = NULL;
+	if (!inline_preset) {
+		scan_presets(); // relus à chaque export : un preset ajouté ou modifié compte sans relancer ArmorPaint
+		e = find_entry(name);
+		if (e == NULL) {
+			return true; // preset upstream
+		}
 	}
 	if (g_context->layers_destination == EXPORT_DESTINATION_PACK_INTO_PROJECT) {
 		report(false, "Studio preset %s: textures packed into the project use ArmorPaint's generic writer (8-bit, preset "
@@ -1595,11 +1645,22 @@ bool studio_export_begin(char *path, bool bake_material) {
 		return true;
 	}
 
-	// Relu à chaque export : une modification du preset est prise en compte sans relancer ArmorPaint.
 	char             err[512];
-	studio_preset_t *preset = studio_preset_load(e->path, e->name, err, sizeof(err));
+	studio_preset_t *preset = inline_preset ? studio_preset_parse(chosen.json, name, err, sizeof(err))
+	                                        : studio_preset_load(e->path, e->name, err, sizeof(err));
+	if (preset != NULL && inline_preset && chosen.source != NULL) {
+		preset->path = strdup(chosen.source);
+	}
 	if (preset == NULL) {
-		show_text("Texture export: invalid studio preset", err, true);
+		show_text("Texture export: invalid studio preset", string_tmp("%s: %s", name, err), true);
+		return false;
+	}
+	// Les réglages de l'export (fenêtre) ne valent que pour le preset pour lequel ils ont été faits.
+	bool overridden = chosen.overrides != NULL && !empty_object(chosen.overrides) && chosen.name != NULL &&
+	                  strcmp(chosen.name, name) == 0;
+	if (overridden && !studio_preset_apply_overrides(preset, chosen.overrides, err, sizeof(err))) {
+		studio_preset_free(preset);
+		show_text("Texture export: invalid settings", err, true);
 		return false;
 	}
 	if (color_override != NULL &&
@@ -1610,6 +1671,7 @@ bool studio_export_begin(char *path, bool bake_material) {
 	}
 	reset_plan();
 	ex.preset      = preset;
+	ex.overrides   = overridden ? strdup(chosen.overrides) : NULL;
 	ex.dir         = strdup(path);
 	ex.source_bits = source_bits();
 	const char *f  = ui_files_filename != NULL && ui_files_filename[0] != 0 ? ui_files_filename : "untitled";
@@ -1765,20 +1827,12 @@ const char *studio_export_last_error(void) {
 }
 
 int studio_export_preset_count(void) {
-	int n = 0;
-	for (int i = 0; i < entry_count; ++i) {
-		n += entries[i].installed;
-	}
-	return n;
+	scan_presets();
+	return entry_count;
 }
 
 const char *studio_export_preset_name(int index) {
-	for (int i = 0; i < entry_count; ++i) {
-		if (entries[i].installed && index-- == 0) {
-			return entries[i].name;
-		}
-	}
-	return NULL;
+	return index >= 0 && index < entry_count ? entries[index].name : NULL;
 }
 
 const char *studio_export_last_report(void) {
@@ -1787,12 +1841,44 @@ const char *studio_export_last_report(void) {
 
 const char *studio_export_preset_path(const char *name) {
 	entry_t *e = find_entry(name);
-	return e != NULL && e->installed ? e->path : NULL;
+	return e != NULL ? e->path : NULL;
 }
 
 bool studio_export_preset_shipped(const char *name) {
 	entry_t *e = find_entry(name);
-	return e != NULL && e->installed && e->shipped;
+	return e != NULL && e->shipped;
+}
+
+static void set_text(char **field, const char *value) {
+	char *copy = value != NULL && value[0] != 0 ? strdup(value) : NULL;
+	free(*field);
+	*field = copy;
+}
+
+void studio_export_set_preset(const char *name, const char *json, const char *source) {
+	set_text(&chosen.name, name);
+	set_text(&chosen.json, json);
+	set_text(&chosen.source, source);
+}
+
+const char *studio_export_preset(void) {
+	return chosen.name != NULL ? chosen.name : "";
+}
+
+const char *studio_export_preset_json(void) {
+	return chosen.json != NULL ? chosen.json : "";
+}
+
+const char *studio_export_preset_source(void) {
+	return chosen.source != NULL ? chosen.source : "";
+}
+
+const char *studio_export_overrides(void) {
+	return chosen.overrides != NULL ? chosen.overrides : "";
+}
+
+void studio_export_set_overrides(const char *json) {
+	set_text(&chosen.overrides, json);
 }
 
 const char *studio_export_color_space(void) {
@@ -1824,8 +1910,11 @@ void studio_export_set_skip(const char *keys) {
 }
 
 bool studio_export_is_studio_preset(const char *name) {
-	entry_t *e = find_entry(name);
-	return e != NULL && e->installed;
+	if (name != NULL && chosen.json != NULL && chosen.name != NULL && strcmp(chosen.name, name) == 0) {
+		return true;
+	}
+	scan_presets();
+	return find_entry(name) != NULL;
 }
 
 #ifdef WITH_EVAL
@@ -1869,6 +1958,16 @@ static minic_val_t mn_studio_export_set_skip(minic_val_t *a, int n) {
 	return minic_val_int(0);
 }
 
+static minic_val_t mn_studio_export_set_preset(minic_val_t *a, int n) {
+	studio_export_set_preset(minic_arg_p(a, n, 0), minic_arg_p(a, n, 1), minic_arg_p(a, n, 2));
+	return minic_val_int(0);
+}
+
+static minic_val_t mn_studio_export_set_overrides(minic_val_t *a, int n) {
+	studio_export_set_overrides(minic_arg_p(a, n, 0));
+	return minic_val_int(0);
+}
+
 static minic_val_t mn_studio_export_set_color_space(minic_val_t *a, int n) {
 	return minic_val_int(studio_export_set_color_space(minic_arg_p(a, n, 0)) ? 1 : 0);
 }
@@ -1877,7 +1976,8 @@ static minic_val_t mn_studio_export_set_color_space(minic_val_t *a, int n) {
 
 void studio_export_init(void) {
 	init_tables();
-	load_registry();
+	scan_presets();
+	iron_log("studio: %d studio export preset%s", entry_count, entry_count > 1 ? "s" : "");
 	const char *cs = getenv("STUDIO_EXPORT_COLOR_SPACE");
 	if (cs != NULL && cs[0] != 0 && !studio_export_set_color_space(cs)) {
 		// Gardé : l'export sera bloqué avec la raison (ocio_unknown_colorspace), plutôt que fait dans le mauvais espace.
@@ -1893,5 +1993,7 @@ void studio_export_init(void) {
 	minic_register("studio_export_set_color_space", "i(p)", mn_studio_export_set_color_space);
 	minic_register("studio_export_skip", "p()", mn_studio_export_skip);
 	minic_register("studio_export_set_skip", "v(p)", mn_studio_export_set_skip);
+	minic_register("studio_export_set_preset", "v(p,p,p)", mn_studio_export_set_preset);
+	minic_register("studio_export_set_overrides", "v(p)", mn_studio_export_set_overrides);
 #endif
 }

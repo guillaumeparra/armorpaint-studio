@@ -28,12 +28,8 @@
 extern context_t       *g_context;
 extern project_t       *g_project;
 extern config_t        *g_config;
-extern string_array_t  *box_export_files;
-extern i32              box_export_preset_index;
-extern export_preset_t *box_export_preset;
 extern i32              base_bits;
 extern char            *ui_files_filename;
-void                    box_export_fetch_presets(void);
 char                   *project_filepath_get(void);
 i32                     config_get_texture_res_x(void);
 i32                     config_get_texture_res_y(void);
@@ -270,13 +266,50 @@ static void reply_error(int id, const char *code, const char *message) {
 
 // ---- État d'ArmorPaint -----------------------------------------------------------------------------------------------
 
-// Preset studio de l'export courant d'ArmorPaint (choisi au dernier export), NULL si c'est un preset upstream.
-static const char *current_preset(void) {
-	if (box_export_files == NULL || box_export_preset_index < 0 || box_export_preset_index >= (i32)box_export_files->length) {
-		return NULL;
+// Textures d'un preset pour le tableau des maps : ce que le preset fixe, et les profondeurs que le format accepte.
+static void put_textures(text_t *b, const studio_preset_t *p) {
+	put(b, "[");
+	for (int i = 0; i < p->texture_count; ++i) {
+		const studio_preset_texture_t *t = &p->textures[i];
+		int                            bits[3];
+		int                            n = studio_preset_bits_options(t->format, bits);
+		put(b, "%s{\"name\":", i > 0 ? "," : "");
+		put_quoted(b, t->name);
+		put(b, ",\"suffix\":");
+		put_quoted(b, t->suffix);
+		put(b, ",\"format\":\"%s\",\"bits\":%d,\"bits_options\":[", studio_format_name(t->format), t->bits);
+		for (int k = 0; k < n; ++k) {
+			put(b, "%s%d", k > 0 ? "," : "", bits[k]);
+		}
+		put(b, "],\"resolution\":%d,\"channels\":%d,\"color_space\":", t->resolution, t->channels);
+		put_quoted(b, studio_preset_color(t));
+		put(b, ",\"color\":%s}",
+		    studio_preset_texture_is_color(t, studio_ocio_ready() ? studio_ocio_is_data : NULL) ? "true" : "false");
 	}
-	const char *name = box_export_files->buffer[box_export_preset_index];
-	return studio_export_is_studio_preset(name) ? name : NULL;
+	put(b, "]");
+}
+
+// {"name","description","valid","error","textures"} d'un preset lu (p) ou refusé (err).
+static void put_preset_info(text_t *b, const char *name, const studio_preset_t *p, const char *err) {
+	put(b, "{\"name\":");
+	put_quoted(b, name);
+	put(b, ",\"description\":");
+	put_quoted(b, p != NULL && p->description != NULL ? p->description : "");
+	put(b, ",\"valid\":%s,\"error\":", p != NULL ? "true" : "false");
+	put_quoted(b, p != NULL ? "" : err);
+	put(b, ",\"textures\":");
+	if (p != NULL) {
+		put_textures(b, p);
+	}
+	else {
+		put(b, "[]");
+	}
+}
+
+// Texte JSON brut d'une valeur des arguments (objet, tableau...), malloc ; "" si absente.
+static char *arg_raw(const char *req, const char *name) {
+	studio_json_value_t v = studio_json_find(req, string_tmp("/args/%s", name));
+	return v.type == STUDIO_JSON_OBJECT || v.type == STUDIO_JSON_ARRAY ? strndup(v.start, v.len) : strdup("");
 }
 
 static char *dir_of(const char *path) {
@@ -290,7 +323,31 @@ static char *dir_of(const char *path) {
 	return slash != NULL ? strndup(path, (size_t)(slash - path)) : strdup("");
 }
 
-static char *state_json(void) {
+// Presets donnés par la fenêtre (args.presets : [{"name", "preset": {...}}], ceux du sidecar du projet) : lus ici,
+// comme à l'export, pour leurs textures et leurs erreurs.
+static void put_given_presets(text_t *b, const char *req) {
+	studio_json_value_t list = studio_json_find(req, "/args/presets");
+	int                 n    = list.type == STUDIO_JSON_ARRAY ? studio_json_length(list) : 0;
+	put(b, "[");
+	for (int i = 0; i < n; ++i) {
+		studio_json_value_t name = studio_json_find(req, string_tmp("/args/presets/%d/name", i));
+		studio_json_value_t v    = studio_json_find(req, string_tmp("/args/presets/%d/preset", i));
+		char               *text = name.type == STUDIO_JSON_STRING ? studio_json_text(name) : strdup("");
+		char               *json = v.type == STUDIO_JSON_OBJECT ? strndup(v.start, v.len) : NULL;
+		char                err[512];
+		snprintf(err, sizeof(err), "preset object expected");
+		studio_preset_t *p = json != NULL && text != NULL ? studio_preset_parse(json, text, err, sizeof(err)) : NULL;
+		put(b, i > 0 ? "," : "");
+		put_preset_info(b, text != NULL ? text : "", p, err);
+		put(b, "}");
+		studio_preset_free(p);
+		free(json);
+		free(text);
+	}
+	put(b, "]");
+}
+
+static char *state_json(const char *req) {
 	text_t      b    = {0};
 	const char *file = project_filepath_get();
 	put(&b, "{\"project\":{\"name\":");
@@ -330,25 +387,48 @@ static char *state_json(void) {
 	put(&b, "]},");
 
 	put(&b, "\"presets\":[");
-	for (int i = 0; i < studio_export_preset_count(); ++i) {
+	int count = studio_export_preset_count(); // relit les dossiers : les noms valent jusqu'à la relecture suivante
+	for (int i = 0; i < count; ++i) {
 		const char      *name = studio_export_preset_name(i);
 		const char      *path = studio_export_preset_path(name);
 		char             err[512];
 		studio_preset_t *p = studio_preset_load(path, name, err, sizeof(err));
-		put(&b, "%s{\"name\":", i > 0 ? "," : "");
-		put_quoted(&b, name);
-		put(&b, ",\"description\":");
-		put_quoted(&b, p != NULL ? (p->description != NULL ? p->description : "") : err);
-		put(&b, ",\"valid\":%s,\"shipped\":%s,\"path\":", p != NULL ? "true" : "false",
-		    studio_export_preset_shipped(name) ? "true" : "false");
+		put(&b, i > 0 ? "," : "");
+		put_preset_info(&b, name, p, err);
+		put(&b, ",\"shipped\":%s,\"path\":", studio_export_preset_shipped(name) ? "true" : "false");
 		put_quoted(&b, path);
 		put(&b, "}");
 		studio_preset_free(p);
 	}
-	put(&b, "],\"preset\":");
-	const char *preset = current_preset();
-	put_quoted(&b, preset != NULL ? preset : "");
-
+	put(&b, "],\"project_presets\":");
+	put_given_presets(&b, req);
+	// Export courant d'ArmorPaint dans cette session (repris si le projet n'a pas encore de sidecar).
+	put(&b, ",\"preset\":");
+	put_quoted(&b, studio_export_preset());
+	studio_json_type_t type      = STUDIO_JSON_INVALID;
+	const char        *overrides = studio_export_overrides();
+	bool               object    = overrides[0] != 0 && studio_json_skip(overrides, &type) != NULL && type == STUDIO_JSON_OBJECT;
+	put(&b, ",\"preset_project\":%s,\"overrides\":%s,\"skip\":[", studio_export_preset_json()[0] != 0 ? "true" : "false",
+	    object ? overrides : "null");
+	char *skip = strdup(studio_export_skip());
+	int   k    = 0;
+	for (char *line = strtok(skip, "\n"); line != NULL; line = strtok(NULL, "\n")) {
+		char *tab1 = strchr(line, '\t');
+		char *tab2 = tab1 != NULL ? strchr(tab1 + 1, '\t') : NULL;
+		if (tab2 == NULL) {
+			continue;
+		}
+		*tab1 = *tab2 = 0;
+		put(&b, "%s[", k++ > 0 ? "," : "");
+		put_quoted(&b, line);
+		put(&b, ",");
+		put_quoted(&b, tab1 + 1);
+		put(&b, ",");
+		put_quoted(&b, tab2 + 1);
+		put(&b, "]");
+	}
+	free(skip);
+	put(&b, "]");
 	put(&b, ",\"ocio\":{\"ready\":%s,\"config\":", studio_ocio_ready() ? "true" : "false");
 	put_quoted(&b, studio_ocio_ready() ? studio_ocio_config_name() : "");
 	put(&b, ",\"status\":");
@@ -400,17 +480,38 @@ static void dilate_layers(void) {
 	g_config->dilate_radius = radius;
 }
 
-// L'export abouti devient l'export courant d'ArmorPaint : Ctrl+E le refait à l'identique.
-static void adopt(const char *dir, const char *preset, int mode, bool padding) {
+// L'export abouti devient l'export courant d'ArmorPaint : Ctrl+E le refait à l'identique (le preset, ses réglages, l'espace
+// et les fichiers décochés restent ceux de la requête).
+static void adopt(const char *dir, int mode, bool padding) {
 	g_context->texture_export_path = string_copy((char *)dir);
 	g_context->layers_export       = (export_mode_t)mode;
 	g_context->export_padding      = padding;
-	box_export_fetch_presets();
-	int index = string_array_index_of(box_export_files, (char *)preset);
-	if (index >= 0) {
-		box_export_preset_index = index;
-		box_export_preset       = NULL; // relu pour ce preset
+}
+
+// Choix de l'export courant, pour les rendre si la requête n'aboutit pas.
+typedef struct {
+	char *preset, *json, *source, *overrides, *color_space, *skip;
+} selection_t;
+
+static selection_t selection_save(void) {
+	return (selection_t){strdup(studio_export_preset()),    strdup(studio_export_preset_json()),
+	                     strdup(studio_export_preset_source()), strdup(studio_export_overrides()),
+	                     strdup(studio_export_color_space()), strdup(studio_export_skip())};
+}
+
+static void selection_free(selection_t *s, bool restore) {
+	if (restore) {
+		studio_export_set_preset(s->preset, s->json, s->source);
+		studio_export_set_overrides(s->overrides);
+		studio_export_set_color_space(s->color_space);
+		studio_export_set_skip(s->skip);
 	}
+	free(s->preset);
+	free(s->json);
+	free(s->source);
+	free(s->overrides);
+	free(s->color_space);
+	free(s->skip);
 }
 
 // args.skip : [[texture, variant, tuile], ...] -> lignes de studio_export_set_skip.
@@ -435,26 +536,29 @@ static char *skip_keys(const char *req) {
 }
 
 static void run_request(int id, const char *req, bool preflight_only) {
-	char *preset  = arg_text(req, "preset");
-	char *space   = arg_text(req, "color_space");
-	char *dir     = arg_text(req, "dir");
-	int   mode    = (int)studio_json_int(studio_json_find(req, "/args/mode"), EXPORT_MODE_VISIBLE);
-	bool  padding = studio_json_truthy(studio_json_find(req, "/args/padding"));
+	char *preset      = arg_text(req, "preset");
+	char *preset_json = arg_raw(req, "preset_json");
+	char *source      = arg_text(req, "preset_source");
+	char *overrides   = arg_raw(req, "overrides");
+	char *space       = arg_text(req, "color_space");
+	char *dir         = arg_text(req, "dir");
+	int   mode        = (int)studio_json_int(studio_json_find(req, "/args/mode"), EXPORT_MODE_VISIBLE);
+	bool  padding     = studio_json_truthy(studio_json_find(req, "/args/padding"));
 	if (mode < EXPORT_MODE_VISIBLE || mode > EXPORT_MODE_PER_UDIM_TILE) {
 		mode = EXPORT_MODE_VISIBLE;
 	}
-	if (!studio_export_is_studio_preset(preset)) {
+	if (preset_json[0] == 0 && !studio_export_is_studio_preset(preset)) {
 		reply_error(id, "bad_request", string_tmp("not a studio preset: %s", preset));
 	}
 	else if (dir[0] == 0) {
 		reply_error(id, "no_destination", "choose a destination folder");
 	}
 	else {
-		// L'espace et les fichiers choisis ne servent qu'à cette requête, sauf si l'export aboutit (Cancel ne change
-		// rien).
-		char *previous      = strdup(studio_export_color_space());
-		char *previous_skip = strdup(studio_export_skip());
-		char *skip          = skip_keys(req);
+		// Les choix ne servent qu'à cette requête, sauf si l'export aboutit (Cancel ne change rien).
+		selection_t previous = selection_save();
+		char       *skip     = skip_keys(req);
+		studio_export_set_preset(preset, preset_json, source);
+		studio_export_set_overrides(overrides);
 		studio_export_set_color_space(space);
 		studio_export_set_skip(skip);
 		free(skip);
@@ -463,14 +567,9 @@ static void run_request(int id, const char *req, bool preflight_only) {
 		}
 		bool ok = studio_export_request(dir, preset, mode, preflight_only);
 		if (ok && !preflight_only) {
-			adopt(dir, preset, mode, padding);
+			adopt(dir, mode, padding);
 		}
-		else {
-			studio_export_set_color_space(previous);
-			studio_export_set_skip(previous_skip);
-		}
-		free(previous);
-		free(previous_skip);
+		selection_free(&previous, !(ok && !preflight_only));
 		const char *report = studio_export_last_report();
 		text_t      b      = {0};
 		put(&b, "{\"ok\":%s,\"report\":%s,\"error\":", ok ? "true" : "false", report[0] != 0 ? report : "null");
@@ -480,8 +579,31 @@ static void run_request(int id, const char *req, bool preflight_only) {
 		free(b.data);
 	}
 	free(preset);
+	free(preset_json);
+	free(source);
+	free(overrides);
 	free(space);
 	free(dir);
+}
+
+// args : {"name", "preset": {...}} -> {"name","description","valid","error","textures"} : un preset que la fenêtre va
+// enregistrer dans le sidecar, vérifié comme à l'export.
+static void inspect_request(int id, const char *req) {
+	char            *name = arg_text(req, "name");
+	char            *json = arg_raw(req, "preset");
+	char             err[512];
+	studio_preset_t *p = json[0] != 0 ? studio_preset_parse(json, name, err, sizeof(err)) : NULL;
+	if (json[0] == 0) {
+		snprintf(err, sizeof(err), "preset object expected");
+	}
+	text_t b = {0};
+	put_preset_info(&b, name, p, err);
+	put(&b, "}");
+	reply(id, b.data != NULL ? b.data : "null");
+	free(b.data);
+	studio_preset_free(p);
+	free(name);
+	free(json);
 }
 
 // Même moment que l'export de la boîte d'ArmorPaint (sys_notify_on_next_frame) : hors du dessin de l'interface.
@@ -496,12 +618,15 @@ static void handle_request(void *data) {
 	}
 	else if (strcmp(op, "state") == 0) {
 		win.answered = true;
-		char *state  = state_json();
+		char *state  = state_json(req);
 		reply(id, state != NULL ? state : "null");
 		free(state);
 	}
 	else if (strcmp(op, "preflight") == 0 || strcmp(op, "export") == 0) {
 		run_request(id, req, strcmp(op, "preflight") == 0);
+	}
+	else if (strcmp(op, "inspect") == 0) {
+		inspect_request(id, req);
 	}
 	else {
 		reply_error(id, "bad_request", string_tmp("unknown operation: %s", op));

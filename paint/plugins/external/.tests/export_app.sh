@@ -1,7 +1,8 @@
 #!/bin/sh
 # Export studio (lots B2, B4, B5) dans ArmorPaint lui-même (--background) : presets livrés et presets utilisateur
 # (STUDIO_EXPORT_PRESETS), ligne de commande (--export-textures) et scripts (studio_export_run/preflight), égalité des
-# pixels avec l'export upstream, manifeste (SHA-256), préflight bloquant sans rien écrire.
+# pixels avec l'export upstream, manifeste (SHA-256), préflight bloquant sans rien écrire ; bits et résolution par map
+# (clé "resolution", réglages de l'export), preset donné en JSON (sidecar du projet), et rien d'écrit dans data/.
 #
 #   sh .tests/export_app.sh [dossier de travail]
 #   APP=<binaire ArmorPaint> pour un autre build (défaut : build Release de paint/).
@@ -82,7 +83,9 @@ check "deep : dossiers, tiff, png16, jpg" '[ -f "$W/out_deep/untitled/base.tif" 
 check "deep : écrasement bloqué" 'grep -q "t: deep_again=0" "$W/run.log" && grep -q "Texture export blocked (deep)" "$W/run.log"'
 check "préflight : dossier en lecture seule" 'grep "t: ro=" "$W/run.log" | grep -q "\"code\": *\"not_writable\""'
 check "préflight seul : rien d écrit" 'grep "t: dry=" "$W/run.log" | grep -q "\"ok\": *true" && [ ! -e "$W/out_dry" ]'
-check "presets studio installés" 'grep -q "t: studio=1 generic=0" "$W/run.log"'
+check "presets studio reconnus" 'grep -q "t: studio=1 generic=0" "$W/run.log"'
+DATA=$(dirname "$APP")/../Resources/out/data
+check "presets studio seulement lus : rien d écrit dans data/" '[ ! -e "$DATA/studio_presets_generated.txt" ] && [ -z "$(ls "$DATA/export_presets" | grep -E "arnold|basic|cycles|karma|unreal_engine|rawpng|deep")" ]'
 
 # 2. Manifeste : empreintes et tailles des fichiers écrits.
 check "manifeste : SHA-256 et tailles" 'python3 - "$W/out_arnold" <<PY
@@ -127,6 +130,72 @@ EOF
 "$APP" "$W/p.arm" --background --script "$W/fail.c" > "$W/fail.log" 2>&1 || true
 check "échec en cours d écriture : rien remplacé" 'grep -q "t: fail=0" "$W/fail.log" && grep -q "Texture export failed" "$W/fail.log" && [ "$(stat -f %Sm -t %Y "$W/out_raw/p_base.png")" = 2020 ] && [ ! -e "$W/out_raw/p_base.png.studio-tmp" ]'
 rmdir "$W/out_raw/p_rough.png.studio-tmp"
+
+# 5. Bits et résolution par map : clé "resolution" du preset, réglages de l'export par-dessus, preset donné en JSON.
+cat > "$W/presets/small.json" <<'EOF'
+{
+	"version": 1,
+	"defaults": { "format": "png", "bits": 8, "color_space": "raw", "resolution": 256 },
+	"textures": [
+		{ "name": "base", "channels": ["base_r", "base_g", "base_b", "1.0"] },
+		{ "name": "rough", "channels": ["rough", "rough", "rough", "1.0"], "resolution": 0 }
+	]
+}
+EOF
+cat > "$W/res.c" <<EOF
+int main() {
+	console_log(string("t: small=%d", studio_export_run("$W/out_small", "small", 0)));
+	studio_export_set_preset("small", "", "");
+	studio_export_set_overrides("{\"rough\": {\"bits\": 16, \"resolution\": 512}, \"base\": {\"resolution\": 0}}");
+	console_log(string("t: over=%d", studio_export_run("$W/out_over", "small", 0)));
+	studio_export_set_overrides("{\"base\": {\"bits\": 32}}");
+	console_log(string("t: badbits=%d", studio_export_run("$W/out_badbits", "small", 0)));
+	studio_export_set_overrides("");
+	studio_export_set_preset("mine", "{\"textures\": [{\"name\": \"r\", \"channels\": [\"rough\"], \"format\": \"tiff\", \"bits\": 16, \"resolution\": 1024}]}", "$W/p.export_settings.json");
+	console_log(string("t: inline=%d", studio_export_run("$W/out_inline", "mine", 0)));
+	console_log(string("t: inline_studio=%d", studio_export_is_studio_preset("mine")));
+	return 0;
+}
+EOF
+"$APP" "$W/p.arm" --background --script "$W/res.c" > "$W/res.log" 2>&1 || true
+grep -E "^t: |Texture export" "$W/res.log" | cut -c1-300
+check "résolution du preset : base 256, rough à celle du projet" 'grep -q "t: small=1" "$W/res.log" && python3 - "$W" <<PY
+import sys
+from PIL import Image
+w = sys.argv[1]
+assert Image.open(f"{w}/out_small/p_base.png").size == (256, 256)
+big = Image.open(f"{w}/out_raw2/p_base.png").size
+assert Image.open(f"{w}/out_small/p_rough.png").size == big, big
+PY'
+check "réduction fidèle : matériau uni, mêmes valeurs à 256" 'python3 - "$W" <<PY
+import sys
+from PIL import Image
+w = sys.argv[1]
+a = Image.open(f"{w}/out_raw2/p_base.png").convert("RGBA").getpixel((10, 10))
+b = Image.open(f"{w}/out_small/p_base.png").convert("RGBA").getpixel((10, 10))
+assert all(abs(x - y) <= 1 for x, y in zip(a, b)), (a, b)
+PY'
+check "réglages de l export : rough 512 en 16 bits, base à la taille du projet" 'grep -q "t: over=1" "$W/res.log" && python3 - "$W" <<PY
+import json, sys
+from PIL import Image
+w = sys.argv[1]
+import struct
+ihdr = struct.unpack(">IIB", open(f"{w}/out_over/p_rough.png", "rb").read(25)[16:25])
+assert ihdr == (512, 512, 16), ihdr  # PIL lit le RGBA 16 bits en 8 bits : l en-tête PNG fait foi
+assert Image.open(f"{w}/out_over/p_base.png").size == Image.open(f"{w}/out_raw2/p_base.png").size
+m = json.load(open(f"{w}/out_over/p.export.json"))
+files = {f["texture"]: f for f in m["files"]}
+assert files["rough"]["resolution"] == [512, 512] and files["rough"]["bits"] == 16, files["rough"]
+assert m["preset"]["overrides"] == {"rough": {"bits": 16, "resolution": 512}, "base": {"resolution": 0}}, m["preset"]
+PY'
+check "réglage refusé (32 bits en PNG) : rien d écrit" 'grep -q "t: badbits=0" "$W/res.log" && grep -q "32 bits not supported in png" "$W/res.log" && [ ! -e "$W/out_badbits" ]'
+check "preset donné en JSON : exporté, source au manifeste" 'grep -q "t: inline=1" "$W/res.log" && grep -q "t: inline_studio=1" "$W/res.log" && python3 - "$W" <<PY
+import json, sys
+w = sys.argv[1]
+m = json.load(open(f"{w}/out_inline/p.export.json"))
+assert m["preset"]["name"] == "mine" and m["preset"]["path"].endswith("p.export_settings.json"), m["preset"]
+assert m["files"][0]["resolution"] == [1024, 1024] and m["files"][0]["path"].endswith(".tif"), m["files"]
+PY'
 
 chmod 755 "$W/ro"
 [ $FAIL -eq 0 ] && echo "export app: OK ($W)" || { echo "export app: FAILED ($W)"; exit 1; }

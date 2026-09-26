@@ -422,18 +422,6 @@ static void test_presets(const char *shipped_dir) {
 		CHECK(t[4].format == STUDIO_FORMAT_JPG && t[4].bits == 8 && t[4].quality == 75 && t[4].compression == NULL,
 		      "texture prev (defaults.bits 16 does not apply to jpg)");
 		CHECK(t[5].channels == 4 && t[5].bits == 16, "texture k");
-		char *stub = studio_preset_stub(p);
-		CHECK(stub != NULL && studio_json_skip(stub, NULL) != NULL, "stub is JSON");
-		CHECK(stub != NULL && strstr(stub, "\"name\": \"mask\", \"channels\": [\"0.0\", \"0.0\", \"0.0\", \"1.0\"]") != NULL,
-		      "stub expression -> 0.0: %s", stub);
-		CHECK(stub != NULL && strstr(stub, "[\"1.0\", \"1.0\", \"1.0\", \"0.0\"]") != NULL, "stub constants: %s", stub);
-		CHECK(stub != NULL && strstr(stub, "\"name\": \"prev\", \"channels\": [\"base_r\", \"base_g\", \"base_b\", "
-		                                   "\"1.0\"], \"color_space\": \"linear\"") != NULL,
-		      "stub srgb colour -> linear: %s", stub);
-		studio_json_value_t v = studio_json_find(stub, "/textures/2/channels");
-		CHECK(studio_json_length(v) == 4, "stub 4 channels");
-		CHECK(studio_json_length(studio_json_find(stub, "/textures/0")) == 3, "stub: only upstream keys");
-		free(stub);
 	}
 	studio_preset_free(p);
 
@@ -443,7 +431,7 @@ static void test_presets(const char *shipped_dir) {
 	      "minimal preset: %s", err);
 	studio_preset_free(p);
 
-	// Lot A3 : noms OCIO, hérités des défauts, remplacés par un mot-clé ; le stub upstream les écrit en "linear".
+	// Lot A3 : noms OCIO, hérités des défauts, remplacés par un mot-clé.
 	p = parse("{\"defaults\": {\"format\": \"exr\", \"color_space\": \"ACEScg\"}, \"textures\": ["
 	          " {\"name\": \"a\", \"channels\": [\"base_r\", \"base_g\", \"base_b\"]},"
 	          " {\"name\": \"b\", \"channels\": [\"rough\"], \"color_space\": \"raw\"},"
@@ -461,10 +449,6 @@ static void test_presets(const char *shipped_dir) {
 		      "keyword over an OCIO default");
 		CHECK(t[2].color == STUDIO_COLOR_OCIO && strcmp(t[2].color_space, "sRGB - \"Texture\"") == 0, "OCIO name kept as is");
 		CHECK(t[3].color == STUDIO_COLOR_OCIO && strcmp(t[3].color_space, "Raw") == 0, "keywords are lower case only");
-		char *stub = studio_preset_stub(p);
-		CHECK(stub != NULL && studio_json_skip(stub, NULL) != NULL && strstr(stub, "srgb") == NULL, "stub OCIO -> linear: %s",
-		      stub);
-		free(stub);
 	}
 	studio_preset_free(p);
 	// Espace imposé à l'export : les textures de couleur seulement (linear, srgb, OCIO hors donnée).
@@ -554,6 +538,50 @@ static void test_presets(const char *shipped_dir) {
 	             "\"channels\": [\"occ\"]}]}",
 	             "compression 'lzw' not supported in exr");
 
+	// Résolution par texture, héritée des défauts ; 0 : celle du projet.
+	p = parse("{\"defaults\": {\"format\": \"png\", \"resolution\": 1024}, \"textures\": ["
+	          " {\"name\": \"a\", \"channels\": [\"rough\"]},"
+	          " {\"name\": \"b\", \"channels\": [\"rough\"], \"resolution\": 2048},"
+	          " {\"name\": \"c\", \"channels\": [\"rough\"], \"resolution\": 0, \"format\": \"exr\"}]}",
+	          err, sizeof(err));
+	CHECK(p != NULL && p->textures[0].resolution == 1024 && p->textures[1].resolution == 2048 &&
+	          p->textures[2].resolution == 0,
+	      "resolution per texture: %s", err);
+	if (p != NULL) {
+		int w, h;
+		studio_preset_output_size(&p->textures[1], 4096, 4096, &w, &h);
+		CHECK(w == 2048 && h == 2048, "output 4096 -> 2048: %dx%d", w, h);
+		studio_preset_output_size(&p->textures[0], 4096, 2048, &w, &h);
+		CHECK(w == 1024 && h == 512, "output keeps the aspect: %dx%d", w, h);
+		studio_preset_output_size(&p->textures[2], 4096, 2048, &w, &h);
+		CHECK(w == 4096 && h == 2048, "output 0 = project: %dx%d", w, h);
+		int bits[3];
+		CHECK(studio_preset_bits_options(STUDIO_FORMAT_TIFF, bits) == 3 && bits[2] == 32 &&
+		          studio_preset_bits_options(STUDIO_FORMAT_EXR, bits) == 2 && bits[0] == 16 &&
+		          studio_preset_bits_options(STUDIO_FORMAT_JPG, bits) == 1,
+		      "bits options");
+		// Réglages de l'export par-dessus le preset.
+		CHECK(studio_preset_apply_overrides(p, "{\"a\": {\"bits\": 16, \"resolution\": 512}, \"gone\": {\"bits\": 8},"
+		                                       " \"c\": {\"bits\": 32}}", err, sizeof(err)) &&
+		          p->textures[0].bits == 16 && p->textures[0].resolution == 512 && p->textures[2].bits == 32 &&
+		          p->textures[1].bits == 8,
+		      "overrides applied, unknown texture ignored: %s", err);
+		CHECK(!studio_preset_apply_overrides(p, "{\"a\": {\"bits\": 32}}", err, sizeof(err)) &&
+		          strstr(err, "32 bits not supported in png") != NULL && p->textures[0].bits == 16,
+		      "override: bits the format refuses: %s", err);
+		CHECK(!studio_preset_apply_overrides(p, "{\"a\": {\"size\": 32}}", err, sizeof(err)) && strstr(err, "size") != NULL,
+		      "override: unknown key: %s", err);
+		CHECK(!studio_preset_apply_overrides(p, "{\"a\": {\"resolution\": -1}}", err, sizeof(err)), "override: bad resolution");
+		CHECK(!studio_preset_apply_overrides(p, "[1]", err, sizeof(err)), "override: not an object");
+		CHECK(studio_preset_apply_overrides(p, "", err, sizeof(err)) && studio_preset_apply_overrides(p, NULL, err, sizeof(err)),
+		      "override: none");
+	}
+	studio_preset_free(p);
+	p = parse("{\"textures\": [{\"name\": \"a\", \"channels\": [\"rough\"], \"format\": \"png\", \"resolution\": \"2k\"}]}",
+	          err, sizeof(err));
+	CHECK(p == NULL && strstr(err, "resolution") != NULL, "resolution: integer expected: %s", err);
+	studio_preset_free(p);
+
 	// Presets livrés.
 	DIR *dir = opendir(shipped_dir);
 	CHECK(dir != NULL, "shipped presets dir %s", shipped_dir);
@@ -568,9 +596,6 @@ static void test_presets(const char *shipped_dir) {
 		p = studio_preset_load(path, ent->d_name, err, sizeof(err));
 		CHECK(p != NULL, "shipped %s: %s", ent->d_name, err);
 		if (p != NULL) {
-			char *stub = studio_preset_stub(p);
-			CHECK(stub != NULL && studio_json_skip(stub, NULL) != NULL, "stub of %s", ent->d_name);
-			free(stub);
 			CHECK(p->description != NULL && p->description[0] != 0, "%s: description", ent->d_name);
 			shipped++;
 		}
@@ -645,6 +670,7 @@ static void test_preflight(const char *work) {
 	studio_report_t r                = {0};
 	studio_preflight_run(&plan, &r);
 	CHECK(has_issue(&r, "resolution", true), "resolution blocking");
+	CHECK(has_issue(&r, "upscaled", false), "16384 from 1000: upscaled note");
 	CHECK(has_issue(&r, "duplicate_path", true), "duplicate blocking");
 	CHECK(has_issue(&r, "not_writable", true), "read-only dir blocking");
 	CHECK(has_issue(&r, "png_too_large", true), "png too large blocking");
@@ -658,7 +684,7 @@ static void test_preflight(const char *work) {
 	for (int i = 0; i < r.count; ++i) {
 		const char *code = r.issues[i].code;
 		bool        note = strcmp(code, "hidden_layers") == 0 || strcmp(code, "height_8bit") == 0 ||
-		            strcmp(code, "jpg_data") == 0 || strcmp(code, "exr_srgb") == 0;
+		            strcmp(code, "jpg_data") == 0 || strcmp(code, "exr_srgb") == 0 || strcmp(code, "upscaled") == 0;
 		CHECK(r.issues[i].note == note, "%s: %s", code, note ? "note" : "not a note");
 	}
 	CHECK(!has_issue(&r, "disk_full", true), "enough space");
@@ -698,7 +724,13 @@ static void test_preflight(const char *work) {
 	free(json);
 	files[2].skip = false;
 	studio_report_free(&r);
-	plan.files = &files[0];
+	plan.files      = &files[0];
+	files[0].width  = 1000; // résolution de la texture, pas celle des calques : 1000 n'est pas un standard
+	studio_preflight_run(&plan, &r);
+	CHECK(has_issue(&r, "resolution", true) && strstr(r.issues[0].message, "base: 1000x1000") != NULL,
+	      "resolution checked per file: %s", r.count > 0 ? r.issues[0].message : "");
+	studio_report_free(&r);
+	files[0].width = files[0].height = 2048;
 	studio_preflight_run(&plan, &r);
 	CHECK(r.blocking == 0, "clean plan: %d blocking (%s)", r.blocking, r.count > 0 ? r.issues[0].message : "");
 	studio_report_free(&r);

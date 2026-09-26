@@ -339,6 +339,7 @@ Ce qui distingue un exporter studio d'un bouton « Export ».
 - Sélection preset / template / version / destination, prévisualisation, rapport de preflight
 - Un bouton dans le menubar → injection de **2 lignes** dans `ui_menubar.c`
 - ✅ **Fait le 2026-09-26** (macOS), en Qt (PySide6, environnement Python fourni par rez) plutôt qu'en boîte native : fenêtre `external/studio_export_window.c` + `assets/studio_export_window.py`. Au lieu d'un bouton de plus, toutes les entrées d'export de textures (menu File, icône, menu de calque, raccourcis) ouvrent la fenêtre : patch `export-window` (4 lignes dans `box_export_show_textures`). Preset, espace OCIO, calques, destination, préflight en direct ; Ctrl+E refait le dernier export. Template/version : pris du fichier de travail (B3), pas encore choisis dans la fenêtre.
+- ✅ **Maps et sidecar du projet** (2026-09-26) : profondeur et résolution par map dans la fenêtre (avec « pour toutes »), maps désactivables, sans toucher au preset ; clé `resolution` des presets (mise à l'échelle à l'export, la résolution du projet ne change pas ; résolutions du show vérifiées par texture). Les presets studio sont **seulement lus** (plus aucun fichier écrit dans `data/`, le dossier de l'app n'étant pas inscriptible au studio). Presets du projet et choix de la fenêtre dans un sidecar à côté du `.arm` (`<nom sans version>.export_settings.json`), écrit par la fenêtre seule.
 
 ### B7 — Mode batch & headless · **4 j** *(révisé après test sur binaire — voir §15.6 de l'analyse)*
 

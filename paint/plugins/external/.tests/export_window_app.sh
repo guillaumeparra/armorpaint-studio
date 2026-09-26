@@ -2,8 +2,10 @@
 # Fenêtre d'export Qt (lot B6) dans ArmorPaint lancé avec son interface : un script ouvre la fenêtre, qui tourne en
 # essai sans intervention (STUDIO_EXPORT_WINDOW_TEST, Qt offscreen) : choix, préflight, export, résultat en JSON.
 # Vérifie l'état envoyé à la fenêtre, l'export et son manifeste (espace imposé), les fichiers décochés, le blocage sans
-# rien écrire, et qu'une deuxième ouverture pendant la première ramène la fenêtre au lieu d'en lancer une autre. La
-# liste groupée (tuiles UDIM, objets) est testée contre un faux ArmorPaint : export_window_ui.py.
+# rien écrire, qu'une deuxième ouverture pendant la première ramène la fenêtre au lieu d'en lancer une autre, les
+# réglages par map (bits, résolution, map désactivée) jusqu'aux fichiers, et le sidecar du projet (p.export_settings.json :
+# choix remis à la réouverture, preset du projet exporté par ArmorPaint). La liste groupée (tuiles UDIM, objets) est
+# testée contre un faux ArmorPaint : export_window_ui.py.
 #
 #   sh .tests/export_window_app.sh [dossier de travail]
 #   APP=<binaire ArmorPaint> pour un autre build (défaut : build Release de paint/).
@@ -22,7 +24,8 @@ ok() { echo "ok   $1"; }
 ko() { echo "FAIL $1"; FAIL=1; }
 check() { if eval "$2"; then ok "$1"; else ko "$1"; fi; }
 
-rm -rf "$W/out_"* "$W/ro" "$W"/*.result.json
+SIDECAR=$W/p.export_settings.json
+rm -rf "$W/out_"* "$W/ro" "$W"/*.result.json "$SIDECAR"
 mkdir -p "$W/ro"
 chmod 555 "$W/ro"
 
@@ -47,9 +50,11 @@ perl -e 'alarm 120; exec @ARGV' "$APP" --background --script "$W/make.c" -AppleP
 [ -f "$W/p.arm" ] || { echo "project not saved, see $W/make.log" >&2; exit 1; }
 
 # Ouvre la fenêtre avec ces choix, attend son résultat (ou la fin du délai), puis arrête ArmorPaint.
-# $1 nom de l'essai, $2 choix (JSON sans "result"), $3 script d'ouverture (défaut : une ouverture).
+# $1 nom de l'essai, $2 choix (JSON sans "result"), $3 script d'ouverture (défaut : une ouverture). Le sidecar du
+# projet est retiré avant, pour que chaque essai parte des mêmes choix, sauf avec KEEP_SIDECAR=1.
 window() {
 	name=$1
+	[ "${KEEP_SIDECAR:-}" = 1 ] || rm -f "$SIDECAR"
 	printf '%s\n' "$2" | sed "s|}\$|, \"result\": \"$W/$name.result.json\"}|" > "$W/$name.test.json"
 	cat > "$W/$name.c" <<EOF
 int main() {
@@ -87,7 +92,7 @@ spaces = {f["texture"]: f["color_space"] for f in m["files"]}
 assert spaces["base_color"] == "ACEScg" and spaces["emission_color"] == "ACEScg", spaces
 assert spaces["normal"] == "raw" and spaces["specular_roughness"] == "raw", spaces
 PY'
-check "fenêtre : les fichiers du rapport et le message de fin" '[ "$(json "$R" "len(r[\"files\"])")" = 7 ] && grep -q "Exported 7 files with Karma" "$R"'
+check "fenêtre : un seul jeu, liste masquée ; 7 fichiers au rapport et au message de fin" '[ "$(json "$R" "r[\"files_shown\"]")" = False ] && [ "$(json "$R" "len(r[\"export\"][\"report\"][\"files\"])")" = 7 ] && grep -q "Exported 7 files with Karma" "$R"'
 check "aucun avertissement (profondeur : note ou rien), la fenêtre n'affiche aucun problème" '"$PY" - "$R" <<PY
 import json, sys
 r = json.load(open(sys.argv[1]))
@@ -120,6 +125,62 @@ window twice '{"preset": "basic", "dir": "'"$W/out_twice"'", "mode": 0, "padding
 	'studio_export_window_show(); studio_export_window_show(); console_log(string("t: open=%d", studio_export_window_is_open()));'
 R=$W/twice.result.json
 check "seconde ouverture : même fenêtre, export basic avec marge" '[ -s "$R" ] && [ "$(json "$R" "r[\"export\"][\"ok\"]")" = "True" ] && [ $(ls "$W/out_twice"/p_*.exr 2>/dev/null | wc -l) -eq 9 ] && [ $(grep -c "studio: export window: .*studio_export_window.py" "$W/twice.log") -eq 1 ]'
+
+# 7. Réglages par map : 512 pour toutes, base_color en 32 bits, normal désactivée.
+window maps '{"preset": "karma", "dir": "'"$W/out_maps"'", "mode": 0, "padding": false, "resolution_all": 512, "overrides": {"base_color": {"bits": 32}}, "disabled": ["normal"]}'
+R=$W/maps.result.json
+check "réglages par map : 6 EXR en 512, base_color en float, sans normal ; réglages au manifeste" '[ "$(json "$R" "r[\"export\"][\"ok\"]")" = "True" ] && "$PY" - "$W" <<PY
+import json, struct, sys
+w = sys.argv[1]
+def exr(path):  # dataWindow et type de pixel du premier canal, lus dans l en-tête
+    d = open(path, "rb").read(4096)
+    i, out = 8, {}
+    while d[i]:
+        name = d[i:d.index(0, i)].decode(); i += len(name) + 1
+        kind = d[i:d.index(0, i)].decode(); i += len(kind) + 1
+        size = struct.unpack("<i", d[i:i + 4])[0]; i += 4
+        out[name] = d[i:i + size]; i += size
+    x0, y0, x1, y1 = struct.unpack("<4i", out["dataWindow"])
+    ch = out["channels"]
+    return (x1 - x0 + 1, y1 - y0 + 1), struct.unpack("<i", ch[ch.index(0) + 1:ch.index(0) + 5])[0]
+m = json.load(open(f"{w}/out_maps/p.export.json"))
+files = {f["texture"]: f for f in m["files"]}
+assert "normal" not in files and len(files) == 6, list(files)
+assert all(f["resolution"] == [512, 512] for f in files.values()), files
+assert files["base_color"]["bits"] == 32 and files["metalness"]["bits"] == 16, files
+assert exr(f"{w}/out_maps/p_base_color.exr") == ((512, 512), 2), exr(f"{w}/out_maps/p_base_color.exr")
+assert exr(f"{w}/out_maps/p_metalness.exr") == ((512, 512), 1)
+over = m["preset"]["overrides"]
+assert over["base_color"] == {"bits": 32, "resolution": 512} and over["metalness"] == {"resolution": 512}, over
+PY'
+check "sidecar : écrit à côté du projet, réglages de karma dedans" '"$PY" - "$SIDECAR" <<PY
+import json, sys
+s = json.load(open(sys.argv[1]))["export"]
+k = s["presets"]["file:karma"]
+assert s["preset"] == "file:karma" and k["disabled"] == ["normal"], s
+assert k["overrides"]["base_color"] == {"bits": 32, "resolution": 512}, k
+PY'
+
+# 8. Réouverture sans rien choisir : tout est remis depuis le sidecar ; puis preset du projet, exporté par ArmorPaint.
+KEEP_SIDECAR=1 window reopen '{"dir": "'"$W/out_reopen"'", "no_export": true}'
+R=$W/reopen.result.json
+check "réouverture : preset, map désactivée et réglages remis" '"$PY" - "$R" <<PY
+import json, sys
+r = json.load(open(sys.argv[1]))["restored"]
+assert r["key"] == "file:karma" and ["normal", "*", "*"] in r["skip"], r
+assert r["overrides"]["base_color"] == {"bits": 32, "resolution": 512}, r
+PY'
+KEEP_SIDECAR=1 window hero '{"dir": "'"$W/out_hero"'", "save_preset": "p_hero"}'
+R=$W/hero.result.json
+check "preset du projet : dans le sidecar, exporté tel quel (6 maps en 512), source au manifeste" '[ "$(json "$R" "r[\"export\"][\"ok\"]")" = "True" ] && "$PY" - "$W" "$SIDECAR" <<PY
+import json, sys
+w, sidecar = sys.argv[1:]
+hero = json.load(open(sidecar))["presets"]["p_hero"]
+assert [t["name"] for t in hero["textures"]] == ["base_color", "specular_roughness", "metalness", "displacement", "opacity", "emission_color"], hero
+m = json.load(open(f"{w}/out_hero/p.export.json"))
+assert m["preset"]["name"] == "p_hero" and m["preset"]["path"] == sidecar and m["preset"]["overrides"] is None, m["preset"]
+assert len(m["files"]) == 6 and all(f["resolution"] == [512, 512] for f in m["files"]), m["files"]
+PY'
 
 chmod 755 "$W/ro"
 [ $FAIL -eq 0 ] && echo "== OK" || echo "== FAIL"

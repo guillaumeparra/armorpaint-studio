@@ -17,7 +17,7 @@ typedef struct {
 	const studio_preset_texture_t *texture; // texture du preset
 	char                          *variant; // objet ou atlas, "" sinon
 	char                          *udim;    // tuile ("1001"), "" sinon
-	int                            width;
+	int                            width;  // taille du fichier (résolution de la texture du preset)
 	int                            height;
 	uint64_t                       raw_size; // échantillons avant compression (estimation haute)
 	bool                           exists;   // renseigné par studio_preflight_run
@@ -28,7 +28,7 @@ typedef struct {
 	const studio_preset_t *preset;
 	studio_plan_file_t    *files;
 	int                    file_count;
-	int                    width; // résolution de la texture d'export
+	int                    width; // résolution des calques (projet) ; chaque fichier a la sienne
 	int                    height;
 	int                    source_bits;      // profondeur des calques aplatis (8, 16, 32)
 	const char            *mode;             // "visible", "selected", "per object", "per UDIM tile"...

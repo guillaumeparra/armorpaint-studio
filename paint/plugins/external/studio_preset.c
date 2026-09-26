@@ -198,7 +198,7 @@ static const char *compression_help(studio_format_t format) {
 	}
 }
 
-static bool valid_bits(studio_format_t format, int bits) {
+bool studio_preset_bits_valid(studio_format_t format, int bits) {
 	switch (format) {
 	case STUDIO_FORMAT_PNG:
 		return bits == 8 || bits == 16;
@@ -224,6 +224,7 @@ typedef struct {
 	studio_color_t color;
 	char          *color_space; // color == STUDIO_COLOR_OCIO
 	int            quality;
+	int            resolution;
 	char          *compression;          // pour les textures au format `format`
 	char          *compressions[4];      // par format ("compression": {"exr": "zip", ...})
 } defaults_t;
@@ -275,6 +276,9 @@ static void parse_defaults(ctx_t *c, studio_json_value_t v, defaults_t *d) {
 		else if (strcmp(key, "quality") == 0) {
 			d->quality = want_int(c, val, "defaults.quality", 1, 100);
 		}
+		else if (strcmp(key, "resolution") == 0) {
+			d->resolution = want_int(c, val, "defaults.resolution", 0, STUDIO_PRESET_MAX_RESOLUTION);
+		}
 		else if (strcmp(key, "compression") == 0) {
 			if (val.type == STUDIO_JSON_OBJECT) {
 				iter_t              ci = iter_begin(val);
@@ -298,7 +302,7 @@ static void parse_defaults(ctx_t *c, studio_json_value_t v, defaults_t *d) {
 			}
 		}
 		else {
-			fail(c, "defaults: unknown key '%s' (format, bits, compression, color_space, quality)", key);
+			fail(c, "defaults: unknown key '%s' (format, bits, compression, color_space, quality, resolution)", key);
 		}
 		free(key);
 	}
@@ -342,7 +346,7 @@ static void parse_texture(ctx_t *c, studio_json_value_t v, studio_preset_texture
 		return;
 	}
 	char *format = NULL, *color = NULL, *compression = NULL;
-	int   bits = 0, quality = 0;
+	int   bits = 0, quality = 0, resolution = -1;
 	bool  has_channels = false;
 
 	iter_t              it = iter_begin(v);
@@ -382,9 +386,12 @@ static void parse_texture(ctx_t *c, studio_json_value_t v, studio_preset_texture
 		else if (strcmp(key, "color_space") == 0) {
 			color = want_string(c, val, sub);
 		}
+		else if (strcmp(key, "resolution") == 0) {
+			resolution = want_int(c, val, sub, 0, STUDIO_PRESET_MAX_RESOLUTION);
+		}
 		else {
 			fail(c, "%s: unknown key '%s' (name, suffix, naming, channels, format, bits, compression, quality, "
-			        "color_space)", where, key);
+			        "color_space, resolution)", where, key);
 		}
 		free(key);
 	}
@@ -405,11 +412,11 @@ static void parse_texture(ctx_t *c, studio_json_value_t v, studio_preset_texture
 		t->format = f < 0 ? STUDIO_FORMAT_PNG : (studio_format_t)f;
 	}
 	if (!c->failed) {
-		t->bits = bits != 0 ? bits : d->bits != 0 && valid_bits(t->format, d->bits) ? d->bits : 0;
+		t->bits = bits != 0 ? bits : d->bits != 0 && studio_preset_bits_valid(t->format, d->bits) ? d->bits : 0;
 		if (t->bits == 0) { // défaut du format quand defaults.bits ne s'y applique pas
 			t->bits = t->format == STUDIO_FORMAT_EXR ? 16 : 8;
 		}
-		if (!valid_bits(t->format, t->bits)) {
+		if (!studio_preset_bits_valid(t->format, t->bits)) {
 			fail(c, "%s: %d bits not supported in %s (%s)", where, t->bits, format_names[t->format], bits_help(t->format));
 		}
 	}
@@ -456,6 +463,7 @@ static void parse_texture(ctx_t *c, studio_json_value_t v, studio_preset_texture
 			}
 		}
 	}
+	t->resolution = resolution >= 0 ? resolution : d->resolution;
 	if (!c->failed && t->format == STUDIO_FORMAT_JPG && t->channels == 4) {
 		fail(c, "%s: jpg has no alpha, use 1 or 3 channels", where);
 	}
@@ -656,55 +664,84 @@ void studio_preset_free(studio_preset_t *p) {
 	free(p);
 }
 
-// ---- Stub upstream ---------------------------------------------------------------------------------------------------
-
-static const char *stub_channel(const studio_expr_t *e) {
-	int   var = studio_expr_single_var(e);
-	float v   = 0.0f;
-	if (var >= 0) {
-		return studio_var_name(var);
+int studio_preset_bits_options(studio_format_t format, int out[3]) {
+	int n = 0;
+	for (int bits = 8; bits <= 32; bits *= 2) {
+		if (studio_preset_bits_valid(format, bits)) {
+			out[n++] = bits;
+		}
 	}
-	if (studio_expr_constant(e, &v)) {
-		return v >= 0.5f ? "1.0" : "0.0";
-	}
-	return "0.0";
+	return n;
 }
 
-char *studio_preset_stub(const studio_preset_t *p) {
-	size_t cap = 64;
-	for (int i = 0; i < p->texture_count; ++i) {
-		cap += strlen(p->textures[i].name) * 6 + 256;
+void studio_preset_output_size(const studio_preset_texture_t *t, int width, int height, int *out_width, int *out_height) {
+	*out_width  = width;
+	*out_height = height;
+	int longest = width > height ? width : height;
+	if (t->resolution <= 0 || longest <= 0 || t->resolution == longest) {
+		return;
 	}
-	char *out = malloc(cap);
-	if (out == NULL) {
-		return NULL;
+	// Le plus grand côté prend la résolution, l'autre suit les proportions du projet (arrondi, au moins 1 pixel).
+	double scale = (double)t->resolution / (double)longest;
+	int    w     = (int)((double)width * scale + 0.5);
+	int    h     = (int)((double)height * scale + 0.5);
+	*out_width   = w > 0 ? w : 1;
+	*out_height  = h > 0 ? h : 1;
+}
+
+bool studio_preset_apply_overrides(studio_preset_t *p, const char *json, char *err, size_t err_size) {
+	ctx_t c = {.err = err, .err_size = err_size};
+	if (err != NULL && err_size > 0) {
+		err[0] = 0;
 	}
-	size_t len = (size_t)snprintf(out, cap, "{\n\t\"textures\": [\n");
-	for (int i = 0; i < p->texture_count; ++i) {
-		const studio_preset_texture_t *t = &p->textures[i];
-		const char                    *ch[4];
-		for (int j = 0; j < 4; ++j) {
-			int src = t->channels == 1 ? 0 : j;
-			ch[j]   = j == 3 && t->channels < 4 ? "1.0" : stub_channel(t->exprs[src]);
-		}
-		uint32_t vars = 0;
-		for (int j = 0; j < t->channels; ++j) {
-			vars |= studio_expr_vars(t->exprs[j]);
-		}
-		// "srgb" upstream encode tout ; le nôtre ne l'applique qu'aux données (les couleurs sont déjà encodées). Un
-		// espace OCIO n'a pas d'équivalent upstream : "linear", valeurs telles quelles.
-		bool  srgb   = t->color == STUDIO_COLOR_SRGB && (vars & STUDIO_VAR_COLOR_MASK) == 0;
-		char *quoted = studio_json_quote(t->name);
-		if (quoted == NULL) {
-			free(out);
-			return NULL;
-		}
-		len += (size_t)snprintf(out + len, cap - len,
-		                        "\t\t{ \"name\": %s, \"channels\": [\"%s\", \"%s\", \"%s\", \"%s\"], \"color_space\": \"%s\" }%s\n",
-		                        quoted, ch[0], ch[1], ch[2], ch[3], srgb ? "srgb" : "linear",
-		                        i + 1 < p->texture_count ? "," : "");
-		free(quoted);
+	if (json == NULL || json[0] == 0) {
+		return true;
 	}
-	snprintf(out + len, cap - len, "\t]\n}\n");
-	return out;
+	studio_json_type_t type;
+	const char        *end = studio_json_skip(json, &type);
+	if (end == NULL || *ws(end) != 0 || type != STUDIO_JSON_OBJECT) {
+		fail(&c, "overrides: JSON object expected");
+		return false;
+	}
+	iter_t              it = iter_begin(studio_json_find(json, ""));
+	char               *name;
+	studio_json_value_t v;
+	while (!c.failed && iter_next(&it, &name, &v)) {
+		studio_preset_texture_t *t = NULL;
+		for (int i = 0; i < p->texture_count && t == NULL; ++i) {
+			t = strcmp(p->textures[i].name, name) == 0 ? &p->textures[i] : NULL;
+		}
+		if (v.type != STUDIO_JSON_OBJECT) {
+			fail(&c, "overrides.%s: object expected", name);
+		}
+		iter_t              oi = iter_begin(v);
+		char               *key;
+		studio_json_value_t ov;
+		while (!c.failed && v.type == STUDIO_JSON_OBJECT && iter_next(&oi, &key, &ov)) {
+			char where[160];
+			snprintf(where, sizeof(where), "overrides.%.64s.%.32s", name, key);
+			if (strcmp(key, "bits") == 0) {
+				int bits = want_int(&c, ov, where, 8, 32);
+				if (!c.failed && t != NULL && !studio_preset_bits_valid(t->format, bits)) {
+					fail(&c, "%s: %d bits not supported in %s (%s)", name, bits, format_names[t->format],
+					     bits_help(t->format));
+				}
+				if (!c.failed && t != NULL) {
+					t->bits = bits;
+				}
+			}
+			else if (strcmp(key, "resolution") == 0) {
+				int res = want_int(&c, ov, where, 0, STUDIO_PRESET_MAX_RESOLUTION);
+				if (!c.failed && t != NULL) {
+					t->resolution = res;
+				}
+			}
+			else {
+				fail(&c, "overrides.%s: unknown key '%s' (bits, resolution)", name, key);
+			}
+			free(key);
+		}
+		free(name); // texture absente du preset : ignorée (réglage d'une autre version du preset)
+	}
+	return !c.failed;
 }

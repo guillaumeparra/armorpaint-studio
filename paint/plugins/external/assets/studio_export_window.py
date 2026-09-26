@@ -5,16 +5,29 @@
 # stdout et stdin sont réservés au protocole (une ligne JSON par message) ; logs et erreurs partent sur stderr, que
 # ArmorPaint recopie dans son log. La fenêtre s'arrête sur EOF de stdin (ArmorPaint fermé ou tué).
 #
+# Sidecar du projet : <dossier du .arm>/<nom sans .arm ni version>.export_settings.json ("robot_v003.arm" ->
+# "robot.export_settings.json", commun aux versions). La fenêtre seule le lit et l'écrit (ArmorPaint n'y touche pas) :
+#   "presets" : presets enregistrés par l'artiste ("Save as preset"), au format des presets studio ;
+#   "export"  : ses choix, remis à l'ouverture (preset, espace, mode, marge, dossier, et par preset : bits et résolution
+#               par map, maps désactivées, fichiers décochés).
+# Écrit après un export abouti, un enregistrement de preset et à la fermeture ; pas de sidecar pour un projet jamais
+# enregistré. Les presets studio des dossiers (data/, STUDIO_EXPORT_PRESETS) sont seulement lus.
+#
 # STUDIO_EXPORT_WINDOW_TEST=<fichier.json> : essai sans intervention (.tests/export_window_app.sh). Le fichier donne
-# les choix {"preset","color_space","dir","mode","padding"}, et en option "skip" (fichiers décochés : [[texture,
-# variant, udim]...]) et "group" ("map" ou "set") ; la fenêtre les applique, attend le préflight, exporte, écrit
-# {"state","preflight","export","summary","files","groups"} dans "result", puis se ferme.
+# des choix, tous optionnels (absents : ceux du sidecar ou d'ArmorPaint) : "preset", "color_space", "dir", "mode",
+# "padding", "skip" (fichiers décochés : [[texture, variant, udim]...]), "group" ("map" ou "set"), "overrides"
+# ({map: {"bits", "resolution"}}), "disabled" (maps), "bits_all" et "resolution_all" (appliqués à toutes les maps),
+# "save_preset" (nom : enregistré dans le sidecar avant l'export), "no_export" (fermer sans exporter). La fenêtre les
+# applique, attend le préflight, exporte, écrit {"state","restored","preflight","export","summary","files","groups",
+# "maps"...} dans "result", puis se ferme.
 
+import copy
 import ctypes
 import ctypes.util
 import html
 import json
 import os
+import re
 import sys
 import threading
 
@@ -26,6 +39,9 @@ PREFLIGHT_DELAY_MS = 250
 # les fichiers existants sont en couleur dans la liste et comptés dans le résumé.
 SHOWN_LEVELS = ("blocking", "warning")
 FILE_KEY_ROLE = QtCore.Qt.UserRole
+RESOLUTIONS = [8192, 4096, 2048, 1024, 512, 256]
+SIDECAR_SUFFIX = ".export_settings.json"
+PRESET_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 ACCENT = "#2f6fb0"
 MUTED = "#8c8c8c"
@@ -159,12 +175,19 @@ def preset_label(name):
     return name.replace("_", " ").replace("-", " ").title()
 
 
-def format_label(f):
-    fmt = f.get("format", "").upper()
-    bits = f.get("bits", 8)
+def bits_label(fmt, bits):
+    fmt = fmt.upper()
     if fmt == "EXR" or (fmt == "TIFF" and bits == 32):
-        return "%s %s" % (fmt, "half" if bits == 16 else "float")
-    return "%s %d-bit" % (fmt, bits)
+        return "%d-bit %s" % (bits, "half" if bits == 16 else "float")
+    return "%d-bit" % bits
+
+
+def format_label(f):
+    return "%s %s" % (f.get("format", "").upper(), bits_label(f.get("format", ""), f.get("bits", 8)))
+
+
+def resolution_label(f):
+    return "%d × %d" % (f.get("width", 0), f.get("height", 0)) if f.get("width") else ""
 
 
 def size_label(n):
@@ -179,6 +202,38 @@ def file_key(f):
     """Identité d'un fichier d'une préflight à l'autre (le chemin change avec le dossier) : texture du preset, objet ou
     atlas, tuile UDIM ; celle que studio_export_set_skip attend."""
     return (f.get("texture", ""), f.get("variant", ""), f.get("udim", ""))
+
+
+def sidecar_path(project_path):
+    """Sidecar des réglages d'export, à côté du .arm ; None pour un projet jamais enregistré."""
+    if not project_path:
+        return None
+    folder, base = os.path.split(project_path)
+    stem = re.sub(r"\.arm$", "", base, flags=re.I)
+    stem = re.sub(r"[._-]v\d+$", "", stem, flags=re.I) or stem
+    return os.path.join(folder, stem + SIDECAR_SUFFIX)
+
+
+def read_sidecar(path):
+    """(contenu, erreur) ; un sidecar absent est vide, un sidecar illisible aussi (et signalé, jamais écrasé)."""
+    if not path or not os.path.exists(path):
+        return {}, None
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("not a JSON object")
+        return data, None
+    except (OSError, ValueError) as e:
+        return {}, "%s: %s" % (os.path.basename(path), e)
+
+
+def write_sidecar(path, data):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=1, ensure_ascii=False)
+        f.write("\n")
+    os.replace(tmp, path)
 
 
 def plural(n, word, words=None):
@@ -296,11 +351,16 @@ class ExportWindow(QtWidgets.QDialog):
         self.in_flight = False
         self.dirty = False
         self.exported = None
-        self.skipped = set()  # file_key des fichiers décochés, gardés d'une préflight à l'autre
+        self.presets = []  # presets du menu : ceux des dossiers (lus) et ceux du sidecar du projet
+        self.per_preset = {}  # clé du preset -> {"overrides", "disabled", "skip"}
+        self.sidecar = None  # chemin, None sans projet enregistré
+        self.sidecar_data = {}
+        self.sidecar_saved = None  # contenu tel que lu ou écrit : rien n'est réécrit s'il n'a pas changé
+        self.sidecar_error = None
         self.expanded = set()  # groupes ouverts
         self.test_log = {}
         self.setWindowTitle("Export Textures")
-        self.resize(760, 740)
+        self.resize(860, 820)
         self._build()
         self.timer = QtCore.QTimer(self, singleShot=True, interval=PREFLIGHT_DELAY_MS)
         self.timer.timeout.connect(self.preflight)
@@ -339,10 +399,21 @@ class ExportWindow(QtWidgets.QDialog):
 
         self.preset = QtWidgets.QComboBox()
         self.preset.currentIndexChanged.connect(self._on_preset)
+        self.save_preset = QtWidgets.QPushButton("Save as preset...")
+        self.save_preset.setObjectName("link")
+        self.save_preset.clicked.connect(lambda: self._save_preset())
+        self.delete_preset = QtWidgets.QPushButton("Delete")
+        self.delete_preset.setObjectName("link")
+        self.delete_preset.setToolTip("Remove this preset from the project")
+        self.delete_preset.clicked.connect(self._delete_preset)
+        preset_row = QtWidgets.QHBoxLayout()
+        preset_row.addWidget(self.preset, 1)
+        preset_row.addWidget(self.save_preset)
+        preset_row.addWidget(self.delete_preset)
         self.description = muted()
         preset_box = QtWidgets.QVBoxLayout()
         preset_box.setSpacing(4)
-        preset_box.addWidget(self.preset)
+        preset_box.addLayout(preset_row)
         preset_box.addWidget(self.description)
         form.addRow("Preset", preset_box)
 
@@ -351,7 +422,7 @@ class ExportWindow(QtWidgets.QDialog):
             "OCIO colour space of the colour textures (base colour, emission...).\n"
             "From preset keeps each texture's own. Data textures (normal, roughness, height...) stay raw."
         )
-        self.space.currentIndexChanged.connect(self.schedule)
+        self.space.currentIndexChanged.connect(self._on_space)
         self.ocio = muted()
         space_box = QtWidgets.QVBoxLayout()
         space_box.setSpacing(4)
@@ -382,6 +453,50 @@ class ExportWindow(QtWidgets.QDialog):
         form.addRow("Destination", dir_box)
         root.addLayout(form)
 
+        # Maps : une ligne par texture du preset, avec ses bits et sa résolution pour cet export.
+        maps_header = QtWidgets.QHBoxLayout()
+        maps_title = QtWidgets.QLabel("Maps")
+        maps_title.setObjectName("section")
+        maps_header.addWidget(maps_title)
+        maps_header.addStretch(1)
+        self.bits_all = QtWidgets.QComboBox()
+        self.bits_all.setToolTip("Set the bit depth of every map (the closest one its format accepts)")
+        self.bits_all.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
+        self.bits_all.addItem("Set all bits...", None)
+        for bits in (8, 16, 32):
+            self.bits_all.addItem("%d-bit" % bits, bits)
+        self.bits_all.activated.connect(self._on_bits_all)
+        maps_header.addWidget(self.bits_all)
+        self.res_all = QtWidgets.QComboBox()
+        self.res_all.setToolTip("Set the resolution of every map")
+        self.res_all.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
+        self.res_all.activated.connect(self._on_resolution_all)
+        maps_header.addWidget(self.res_all)
+        self.reset_maps = QtWidgets.QPushButton("Reset")
+        self.reset_maps.setObjectName("link")
+        self.reset_maps.setToolTip("Back to the preset's maps, bit depths and resolutions")
+        self.reset_maps.clicked.connect(self._reset_maps)
+        maps_header.addWidget(self.reset_maps)
+        root.addLayout(maps_header)
+        self.maps = QtWidgets.QTreeWidget()
+        self.maps.setHeaderLabels(["Map", "Format", "Bits", "Resolution", "Color space", "Size"])
+        self.maps.setRootIsDecorated(False)
+        self.maps.setAlternatingRowColors(True)
+        self.maps.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.maps.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.maps.itemChanged.connect(self._on_map_checked)
+        header_view = self.maps.header()
+        header_view.setStretchLastSection(False)
+        header_view.setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
+        for column in (1, 2, 3, 4, 5):
+            header_view.setSectionResizeMode(column, QtWidgets.QHeaderView.ResizeToContents)
+        root.addWidget(self.maps, 3)
+
+        # Fichiers : seulement quand il y a plusieurs jeux (objets, tuiles UDIM), pour en décocher.
+        self.files_section = QtWidgets.QWidget()
+        files_layout = QtWidgets.QVBoxLayout(self.files_section)
+        files_layout.setContentsMargins(0, 0, 0, 0)
+        files_layout.setSpacing(6)
         files_header = QtWidgets.QHBoxLayout()
         files_title = QtWidgets.QLabel("Files")
         files_title.setObjectName("section")
@@ -405,9 +520,9 @@ class ExportWindow(QtWidgets.QDialog):
         self.check_none.setObjectName("link")
         self.check_none.clicked.connect(lambda: self._check_all(False))
         files_header.addWidget(self.check_none)
-        root.addLayout(files_header)
+        files_layout.addLayout(files_header)
         self.files = QtWidgets.QTreeWidget()
-        self.files.setHeaderLabels(["File", "Format", "Color space", "Size"])
+        self.files.setHeaderLabels(["File", "Format", "Resolution", "Size"])
         self.files.setRootIsDecorated(False)
         self.files.setAlternatingRowColors(True)
         self.files.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
@@ -421,7 +536,9 @@ class ExportWindow(QtWidgets.QDialog):
         header_view.setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
         for column in (1, 2, 3):
             header_view.setSectionResizeMode(column, QtWidgets.QHeaderView.ResizeToContents)
-        root.addWidget(self.files, 1)
+        files_layout.addWidget(self.files, 1)
+        self.files_section.hide()
+        root.addWidget(self.files_section, 4)
 
         self.issues_frame = QtWidgets.QFrame()
         self.issues_frame.setObjectName("issues")
@@ -461,12 +578,25 @@ class ExportWindow(QtWidgets.QDialog):
         footer.addWidget(self.export)
         root.addLayout(footer)
 
-    # -- état d'ArmorPaint
+    # -- état d'ArmorPaint et sidecar
 
     def _on_state(self, data, error):
         if error is not None:
             self.summary.setText('<span style="color:%s">%s</span>' % (ERROR, html.escape(error.get("message", ""))))
             return
+        if self.sidecar is None and data["project"].get("path"):
+            # Premier état : le sidecar est connu ; ses presets sont relus par ArmorPaint (textures, erreurs).
+            self.sidecar = sidecar_path(data["project"]["path"])
+            self.sidecar_data, self.sidecar_error = read_sidecar(self.sidecar)
+            self.sidecar_saved = copy.deepcopy(self.sidecar_data)
+            presets = self.sidecar_data.get("presets")
+            if isinstance(presets, dict) and presets:
+                given = [{"name": n, "preset": p} for n, p in sorted(presets.items()) if isinstance(p, dict)]
+                self.channel.request("state", {"presets": given}, self._on_state)
+                return
+        self._setup(data)
+
+    def _setup(self, data):
         self.state = data
         project = data["project"]
         parts = [os.path.basename(project["path"]) or project["name"]]
@@ -478,49 +608,128 @@ class ExportWindow(QtWidgets.QDialog):
         parts.append("%d-bit layers" % project["bits"])
         self.project.setText("  ·  ".join(parts))
         self.project.setToolTip(
-            "Objects: %s%s" % (", ".join(objects), "\nUDIM tiles: %s" % ", ".join(tiles) if tiles else "")
+            "Objects: %s%s\nExport settings: %s"
+            % (", ".join(objects), "\nUDIM tiles: %s" % ", ".join(tiles) if tiles else "",
+               self.sidecar or "saved with the project once it is saved")
         )
 
-        widgets = (self.preset, self.space, self.mode, self.padding, self.dir)
+        sidecar_presets = self.sidecar_data.get("presets") if isinstance(self.sidecar_data.get("presets"), dict) else {}
+        self.presets = []
+        for p in data.get("project_presets", []):
+            self.presets.append(dict(p, key="project:" + p["name"], project=True, shipped=False, path=self.sidecar,
+                                     json=sidecar_presets.get(p["name"])))
+        for p in data["presets"]:
+            self.presets.append(dict(p, key="file:" + p["name"], project=False))
+
+        prefs = self.sidecar_data.get("export") if isinstance(self.sidecar_data.get("export"), dict) else None
+        restored = self._restore(data, prefs)
+
+        widgets = (self.preset, self.space, self.mode, self.padding, self.dir, self.group)
         for w in widgets:
             w.blockSignals(True)
-        self.preset.clear()
-        presets = sorted(data["presets"], key=lambda p: (p["shipped"], preset_label(p["name"])))
-        previous_shipped = None
-        for p in presets:
-            if previous_shipped is False and p["shipped"]:
-                self.preset.insertSeparator(self.preset.count())
-            previous_shipped = p["shipped"]
-            self.preset.addItem(preset_label(p["name"]), p)
-            if not p["valid"]:
-                self.preset.model().item(self.preset.count() - 1).setEnabled(False)
-        chosen = data["preset"] or ("basic" if any(p["name"] == "basic" for p in presets) else "")
-        index = next((i for i in range(self.preset.count()) if (self.preset.itemData(i) or {}).get("name") == chosen), -1)
-        if index < 0:
-            index = next((i for i in range(self.preset.count()) if (self.preset.itemData(i) or {}).get("valid")), 0)
-        self.preset.setCurrentIndex(index)
-
+        self._fill_presets(restored["preset"])
         self.space.clear()
         self.space.addItem("From preset", "")
         for cs in data["color_spaces"]:
             self.space.addItem(cs, cs)
-        current = data["color_space"]
+        current = restored["color_space"]
         if current and self.space.findData(current) < 0:
             self.space.addItem("%s (unknown)" % current, current)
         self.space.setCurrentIndex(max(0, self.space.findData(current)))
         ocio = data["ocio"]
         self.ocio.setText("OCIO config: %s" % ocio["config"] if ocio["ready"] else "OCIO unavailable: %s" % ocio["status"])
-
-        self.mode.setCurrentIndex(data["mode"] if 0 <= data["mode"] < len(MODES) else 0)
-        self.padding.setChecked(bool(data["padding"]))
-        self.dir.setText(data["dir"])
+        mode = restored["mode"]
+        self.mode.setCurrentIndex(mode if isinstance(mode, int) and 0 <= mode < len(MODES) else 0)
+        self.padding.setChecked(bool(restored["padding"]))
+        self.dir.setText(restored["dir"] or "")
+        self.group.setCurrentIndex(max(0, self.group.findData(restored.get("group", "map"))))
         for w in widgets:
             w.blockSignals(False)
+        self._fill_resolutions()
         self._set_enabled(True)
         self.space.setEnabled(ocio["ready"])
         self._on_preset()
+        if self.sidecar_error:
+            log("export settings not read: %s" % self.sidecar_error)
         if self.test is not None:
+            self.test_log["restored"] = dict(self.choices(), key=self.preset_key())
             self._run_test_setup()
+
+    def _restore(self, data, prefs):
+        """Choix remis à l'ouverture : ceux du sidecar du projet, sinon l'export courant d'ArmorPaint."""
+        if prefs is not None:
+            for key, value in (prefs.get("presets") or {}).items():
+                if isinstance(value, dict):
+                    self.per_preset[key] = {
+                        "overrides": {n: dict(o) for n, o in (value.get("overrides") or {}).items() if isinstance(o, dict)},
+                        "disabled": set(value.get("disabled") or []),
+                        "skip": {tuple(k) for k in value.get("skip") or [] if isinstance(k, list) and len(k) == 3},
+                    }
+            return {
+                "preset": prefs.get("preset") or "",
+                "color_space": prefs.get("color_space") or "",
+                "mode": prefs.get("mode", data["mode"]),
+                "padding": prefs.get("padding", data["padding"]),
+                "dir": prefs.get("dir") or data["dir"],
+                "group": prefs.get("group", "map"),
+            }
+        key = ("project:" if data.get("preset_project") else "file:") + data["preset"] if data["preset"] else ""
+        if key:
+            skip = {tuple(k) for k in data.get("skip", [])}
+            disabled = {k[0] for k in skip if k[1:] == ("*", "*")}
+            self.per_preset[key] = {
+                "overrides": data.get("overrides") or {},
+                "disabled": disabled,
+                "skip": {k for k in skip if k[1:] != ("*", "*")},
+            }
+        return {"preset": key, "color_space": data["color_space"], "mode": data["mode"], "padding": data["padding"],
+                "dir": data["dir"], "group": "map"}
+
+    def _fill_presets(self, chosen):
+        """Presets du projet, puis ceux des dossiers de presets, puis ceux livrés avec l'app."""
+        self.preset.blockSignals(True)
+        self.preset.clear()
+
+        def rank(p):
+            return (0 if p["project"] else 2 if p.get("shipped") else 1, preset_label(p["name"]))
+
+        previous = None
+        for p in sorted(self.presets, key=rank):
+            group = rank(p)[0]
+            if previous is not None and group != previous:
+                self.preset.insertSeparator(self.preset.count())
+            previous = group
+            self.preset.addItem(preset_label(p["name"]) + ("  ·  project" if p["project"] else ""), p)
+            if not p["valid"]:
+                self.preset.model().item(self.preset.count() - 1).setEnabled(False)
+        if chosen and ":" not in chosen:
+            chosen = "file:" + chosen
+        index = self._preset_index(chosen)
+        if index < 0 or not (self.preset.itemData(index) or {}).get("valid"):
+            index = self._preset_index("file:basic")
+        if index < 0:
+            index = next((i for i in range(self.preset.count()) if (self.preset.itemData(i) or {}).get("valid")), 0)
+        self.preset.setCurrentIndex(index)
+        self.preset.blockSignals(False)
+
+    def _preset_index(self, key):
+        return next((i for i in range(self.preset.count()) if (self.preset.itemData(i) or {}).get("key") == key), -1)
+
+    def _fill_resolutions(self):
+        self.res_all.clear()
+        self.res_all.addItem("Set all resolutions...", None)
+        self.res_all.addItem("Project (%s)" % self._size_label(0), 0)
+        for r in RESOLUTIONS:
+            self.res_all.addItem(self._size_label(r), r)
+
+    def _size_label(self, resolution):
+        """Taille du fichier pour une résolution (plus grand côté ; 0 : celle du projet), comme ArmorPaint la calcule."""
+        project = self.state["project"]
+        w, h = project["width"], project["height"]
+        longest = max(w, h)
+        if resolution and longest and resolution != longest:
+            w, h = max(1, int(w * resolution / longest + 0.5)), max(1, int(h * resolution / longest + 0.5))
+        return "%d" % w if w == h else "%d × %d" % (w, h)
 
     def _on_raise(self, message):
         mode = message.get("mode")
@@ -530,28 +739,73 @@ class ExportWindow(QtWidgets.QDialog):
 
     def _on_host_gone(self):
         log("ArmorPaint closed the connection")
+        self._save_settings()
         QtWidgets.QApplication.instance().quit()
 
     # -- choix
 
+    def current(self):
+        return self.preset.currentData() or {}
+
+    def preset_key(self):
+        return self.current().get("key", "")
+
+    def settings(self, key=None):
+        key = key or self.preset_key()
+        return self.per_preset.setdefault(key, {"overrides": {}, "disabled": set(), "skip": set()})
+
+    def textures(self):
+        return self.current().get("textures", [])
+
+    def overrides(self):
+        """Réglages qui diffèrent du preset, pour ses textures seulement."""
+        out = {}
+        stored = self.settings()["overrides"]
+        for t in self.textures():
+            o = stored.get(t["name"], {})
+            diff = {k: o[k] for k in ("bits", "resolution") if k in o and o[k] != t[k]}
+            if diff:
+                out[t["name"]] = diff
+        return out
+
+    def effective(self, t):
+        o = self.settings()["overrides"].get(t["name"], {})
+        return o.get("bits", t["bits"]), o.get("resolution", t["resolution"])
+
     def choices(self):
-        preset = self.preset.currentData() or {}
-        return {
+        preset = self.current()
+        s = self.settings()
+        names = {t["name"] for t in self.textures()}
+        disabled = sorted(n for n in s["disabled"] if n in names)
+        args = {
             "preset": preset.get("name", ""),
             "color_space": self.space.currentData() or "",
             "dir": self.dir.text().strip(),
             "mode": self.mode.currentIndex(),
             "padding": self.padding.isChecked(),
-            "skip": [list(k) for k in sorted(self.skipped)],
+            "skip": [list(k) for k in sorted(s["skip"]) if k[0] not in s["disabled"]] + [[n, "*", "*"] for n in disabled],
+            "overrides": self.overrides(),
         }
+        if preset.get("project"):
+            args["preset_json"] = preset.get("json") or {}
+            args["preset_source"] = self.sidecar or ""
+        return args
 
     def _on_preset(self):
-        preset = self.preset.currentData() or {}
+        preset = self.current()
         text = preset.get("description", "")
-        if not preset.get("shipped", True):
+        if preset.get("project"):
+            text = (text + "\n" if text else "") + "Saved with the project: %s" % (self.sidecar or "")
+        elif not preset.get("shipped", True):
             text += "\n%s" % preset.get("path", "")
         self.description.setText(text)
-        self.description.setToolTip(preset.get("path", ""))
+        self.description.setToolTip(preset.get("path", "") or "")
+        self.delete_preset.setVisible(bool(preset.get("project")))
+        self._show_maps()
+        self.schedule()
+
+    def _on_space(self, *_):
+        self._show_maps()
         self.schedule()
 
     def _browse(self):
@@ -566,15 +820,171 @@ class ExportWindow(QtWidgets.QDialog):
 
     def _set_enabled(self, enabled):
         for w in (self.preset, self.space, self.mode, self.padding, self.dir, self.browse, self.files, self.group,
-                  self.check_all, self.check_none):
+                  self.check_all, self.check_none, self.maps, self.bits_all, self.res_all, self.reset_maps,
+                  self.save_preset, self.delete_preset):
             w.setEnabled(enabled)
         if enabled and self.state is not None:
             self.space.setEnabled(self.state["ocio"]["ready"])
+            self.save_preset.setEnabled(self.sidecar is not None)
+            self.save_preset.setToolTip(
+                "Save these maps, bit depths, resolutions and colour space as a preset of this project"
+                if self.sidecar else "Save the project first: its presets are kept next to it"
+            )
         self._update_export_button()
 
     def _update_export_button(self):
         blocked = self.report is not None and not self.report.get("ok", True)
         self.export.setEnabled(self.state is not None and not self.busy and bool(self.dir.text().strip()) and not blocked)
+
+    # -- maps
+
+    def _show_maps(self):
+        """Une ligne par texture du preset : case (map exportée), format, bits et résolution de cet export, espace."""
+        if self.state is None:
+            return
+        tree = self.maps
+        tree.blockSignals(True)
+        tree.clear()
+        s = self.settings()
+        space = self.space.currentData() or ""
+        for t in self.textures():
+            bits, resolution = self.effective(t)
+            item = QtWidgets.QTreeWidgetItem([t["name"], t["format"].upper(), "", "", "", ""])
+            item.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemNeverHasChildren)
+            item.setData(0, FILE_KEY_ROLE, t["name"])
+            item.setCheckState(0, QtCore.Qt.Unchecked if t["name"] in s["disabled"] else QtCore.Qt.Checked)
+            item.setToolTip(0, "%s: %d channel%s, file suffix \"%s\"" % (t["name"], t["channels"],
+                                                                         "" if t["channels"] == 1 else "s", t["suffix"]))
+            item.setText(4, space if space and t.get("color") else t["color_space"])
+            item.setTextAlignment(5, QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            tree.addTopLevelItem(item)
+
+            bits_box = QtWidgets.QComboBox()
+            for b in t["bits_options"]:
+                bits_box.addItem(bits_label(t["format"], b), b)
+            bits_box.setCurrentIndex(max(0, bits_box.findData(bits)))
+            bits_box.setEnabled(len(t["bits_options"]) > 1)
+            bits_box.setToolTip("Preset: %s" % bits_label(t["format"], t["bits"]))
+            bits_box.activated.connect(lambda _, n=t["name"], box=bits_box: self._set_override(n, "bits", box.currentData()))
+            tree.setItemWidget(item, 2, bits_box)
+
+            res_box = QtWidgets.QComboBox()
+            res_box.addItem("Project (%s)" % self._size_label(0), 0)
+            for r in sorted(set(RESOLUTIONS + [t["resolution"], resolution] if t["resolution"] or resolution
+                                else RESOLUTIONS), reverse=True):
+                if r:
+                    res_box.addItem(self._size_label(r), r)
+            res_box.setCurrentIndex(max(0, res_box.findData(resolution)))
+            res_box.setToolTip("Preset: %s" % ("project resolution" if not t["resolution"] else self._size_label(t["resolution"])))
+            res_box.activated.connect(lambda _, n=t["name"], box=res_box: self._set_override(n, "resolution", box.currentData()))
+            tree.setItemWidget(item, 3, res_box)
+            item.setSizeHint(0, QtCore.QSize(0, max(bits_box.sizeHint().height(), res_box.sizeHint().height()) + 2))
+            self._mark_overridden(item, t)
+            self._mark_enabled(item)
+        tree.blockSignals(False)
+        self._update_map_sizes()
+        self._fit_maps()
+
+    def _mark_overridden(self, item, t):
+        """Réglages qui s'écartent du preset : en couleur, pour les voir d'un coup d'œil."""
+        o = self.overrides().get(t["name"], {})
+        for column, key in ((2, "bits"), (3, "resolution")):
+            box = self.maps.itemWidget(item, column)
+            if box is not None:
+                box.setStyleSheet("color: %s;" % ACCENT if key in o else "")
+
+    def _mark_enabled(self, item):
+        """Map désactivée : grisée, ses réglages gardés mais figés."""
+        on = item.checkState(0) == QtCore.Qt.Checked
+        color = QtGui.QColor("#dcdcdc" if on else "#666666")
+        for column in (0, 1, 4, 5):
+            item.setForeground(column, QtGui.QBrush(color))
+        for column in (2, 3):
+            box = self.maps.itemWidget(item, column)
+            if box is not None:
+                box.setEnabled(on and (column == 3 or box.count() > 1))
+
+    def _fit_maps(self):
+        rows = max(1, self.maps.topLevelItemCount())
+        row = self.maps.sizeHintForRow(0) if self.maps.topLevelItemCount() else 24
+        self.maps.setMaximumHeight(self.maps.header().height() + row * rows + 6)
+
+    def _set_override(self, name, field, value):
+        t = next((t for t in self.textures() if t["name"] == name), None)
+        if t is None:
+            return
+        stored = self.settings()["overrides"]
+        entry = stored.setdefault(name, {})
+        if value == t[field]:
+            entry.pop(field, None)
+        else:
+            entry[field] = value
+        if not entry:
+            stored.pop(name, None)
+        for i in range(self.maps.topLevelItemCount()):
+            item = self.maps.topLevelItem(i)
+            if item.data(0, FILE_KEY_ROLE) == name:
+                self._mark_overridden(item, t)
+        self.schedule()
+
+    def _on_bits_all(self, index):
+        bits = self.bits_all.itemData(index)
+        self.bits_all.setCurrentIndex(0)
+        if bits is None:
+            return
+        self._apply_all_bits(bits)
+
+    def _apply_all_bits(self, bits):
+        for t in self.textures():
+            options = t["bits_options"]
+            lower = [b for b in options if b <= bits]
+            self._set_override(t["name"], "bits", max(lower) if lower else min(options))
+        self._show_maps()
+
+    def _on_resolution_all(self, index):
+        resolution = self.res_all.itemData(index)
+        self.res_all.setCurrentIndex(0)
+        if resolution is None:
+            return
+        self._apply_all_resolutions(resolution)
+
+    def _apply_all_resolutions(self, resolution):
+        for t in self.textures():
+            self._set_override(t["name"], "resolution", resolution)
+        self._show_maps()
+
+    def _reset_maps(self):
+        s = self.settings()
+        s["overrides"].clear()
+        s["disabled"].clear()
+        self._show_maps()
+        self._show_files(self.report)
+        self.schedule()
+
+    def _on_map_checked(self, item, column):
+        if column != 0:
+            return
+        name = item.data(0, FILE_KEY_ROLE)
+        disabled = self.settings()["disabled"]
+        if item.checkState(0) == QtCore.Qt.Checked:
+            disabled.discard(name)
+        else:
+            disabled.add(name)
+        self.maps.blockSignals(True)
+        self._mark_enabled(item)
+        self.maps.blockSignals(False)
+        self._show_files(self.report)
+        self._update_map_sizes()
+        self._update_summary()
+        self.schedule()
+
+    def _update_map_sizes(self):
+        files = [f for f in self._report_files() if self._selected(f)]
+        for i in range(self.maps.topLevelItemCount()):
+            item = self.maps.topLevelItem(i)
+            name = item.data(0, FILE_KEY_ROLE)
+            size = sum(f.get("size_estimate", 0) for f in files if f.get("texture") == name)
+            item.setText(5, size_label(size) if size else "")
 
     # -- préflight
 
@@ -616,13 +1026,20 @@ class ExportWindow(QtWidgets.QDialog):
         else:
             self.report = data.get("report")
             self._show_report(self.report)
+            if self.report is None and data.get("error"):
+                message = data["error"].strip()
+                self.summary.setText('<span style="color:%s">%s</span>' % (ERROR, html.escape(message.splitlines()[0])))
+                self.issues.setText(html.escape(message).replace("\n", "<br>"))
+                self._fit_issues(message.count("\n") + 1)
+                self.issues_frame.show()
             if self.test is not None and "preflight" not in self.test_log:
                 self.test_log["preflight"] = data
-                QtCore.QTimer.singleShot(0, self.run_export)
+                QtCore.QTimer.singleShot(0, self.run_export if not self.test.get("no_export") else self._finish_test)
         self._update_export_button()
 
     def _show_report(self, report):
         self._show_files(report)
+        self._update_map_sizes()
         issues = [i for i in (report or {}).get("issues", []) if i.get("level") in SHOWN_LEVELS and i.get("code") != "exists"]
         if issues:
             lines = []
@@ -647,56 +1064,60 @@ class ExportWindow(QtWidgets.QDialog):
 
     # -- liste des fichiers
 
+    def _report_files(self):
+        """Fichiers du dernier rapport qui sont ceux du preset affiché (le rapport peut dater du preset précédent)."""
+        if self.report is None or self.report.get("preset") != self.current().get("name"):
+            return []
+        return self.report.get("files", [])
+
+    def _selected(self, f):
+        s = self.settings()
+        return f.get("texture") not in s["disabled"] and file_key(f) not in s["skip"]
+
     def _show_files(self, report):
-        """Arbre des fichiers à cocher. Un seul jeu (pas d'objets ni de tuiles) : liste simple ; sinon groupé par map ou
-        par objet / tuile, groupes fermés, avec une case pour tout le groupe."""
+        """Arbre des fichiers à cocher, quand il y a plusieurs jeux (objets, tuiles UDIM) : groupé par map ou par
+        objet / tuile, groupes fermés, avec une case pour tout le groupe. Les maps désactivées n'y figurent pas."""
         tree = self.files
         scroll = tree.verticalScrollBar().value()
         tree.blockSignals(True)
         tree.clear()
-        files = (report or {}).get("files", [])
-        sets = {(f.get("variant", ""), f.get("udim", "")) for f in files}
+        disabled = self.settings()["disabled"]
+        files = [f for f in self._report_files() if f.get("texture") not in disabled]
+        sets = {(f.get("variant", ""), f.get("udim", "")) for f in self._report_files()}
         grouped = len(sets) > 1
-        for w in (self.group_label, self.group):
-            w.setVisible(grouped)
-        for w in (self.check_all, self.check_none):
-            w.setVisible(bool(files))
+        self.files_section.setVisible(grouped)
         self.composition.setText(composition(files, self.mode.currentIndex()) if files else "")
-        tree.setRootIsDecorated(grouped)
+        tree.setRootIsDecorated(True)
         by_map = self.group.currentData() == "map"
-        if not grouped:
-            for f in files:
-                tree.addTopLevelItem(self._file_item(f, os.path.basename(f["path"])))
-        else:
-            groups = {}
-            for f in files:
-                key = f.get("texture", "") if by_map else set_label(f)
-                groups.setdefault(key, []).append(f)
-            for name, members in groups.items():
-                if by_map:
-                    members.sort(key=lambda f: (f.get("variant", ""), int(f.get("udim") or 0)))
-                parent = QtWidgets.QTreeWidgetItem([name, "", "", ""])
-                parent.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsAutoTristate)
-                font = parent.font(0)
-                font.setWeight(QtGui.QFont.DemiBold)
-                parent.setFont(0, font)
-                parent.setData(0, FILE_KEY_ROLE, ("group", name))
-                if by_map:
-                    parent.setText(1, format_label(members[0]))
-                    parent.setText(2, members[0].get("color_space", ""))
-                parent.setTextAlignment(3, QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-                tree.addTopLevelItem(parent)
-                for f in members:
-                    parent.addChild(self._file_item(f, os.path.basename(f["path"]), in_group=by_map))
-                parent.setExpanded(("group", name) in self.expanded)
+        groups = {}
+        for f in files if grouped else []:
+            key = f.get("texture", "") if by_map else set_label(f)
+            groups.setdefault(key, []).append(f)
+        for name, members in groups.items():
+            if by_map:
+                members.sort(key=lambda f: (f.get("variant", ""), int(f.get("udim") or 0)))
+            parent = QtWidgets.QTreeWidgetItem([name, "", "", ""])
+            parent.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsAutoTristate)
+            font = parent.font(0)
+            font.setWeight(QtGui.QFont.DemiBold)
+            parent.setFont(0, font)
+            parent.setData(0, FILE_KEY_ROLE, ("group", name))
+            if by_map:
+                parent.setText(1, format_label(members[0]))
+                parent.setText(2, resolution_label(members[0]))
+            parent.setTextAlignment(3, QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            tree.addTopLevelItem(parent)
+            for f in members:
+                parent.addChild(self._file_item(f, os.path.basename(f["path"]), in_group=by_map))
+            parent.setExpanded(("group", name) in self.expanded)
         self._refresh_groups()
         tree.blockSignals(False)
         tree.verticalScrollBar().setValue(scroll)
 
     def _file_item(self, f, label, in_group=False):
-        # Dans un groupe par map, format et espace sont ceux du groupe : pas répétés sur chaque ligne.
+        # Dans un groupe par map, format et résolution sont ceux du groupe : pas répétés sur chaque ligne.
         item = QtWidgets.QTreeWidgetItem(
-            [label, "" if in_group else format_label(f), "" if in_group else f.get("color_space", ""),
+            [label, "" if in_group else format_label(f), "" if in_group else resolution_label(f),
              size_label(f.get("size_estimate", 0))]
         )
         item.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemNeverHasChildren)
@@ -704,7 +1125,7 @@ class ExportWindow(QtWidgets.QDialog):
         item.setData(0, FILE_KEY_ROLE, key)
         item.setData(3, FILE_KEY_ROLE, f.get("size_estimate", 0))
         item.setData(1, FILE_KEY_ROLE, bool(f.get("exists")))
-        item.setCheckState(0, QtCore.Qt.Unchecked if key in self.skipped else QtCore.Qt.Checked)
+        item.setCheckState(0, QtCore.Qt.Unchecked if key in self.settings()["skip"] else QtCore.Qt.Checked)
         item.setToolTip(0, f["path"] + ("\nReplaces an existing file" if f.get("exists") else ""))
         item.setTextAlignment(3, QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
         if f.get("exists"):
@@ -721,7 +1142,7 @@ class ExportWindow(QtWidgets.QDialog):
                 yield top.child(k)
 
     def _refresh_groups(self):
-        """Taille cochée et « 5/7 » de chaque groupe."""
+        """Taille cochée et « 5 of 7 » de chaque groupe."""
         tree = self.files
         for i in range(tree.topLevelItemCount()):
             top = tree.topLevelItem(i)
@@ -743,19 +1164,20 @@ class ExportWindow(QtWidgets.QDialog):
     def _on_file_checked(self, item, column):
         if column != 0:
             return
-        skipped = set(self.skipped)
+        skip = self.settings()["skip"]
+        before = set(skip)
         for leaf in self._leaves():
             key = leaf.data(0, FILE_KEY_ROLE)
             if leaf.checkState(0) == QtCore.Qt.Checked:
-                skipped.discard(key)
+                skip.discard(key)
             else:
-                skipped.add(key)
-        if skipped == self.skipped:
+                skip.add(key)
+        if skip == before:
             return
-        self.skipped = skipped
         self.files.blockSignals(True)
         self._refresh_groups()
         self.files.blockSignals(False)
+        self._update_map_sizes()
         self._update_summary()
         self.schedule()  # existants, place disque : seulement les fichiers cochés
 
@@ -769,7 +1191,8 @@ class ExportWindow(QtWidgets.QDialog):
     def _update_summary(self):
         report = self.report
         if report is None:
-            self.summary.setText("")
+            if not self.summary.text().startswith("<span"):
+                self.summary.setText("")
             return
         issues = report.get("issues", [])
         blocking = [i for i in issues if i.get("level") == "blocking"]
@@ -780,18 +1203,171 @@ class ExportWindow(QtWidgets.QDialog):
                 % (ERROR, "No file selected" if only else "Blocked: %s" % plural(len(blocking), "problem"))
             )
             return
-        leaves = list(self._leaves())
-        chosen = [l for l in leaves if l.checkState(0) == QtCore.Qt.Checked]
-        size = sum(l.data(3, FILE_KEY_ROLE) or 0 for l in chosen)
-        replaced = sum(1 for l in chosen if l.data(1, FILE_KEY_ROLE))
+        disabled = self.settings()["disabled"]
+        files = [f for f in self._report_files() if f.get("texture") not in disabled]  # maps désactivées : hors compte
+        chosen = [f for f in files if self._selected(f)]
+        size = sum(f.get("size_estimate", 0) for f in chosen)
+        replaced = sum(1 for f in chosen if f.get("exists"))
         text = "%s%s  ·  %s uncompressed" % (
-            len(chosen) if len(chosen) == len(leaves) else "%d of %d" % (len(chosen), len(leaves)),
-            " file" if len(leaves) == 1 else " files",
+            len(chosen) if len(chosen) == len(files) else "%d of %d" % (len(chosen), len(files)),
+            " file" if len(files) == 1 else " files",
             size_label(size),
         )
         if replaced:
             text += '  ·  <span style="color:%s">%s replaced</span>' % (WARNING, plural(replaced, "existing file"))
         self.summary.setText(text)
+
+    # -- presets du projet
+
+    def _base_preset_json(self, preset):
+        if preset.get("project"):
+            return copy.deepcopy(preset.get("json") or {})
+        with open(preset["path"], encoding="utf-8") as f:
+            return json.load(f)
+
+    def _save_preset(self, name=None):
+        """Preset du projet : celui choisi, avec les maps, bits, résolutions et l'espace de cet export."""
+        if self.sidecar is None:
+            return
+        preset = self.current()
+        if name is None:
+            suggestion = preset["name"] if preset.get("project") else "%s_custom" % preset["name"]
+            name, ok = QtWidgets.QInputDialog.getText(self, "Save as preset", "Preset name (kept with the project):",
+                                                      text=suggestion)
+            if not ok:
+                return
+        name = name.strip()
+        if not PRESET_NAME.match(name):
+            self._say_error("Preset name: letters, digits, '_', '-' or '.', starting with a letter or digit")
+            return
+        if any(not p["project"] and p["name"] == name for p in self.presets):
+            self._say_error("A studio preset is already called %s: choose another name" % name)
+            return
+        exists = any(p["project"] and p["name"] == name for p in self.presets)
+        if exists and self.test is None and QtWidgets.QMessageBox.question(
+                self, "Save as preset", "Replace the project preset %s?" % name) != QtWidgets.QMessageBox.Yes:
+            return
+        try:
+            data = self._base_preset_json(preset)
+        except (OSError, ValueError) as e:
+            self._say_error("Cannot read %s: %s" % (preset.get("path"), e))
+            return
+        s = self.settings()
+        info = {t["name"]: t for t in self.textures()}
+        space = self.space.currentData() or ""
+        textures = []
+        for tex in data.get("textures", []):
+            t = info.get(tex.get("name"))
+            if t is None or t["name"] in s["disabled"]:
+                continue
+            bits, resolution = self.effective(t)
+            if bits != t["bits"]:
+                tex["bits"] = bits
+            if resolution != t["resolution"]:
+                tex["resolution"] = resolution
+            if space and t.get("color"):
+                tex["color_space"] = space
+            textures.append(tex)
+        if not textures:
+            self._say_error("No map to save: enable at least one")
+            return
+        data["textures"] = textures
+        if preset.get("project"):
+            data["description"] = preset.get("description", "")
+        else:
+            data["description"] = "From %s%s" % (preset_label(preset["name"]),
+                                                ": " + preset["description"] if preset.get("description") else "")
+        self.channel.request("inspect", {"name": name, "preset": data},
+                             lambda info, error: self._on_saved_preset(name, data, info, error))
+
+    def _on_saved_preset(self, name, data, info, error):
+        if error is not None or not info.get("valid"):
+            self._say_error("Preset %s not saved: %s" % (name, (error or {}).get("message") or info.get("error")))
+            return
+        previous = self.preset_key()
+        key = "project:" + name
+        presets = self.sidecar_data.setdefault("presets", {})
+        if not isinstance(presets, dict):
+            presets = self.sidecar_data["presets"] = {}
+        presets[name] = data
+        # Le preset porte maintenant les réglages : ils repartent de zéro ; les fichiers décochés restent.
+        skip = set(self.settings(previous)["skip"])
+        self.per_preset[key] = {"overrides": {}, "disabled": set(), "skip": skip}
+        self.presets = [p for p in self.presets if p["key"] != key]
+        self.presets.append(dict(info, key=key, project=True, shipped=False, path=self.sidecar, json=data))
+        self._fill_presets(key)
+        self.space.blockSignals(True)
+        self.space.setCurrentIndex(0)  # l'espace est dans le preset
+        self.space.blockSignals(False)
+        self._save_settings()
+        self._on_preset()
+        self.summary.setText('<span style="color:%s">Preset %s saved with the project</span>' % (SUCCESS, html.escape(name)))
+        if self.test is not None:
+            self.test_log["saved_preset"] = name
+
+    def _delete_preset(self):
+        preset = self.current()
+        if not preset.get("project"):
+            return
+        if QtWidgets.QMessageBox.question(self, "Delete preset", "Delete the project preset %s?"
+                                          % preset["name"]) != QtWidgets.QMessageBox.Yes:
+            return
+        (self.sidecar_data.get("presets") or {}).pop(preset["name"], None)
+        self.per_preset.pop(preset["key"], None)
+        self.presets = [p for p in self.presets if p["key"] != preset["key"]]
+        self._fill_presets("")
+        self._save_settings()
+        self._on_preset()
+
+    def _say_error(self, message):
+        log(message)
+        self.summary.setText('<span style="color:%s">%s</span>' % (ERROR, html.escape(message)))
+        if self.test is not None:
+            self.test_log.setdefault("errors", []).append(message)
+
+    # -- sidecar
+
+    def _settings_json(self):
+        keys = {p["key"] for p in self.presets}
+        per = {}
+        for key, s in self.per_preset.items():
+            if key not in keys:
+                continue
+            entry = {}
+            if s["overrides"]:
+                entry["overrides"] = s["overrides"]
+            if s["disabled"]:
+                entry["disabled"] = sorted(s["disabled"])
+            if s["skip"]:
+                entry["skip"] = [list(k) for k in sorted(s["skip"])]
+            if entry:
+                per[key] = entry
+        return {
+            "preset": self.preset_key(),
+            "color_space": self.space.currentData() or "",
+            "mode": self.mode.currentIndex(),
+            "padding": self.padding.isChecked(),
+            "dir": self.dir.text().strip(),
+            "group": self.group.currentData(),
+            "presets": per,
+        }
+
+    def _save_settings(self):
+        """Choix et presets du projet dans le sidecar ; rien n'est écrit s'ils n'ont pas changé, ni si le sidecar était
+        illisible (il n'est jamais écrasé)."""
+        if self.sidecar is None or self.state is None or self.sidecar_error:
+            return
+        data = dict(self.sidecar_data)
+        data["version"] = 1
+        data["export"] = self._settings_json()
+        if data == self.sidecar_saved:
+            return
+        try:
+            write_sidecar(self.sidecar, data)
+            self.sidecar_data = data
+            self.sidecar_saved = copy.deepcopy(data)
+        except OSError as e:
+            log("export settings not saved: %s" % e)
 
     # -- export
 
@@ -817,13 +1393,15 @@ class ExportWindow(QtWidgets.QDialog):
             report = data.get("report") or {}
             self.exported = report.get("destination")
             count = sum(1 for f in report.get("files", []) if not f.get("skip"))
+            self.report = report
+            self._update_map_sizes()
             self.summary.setText(
                 '<span style="color:%s">Exported %s with %s</span>'
                 % (SUCCESS, plural(count, "file"), preset_label(report.get("preset", "")))
             )
             self.cancel.setText("Close")
             self.reveal.show()
-            self.report = report
+            self._save_settings()
         else:
             self.report = data.get("report")
             self._show_report(self.report)
@@ -851,6 +1429,7 @@ class ExportWindow(QtWidgets.QDialog):
         if self.busy:
             event.ignore()  # l'export tourne dans ArmorPaint : on attend sa réponse
             return
+        self._save_settings()
         super().closeEvent(event)
         if self.mac is not None:
             self.mac.hide()  # macOS rend le premier plan à ArmorPaint
@@ -861,23 +1440,59 @@ class ExportWindow(QtWidgets.QDialog):
     def _run_test_setup(self):
         t = self.test
         self.test_log["state"] = self.state
-        i = next((i for i in range(self.preset.count()) if (self.preset.itemData(i) or {}).get("name") == t["preset"]), -1)
-        self.preset.setCurrentIndex(i)
+        self.test_log["sidecar"] = self.sidecar
+        if "preset" in t:
+            key = t["preset"] if ":" in t["preset"] else "file:" + t["preset"]
+            self.preset.setCurrentIndex(self._preset_index(key))
         if "color_space" in t:
             self.space.setCurrentIndex(self.space.findData(t["color_space"]))
-        self.mode.setCurrentIndex(t.get("mode", 0))
-        self.padding.setChecked(t.get("padding", False))
-        self.skipped = {tuple(k) for k in t.get("skip", [])}
-        self.group.setCurrentIndex(max(0, self.group.findData(t.get("group", "map"))))
-        self.dir.setText(t["dir"])
+        if "mode" in t:
+            self.mode.setCurrentIndex(t["mode"])
+        if "padding" in t:
+            self.padding.setChecked(t["padding"])
+        s = self.settings()
+        if "skip" in t:
+            s["skip"] = {tuple(k) for k in t["skip"]}
+        if "disabled" in t:
+            s["disabled"] = set(t["disabled"])
+        if "overrides" in t:
+            s["overrides"] = copy.deepcopy(t["overrides"])
+        if "group" in t:
+            self.group.setCurrentIndex(max(0, self.group.findData(t["group"])))
+        self._show_maps()
+        if "bits_all" in t:
+            self._apply_all_bits(t["bits_all"])
+        if "resolution_all" in t:
+            self._apply_all_resolutions(t["resolution_all"])
+        if "dir" in t:
+            self.dir.setText(t["dir"])
+        if "save_preset" in t:
+            self._save_preset(t["save_preset"])
+        self.schedule()
 
     def _finish_test(self):
         self.test_log["summary"] = self.summary.text()
+        self.test_log["choices"] = self.choices()
         self.test_log["files"] = [l.text(0) for l in self._leaves() if l.checkState(0) == QtCore.Qt.Checked]
         self.test_log["skipped"] = [l.text(0) for l in self._leaves() if l.checkState(0) != QtCore.Qt.Checked]
         tree = self.files
         self.test_log["groups"] = [tree.topLevelItem(i).text(0) for i in range(tree.topLevelItemCount())
                                    if tree.topLevelItem(i).childCount() > 0]
+        self.test_log["files_shown"] = not self.files_section.isHidden()
+        maps = []
+        for i in range(self.maps.topLevelItemCount()):
+            item = self.maps.topLevelItem(i)
+            maps.append({
+                "name": item.text(0),
+                "enabled": item.checkState(0) == QtCore.Qt.Checked,
+                "bits": self.maps.itemWidget(item, 2).currentData(),
+                "resolution": self.maps.itemWidget(item, 3).currentData(),
+                "resolution_label": self.maps.itemWidget(item, 3).currentText(),
+                "color_space": item.text(4),
+                "size": item.text(5),
+            })
+        self.test_log["maps"] = maps
+        self.test_log["presets"] = [self.preset.itemText(i) for i in range(self.preset.count()) if self.preset.itemData(i)]
         self.test_log["composition"] = self.composition.text()
         self.test_log["project"] = self.project.text()
         self.test_log["issues"] = self.issues.text() if not self.issues_frame.isHidden() else ""

@@ -355,15 +355,12 @@ Sauf `unreal_engine`, les cartes de couleur sont en EXR half linéaire, les donn
 32 bits et les normales OpenGL. `STUDIO_EXPORT_PRESETS` en ajoute ou en remplace : le nom du preset est
 celui du fichier, et le premier trouvé l'emporte.
 
-**Installation.** Au démarrage, chaque preset studio valide reçoit un preset upstream du même nom dans
-`data/export_presets/`, avec les 4 canaux et le `color_space` les plus proches. Il est ainsi connu de la ligne de
-commande et de Ctrl+E (refaire le dernier export). Le registre `data/studio_presets_generated.txt` note ces fichiers et leur
-empreinte.
-- Un preset upstream du même nom n'est jamais écrasé : le preset studio n'est pas installé et la console le dit.
-- Un fichier que le studio a écrit est retiré quand son preset disparaît, sauf s'il a été modifié depuis.
-- Un preset invalide est signalé au démarrage, avec la clé en faute (`textures[2].bits: …`).
-
-Le preset est relu à chaque export : une modification prend effet sans relancer ArmorPaint.
+**Lecture seule.** Les presets studio sont seulement lus : rien n'est installé ni écrit à côté de l'app (au studio,
+son dossier n'est pas inscriptible). Les dossiers sont relus à l'ouverture de la fenêtre d'export et à chaque export :
+une modification prend effet sans relancer ArmorPaint. Un preset invalide est signalé, avec la clé en faute
+(`textures[2].bits: …`). La ligne de commande (`--export-textures <type> <preset>`) et Ctrl+E (refaire le dernier
+export) les trouvent par leur nom. Les presets propres à un projet vont dans son sidecar : voir « Fenêtre d'export
+(B6) ».
 
 ### Format
 
@@ -375,11 +372,11 @@ Le preset est relu à chaque export : une modification prend effet sans relancer
 	"resolutions": [2048, "4096x4096"],
 	"overwrite": "warn",
 	"manifest": true,
-	"defaults": { "format": "exr", "bits": 16, "color_space": "raw",
+	"defaults": { "format": "exr", "bits": 16, "color_space": "raw", "resolution": 0,
 	              "compression": { "exr": "zip", "tiff": "lzw", "png": "default" } },
 	"textures": [
 		{ "name": "base", "suffix": "BaseColor", "channels": ["base_r", "base_g", "base_b"], "color_space": "linear" },
-		{ "name": "orm", "channels": ["occ", "rough", "metal"], "format": "png", "bits": 16 },
+		{ "name": "orm", "channels": ["occ", "rough", "metal"], "format": "png", "bits": 16, "resolution": 1024 },
 		{ "name": "mask", "channels": ["clamp(1 - metal * 2, 0, 1)"], "format": "tiff", "bits": 32, "compression": "deflate" },
 		{ "name": "preview", "channels": ["base_r", "base_g", "base_b"], "format": "jpg", "quality": 85,
 		  "naming": "<file>/preview/<file>.<ext>" }
@@ -396,7 +393,8 @@ La lecture est stricte : une clé inconnue, un type faux ou une combinaison impo
 | `color_space` | `raw` : valeurs d'ArmorPaint telles quelles (le `linear` des presets upstream) ; `linear` : couleurs décodées (gamma 2.2 → linéaire) ; `srgb` : décodées, calculées, puis réencodées. Les données, les constantes et l'alpha ne sont jamais transformés. Tout autre nom est un espace OCIO (nom, alias ou rôle : `ACEScg`, `sRGB - Texture`, `Raw`…) : voir « Export (A3) ». Les trois mots-clés s'écrivent en minuscules ; `Raw` est l'espace OCIO |
 | `channels` | 1, 3 ou 4 expressions (pas de 4e canal en JPG) |
 | `naming` | marqueurs `<file>`, `<variant>` (objet ou atlas), `<channel>` (`suffix`, sinon `name`), `<UDIM>`, `<ext>`. Une section `[…]` disparaît si un marqueur qu'elle contient est vide. Un chemin relatif part du dossier choisi ; des sous-dossiers sont permis |
-| `resolutions` | résolutions admises par le show : une autre est bloquante |
+| `resolution` | côté le plus long du fichier, proportions gardées (1 à 65536) ; `0` : celle du projet (défaut). Par texture ou dans `defaults`. Réduire moyenne les pixels par zone ; agrandir est bilinéaire et donne une note `upscaled` |
+| `resolutions` | résolutions admises par le show, vérifiées pour chaque texture à sa taille de sortie : une autre est bloquante |
 | `overwrite` | `warn` (défaut : remplace et le signale), `allow`, `block` |
 
 **Expressions.** Variables : `base_r`, `base_g`, `base_b`, `opac`, `nor_r`, `nor_g`, `nor_g_directx`, `nor_b`,
@@ -435,10 +433,10 @@ presets upstream, avec les mêmes définitions.
 - date UTC, utilisateur, machine ;
 - les versions d'ArmorPaint (avec le commit) et du studio ;
 - le projet ;
-- le preset (nom, chemin, SHA-256) ;
+- le preset (nom, chemin, SHA-256, `overrides` : bits et résolution changés dans la fenêtre, sinon `null`) ;
 - la résolution, la profondeur des calques, le mode et le template ShotGrid ;
-- pour chaque fichier : chemin relatif, texture, variante, tuile, format, profondeur, compression, espace, canaux,
-  taille, SHA-256 ;
+- pour chaque fichier : chemin relatif, texture, variante, tuile, `resolution` `[l, h]`, format, profondeur,
+  compression, espace, canaux, taille, SHA-256 ;
 - la provenance OCIO si une texture en dépend (A3) ;
 - les avertissements.
 
@@ -452,13 +450,20 @@ File > Export > Textures, l'icône d'export de la barre d'outils, Export du menu
 une fenêtre Qt à la place de la boîte d'export d'ArmorPaint (patch `export-window`). C'est un processus Python à part
 (`assets/studio_export_window.py`, PySide6) : l'environnement Python est fourni par le déploiement (rez).
 
-- **Preset** : les presets studio seulement, ceux de `STUDIO_EXPORT_PRESETS` d'abord, puis les presets livrés.
+- **Preset** : les presets studio seulement : ceux du projet (sidecar) d'abord, puis ceux de `STUDIO_EXPORT_PRESETS`,
+  puis les presets livrés. « Save as preset… » enregistre les réglages en cours comme preset du projet (vérifié par
+  ArmorPaint avant d'être gardé) ; un nom de preset studio est refusé.
 - **Color space** : « From preset », ou un espace OCIO imposé aux textures de couleur ; les données restent brutes.
 - **Layers** : Visible, Selected, Per Object, Per UDIM Tile, et la marge (padding) de l'upstream.
 - **Destination** : dossier ; défaut : celui du dernier export, sinon celui du projet.
-- **Files** : le préflight, recalculé à chaque changement, sans rien écrire. Chaque fichier se coche ou se décoche
-  avant l'export ; un fichier décoché n'est ni vérifié ni écrit. Avec des tuiles UDIM, des objets ou des atlas, la
-  liste est groupée par map ou par objet / tuile, avec une case par groupe (décocher `height` retire toutes ses
+- **Maps** : une ligne par texture du preset, avec une case (map désactivée : aucun de ses fichiers n'est écrit), sa
+  profondeur (les valeurs permises par son format) et sa résolution (celle du projet, ou 8192 à 256), puis la taille
+  de sortie. « Set all bits » et « Set all resolutions » les règlent pour toutes les maps (une map dont le format n'a
+  pas cette profondeur prend la plus proche en dessous) ; une valeur changée est en bleu, « Reset » rend celles du preset. Ces réglages ne changent
+  pas le preset : ils valent pour l'export, le temps de s'en faire un.
+- **Files** : le préflight, recalculé à chaque changement, sans rien écrire. Avec plusieurs jeux (tuiles UDIM, objets
+  ou atlas), chaque fichier se coche ou se décoche avant l'export ; un fichier décoché n'est ni vérifié ni écrit. La
+  liste (sans les maps désactivées) est groupée par map ou par objet / tuile, avec une case par groupe (décocher `height` retire toutes ses
   tuiles). En tête, ce que représentent les fichiers (« 9 maps × 7 UDIM tiles ») ; la ligne du projet donne ses objets
   et ses tuiles. Un fichier existant est en orange et compté dans le résumé.
 - **Problèmes** : les bloquants (qui désactivent Export) et quelques avertissements utiles (tuiles UDIM manquantes,
@@ -471,16 +476,40 @@ sans rouvrir la fenêtre. Cancel ne change rien. Rouvrir la fenêtre pendant qu'
 se ferme quand ArmorPaint quitte. Sa taille suit l'échelle de l'interface d'ArmorPaint (`STUDIO_UI_SCALE`, transmis
 par l'app). Si elle ne démarre pas (Python sans PySide6), ArmorPaint le dit, avec la fin de la sortie d'erreur.
 
+**Sidecar du projet.** `<dossier du .arm>/<nom sans .arm ni version>.export_settings.json`, commun aux versions
+(`robot_v003.arm` → `robot.export_settings.json`). La fenêtre seule le lit et l'écrit, après un export abouti, un
+« Save as preset » et à sa fermeture ; rien pour un projet jamais enregistré. Un sidecar illisible est signalé dans le
+log et jamais écrasé.
+
+```json
+{
+	"version": 1,
+	"presets": { "robot_hero": { "description": "…", "textures": [ … ] } },
+	"export": {
+		"preset": "project:robot_hero", "color_space": "", "mode": 3, "padding": false, "dir": "/show/…", "group": "map",
+		"presets": { "file:karma": { "overrides": { "normal": { "bits": 32 } }, "disabled": ["opacity"],
+		                             "skip": [["height", "", "1002"]] } }
+	}
+}
+```
+
+`presets` a le format des presets studio. `export` garde les choix, remis à la réouverture ; par preset (`file:<nom>`
+pour ceux des dossiers, `project:<nom>` pour ceux du sidecar), les réglages des maps, les maps désactivées et les
+fichiers décochés. Un preset du projet est envoyé en JSON à ArmorPaint à chaque export et noté au manifeste avec le
+chemin du sidecar.
+
 **Un jeu de maps par matériau.** À l'import OBJ ou FBX, « Split By: Material » crée un objet par matériau. En mode
 Per Object, ArmorPaint écrit un jeu par objet qui a au moins un calque qui lui est propre (masque d'objet du calque) ;
 les calques partagés vont dans chaque jeu. Sans calque propre à un objet, Per Object donne un seul jeu.
 
 L'onglet Presets (éditeur de presets upstream), l'onglet Atlases et « Pack into project » de la boîte d'export ne
-sont plus accessibles. La résolution et la profondeur sont affichées, pas modifiables : elles restent celles du
-projet. Pas encore sous Windows (`studio_proc`).
+sont plus accessibles. La résolution du projet (celle des calques) ne change pas : chaque map est mise à sa résolution
+à l'export. Pas encore sous Windows (`studio_proc`).
 
 **Protocole**, une ligne JSON par message sur stdin et stdout de la fenêtre (détail dans `studio_export_window.h`) :
-requêtes `state`, `preflight` et `export` (`args` : `preset`, `color_space`, `dir`, `mode`, `padding`, `skip`), réponses
+requêtes `state` (`args.presets` : presets du sidecar à vérifier), `inspect` (un preset JSON), `preflight` et `export`
+(`args` : `preset`, `preset_json` et `preset_source` pour un preset du projet, `overrides`, `color_space`, `dir`,
+`mode`, `padding`, `skip`), réponses
 `{"id", "ok", "data" | "error"}`, évènement `{"event": "raise", "mode"}`. Un autre outil peut remplacer la fenêtre
 par `STUDIO_EXPORT_WINDOW`. `STUDIO_EXPORT_WINDOW_TEST=<choix.json>` la fait tourner sans intervention (bancs).
 
@@ -496,13 +525,15 @@ int   studio_export_is_studio_preset(char *name);
 char *studio_export_color_space(void);              // espace imposé aux couleurs ; "" : celui du preset
 int   studio_export_set_color_space(char *name);     // "" : celui du preset ; 0 si inconnu d'OCIO (gardé, l'export sera bloqué)
 char *studio_export_skip(void);                      // fichiers décochés : lignes "<texture>\t<variant>\t<tuile>"
-void  studio_export_set_skip(char *keys);            // "" : tous les fichiers ; gardé pour les exports suivants
+void  studio_export_set_skip(char *keys);            // "" : tous les fichiers ; "<texture>\t*\t*" : toute la map ; gardé pour les exports suivants
+void  studio_export_set_preset(char *name, char *json, char *source); // preset courant (Ctrl+E) ; json : preset hors des dossiers, source : son fichier
+void  studio_export_set_overrides(char *json);       // {"<texture>": {"bits": 16, "resolution": 1024}} pour ce preset ; "" : ceux du preset
 void  studio_export_window_show(void);               // ouvre la fenêtre d'export, ou la ramène devant
 int   studio_export_window_is_open(void);
 ```
 
 Le rapport JSON contient `ok`, `preset`, `color_space_override`, `destination`, la résolution, `total_size`, `manifest`, `files[]` (chemin,
-texture, `variant`, `udim`, format, profondeur, compression, taille estimée, `exists`, `skip`) et `issues[]` (`level` :
+texture, `variant`, `udim`, `width`, `height`, format, profondeur, compression, taille estimée, `exists`, `skip`) et `issues[]` (`level` :
 `blocking`, `warning` ou `note` ; `code`, `message`). En
 ligne de commande, `ArmorPaint projet.arm --background --export-textures exr16 arnold <dossier>` utilise le preset
 studio. Chaque texture garde son propre format. Le type fixe seulement la profondeur de travail des calques
@@ -668,8 +699,8 @@ STUDIO_TEST_TK_CORE=<tk-core> .tests/sg.sh [dossier de travail]   # ShotGrid (C2
 .tests/ocio_app.sh [dossier]           # OCIO dans l'app : configuration par défaut, $OCIO, $OCIO invalide, API de scripting
 .tests/ocio_export_app.sh [dossier]    # export OCIO (A3) dans l'app : pixels = PyOpenColorIO, préflight, manifeste, cas bloquants
 .tests/ocio_view_app.sh [dossier]      # viewport OCIO (A2) dans l'app : compositeur = PyOpenColorIO, menu (API), rechargement, variables
-.tests/export_window_app.sh [dossier]  # fenêtre d'export (B6) dans l'app, Qt offscreen : état, préflight, export, fichiers décochés, blocage, réouverture ; PY=<python PySide6>
-<python PySide6> .tests/export_window_ui.py [dossier]  # fenêtre d'export contre un faux ArmorPaint : liste groupée (tuiles UDIM, objets), cases, décomptes, problèmes affichés
+.tests/export_window_app.sh [dossier]  # fenêtre d'export (B6) dans l'app, Qt offscreen : état, préflight, export, fichiers décochés, blocage, réouverture, bits et résolution par map, sidecar, preset du projet ; PY=<python PySide6>
+<python PySide6> .tests/export_window_ui.py [dossier]  # fenêtre d'export contre un faux ArmorPaint : liste groupée (tuiles UDIM, objets), cases, décomptes, problèmes affichés, tableau des maps, sidecar
 ```
 
 `ocio.sh` compare au bit près à PyOpenColorIO, la roue officielle à la même version, installée dans `.ocio/venv`

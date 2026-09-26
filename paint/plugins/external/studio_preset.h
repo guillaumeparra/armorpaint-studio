@@ -55,7 +55,10 @@ typedef struct {
 	int            quality; // jpg, 1-100
 	studio_color_t color;
 	char          *color_space; // STUDIO_COLOR_OCIO : le nom tel qu'écrit dans le preset ; NULL sinon
+	int            resolution;  // plus grand côté du fichier (studio_preset_output_size) ; 0 : celle du projet
 } studio_preset_texture_t;
+
+#define STUDIO_PRESET_MAX_RESOLUTION 65536
 
 typedef struct {
 	int width;
@@ -100,8 +103,13 @@ int  studio_preset_override_color(studio_preset_t *p, const char *cs, int (*is_d
 // Niveau sdefl (0-8) d'une compression PNG ou TIFF deflate.
 int studio_preset_deflate_level(const char *compression);
 
-// Preset upstream équivalent (JSON, malloc) : il fait apparaître le preset dans la liste d'export et sert à l'upstream
-// quand l'export n'est pas pris en charge par le studio (textures empaquetées dans le projet). Approximation : une
-// expression y devient "0.0", une constante "0.0" ou "1.0", l'espace "linear" des couleurs n'y a pas d'équivalent.
-// Seules les clés upstream y figurent, dans leur ordre : json_parse les lit par position, pas par nom.
-char *studio_preset_stub(const studio_preset_t *p);
+// Profondeurs acceptées par un format : png 8, 16 ; jpg 8 ; tiff 8, 16, 32 ; exr 16, 32.
+bool studio_preset_bits_valid(studio_format_t format, int bits);
+int  studio_preset_bits_options(studio_format_t format, int out[3]); // rend leur nombre
+// Taille du fichier écrit pour une texture du projet de width x height : t->resolution devient le plus grand côté,
+// l'autre suit les proportions ; 0, la taille du projet.
+void studio_preset_output_size(const studio_preset_texture_t *t, int width, int height, int *out_width, int *out_height);
+// Réglages de l'export (fenêtre, script) par-dessus le preset : {"<texture>": {"bits": 16, "resolution": 2048}, ...}.
+// Une texture absente du preset est ignorée ; une profondeur que le format n'accepte pas est une erreur. NULL ou "" :
+// rien à changer.
+bool studio_preset_apply_overrides(studio_preset_t *p, const char *json, char *err, size_t err_size);
