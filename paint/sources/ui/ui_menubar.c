@@ -20,6 +20,20 @@ i32 ui_menubar_category                 = 0;
 int ui_menubar_capture_screenshot_frame = 0;
 i32 ui_menubar_about_line               = 0;
 
+// STUDIO-PATCH(menubar-hook): categories added by a plugin after Help (paint/plugins/external)
+#define UI_MENUBAR_EXTRA_MAX 4
+static char *ui_menubar_extra_labels[UI_MENUBAR_EXTRA_MAX];
+static void (*ui_menubar_extra_items[UI_MENUBAR_EXTRA_MAX])(void);
+static i32 ui_menubar_extra_count = 0;
+
+void ui_menubar_add_category(char *label, void (*draw_items)(void)) {
+	if (ui_menubar_extra_count < UI_MENUBAR_EXTRA_MAX) {
+		ui_menubar_extra_labels[ui_menubar_extra_count] = label;
+		ui_menubar_extra_items[ui_menubar_extra_count]  = draw_items;
+		ui_menubar_extra_count++;
+	}
+}
+
 void ui_menubar_init() {
 	ui_menubar_hwnd->layout        = UI_LAYOUT_HORIZONTAL;
 	ui_menubar_menu_handle->layout = UI_LAYOUT_HORIZONTAL;
@@ -795,6 +809,9 @@ void ui_menubar_draw_category_items() {
 			base_update_workflow();
 		}
 	}
+	else if (ui_menubar_category > MENUBAR_CATEGORY_HELP && ui_menubar_category <= MENUBAR_CATEGORY_HELP + ui_menubar_extra_count) {
+		ui_menubar_extra_items[ui_menubar_category - MENUBAR_CATEGORY_HELP - 1](); // STUDIO-PATCH(menubar-hook)
+	}
 }
 
 void ui_menubar_show_menu(i32 category) {
@@ -918,6 +935,11 @@ void ui_menubar_render_ui() {
 			for (i32 i = 0; i < categories->length; ++i) {
 				if (ui_menubar_button(categories->buffer[i]) || (ui_menu_show && ui_menu_commands == ui_menubar_draw_category_items && g_ui->is_hovered)) {
 					ui_menubar_show_menu(i);
+				}
+			}
+			for (i32 i = 0; i < ui_menubar_extra_count; ++i) { // STUDIO-PATCH(menubar-hook)
+				if (ui_menubar_button(ui_menubar_extra_labels[i]) || (ui_menu_show && ui_menu_commands == ui_menubar_draw_category_items && g_ui->is_hovered)) {
+					ui_menubar_show_menu(MENUBAR_CATEGORY_HELP + 1 + i);
 				}
 			}
 		}
