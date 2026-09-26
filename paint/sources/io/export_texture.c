@@ -251,6 +251,14 @@ static void export_texture_run_layers(char *path, slot_layer_t_array_t *layers, 
 		i32 udim_tile = util_mesh_udim_tile(object_name);
 		if (udim_tile >= 0) {
 			udim_slot = util_mesh_udim_slot(udim_tile);
+			if (udim_slot < 0) { // STUDIO-PATCH(udim-tile-limit): no file for a tile without a slot, upstream wrote the 64th tile
+#ifdef WITH_EXTERNAL
+				bool studio_export_planning(void); // The studio preflight reports these tiles and blocks the export
+				if (!studio_export_planning())
+#endif
+					console_error(string("UDIM export: tile %d not exported, it is past the 64 tiles of the layers.", udim_tile));
+				return;
+			}
 		}
 		else if (export_selected) {
 			udim_slot = layers_udim_tile_slot(layers->buffer[0]);
@@ -301,6 +309,10 @@ static void export_texture_run_layers(char *path, slot_layer_t_array_t *layers, 
 			mask = pipes_temp_mask_image;
 		}
 
+		// STUDIO-PATCH(udim-tile-limit): the layer of a tile without a slot has no cell in the whole atlas
+		if (!bake_material && udim_slot < 0 && !export_selected && layers_udim_tile_slot(l1) == -2) {
+			continue;
+		}
 		// Shared layers of udim tiles are cropped out of the atlas, tile layers go into the atlas when exporting it whole
 		if (!bake_material && udim_slot >= 0 && util_mesh_udim_layer(l1)) {
 			l1 = layers_udim_remap(l1, l1masks != NULL ? &mask : NULL, udim_slot, true);

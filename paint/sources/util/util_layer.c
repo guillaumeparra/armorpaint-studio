@@ -1112,13 +1112,14 @@ slot_layer_t *layers_udim_remap(slot_layer_t *l, gpu_texture_t **mask, i32 slot,
 }
 
 // Atlas slot of a layer assigned to a single udim tile object, -1 otherwise
+// STUDIO-PATCH(udim-tile-limit): -2 for a tile without a slot, past the 64 of the atlas (upstream gave the slot 63)
 i32 layers_udim_tile_slot(slot_layer_t *l) {
 	i32 mask = slot_layer_get_object_mask(l);
 	if (!util_mesh_udim_active() || l->uv_map == 1 || mask <= 0 || mask > g_project->_->paint_objects->length) {
 		return -1;
 	}
 	i32 tile = util_mesh_udim_tile(g_project->_->paint_objects->buffer[mask - 1]->base->name);
-	return tile < 0 ? -1 : util_mesh_udim_slot(tile);
+	return tile < 0 ? -1 : util_mesh_udim_slot(tile) < 0 ? -2 : util_mesh_udim_slot(tile);
 }
 
 slot_layer_t *layers_flatten(bool height_to_normal, slot_layer_t_array_t *layers) {
@@ -1166,6 +1167,9 @@ slot_layer_t *layers_flatten(bool height_to_normal, slot_layer_t_array_t *layers
 
 		// Flattened layers are in shared atlas space
 		i32 tile_slot = layers_udim_tile_slot(l1);
+		if (tile_slot == -2) { // STUDIO-PATCH(udim-tile-limit): the layer of a tile without a slot has no cell in the atlas
+			continue;
+		}
 		if (tile_slot >= 0) {
 			l1 = layers_udim_remap(l1, l1masks != NULL ? &mask : NULL, tile_slot, false);
 		}

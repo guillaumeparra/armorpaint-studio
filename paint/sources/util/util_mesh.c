@@ -121,10 +121,9 @@ static i32 _util_mesh_atlas_stride_for(i32 count) {
 	return stride;
 }
 
-static i32  util_mesh_atlas_stride_merged = 1;
-static i32  util_mesh_udim_tiles[ATLAS_MAX_SLOTS]; // Sorted tile ids, one atlas slot per tile
-static i32  util_mesh_udim_tile_count  = 0;
-static bool util_mesh_udim_tiles_spent = false;
+static i32 util_mesh_atlas_stride_merged = 1;
+static i32 util_mesh_udim_tiles[ATLAS_MAX_SLOTS]; // Sorted tile ids, one atlas slot per tile
+static i32 util_mesh_udim_tile_count = 0;
 
 // Tile id from the ".1001" name suffix given by udim import, -1 if none
 i32 util_mesh_udim_tile(char *name) {
@@ -145,32 +144,59 @@ i32 util_mesh_udim_tile(char *name) {
 	return id > 1000 ? id : -1;
 }
 
+// STUDIO-PATCH(udim-tile-limit): the 64 lowest tiles get a slot, the others none and a message, see
+// paint/plugins/external/PATCHES.md. Upstream kept the first 64 tiles met and gave the others the slot 63 without a
+// word: their paint went over the 64th tile. An object without a tile gave the slot 0, over the tile 1001.
+static void _util_mesh_udim_report(i32 total, i32 first_without_slot, i32 untiled, char *untiled_name) {
+	static void *reported_objects = NULL; // A project loaded again reports again
+	static i32   reported_total   = 0;
+	static i32   reported_untiled = 0;
+	void        *objects          = g_project->_->paint_objects;
+	if (objects == reported_objects && total == reported_total && untiled == reported_untiled) {
+		return;
+	}
+	reported_objects = objects;
+	reported_total   = total;
+	reported_untiled = untiled;
+	if (untiled > 0) {
+		console_info(string("UDIM: %d objects without a tile, first \"%s\": the udim layers do not paint them.", untiled, untiled_name));
+	}
+	if (total > ATLAS_MAX_SLOTS) {
+		console_error(
+		    string("UDIM: %d tiles, the layers hold %d: the tiles from %d on are not painted nor exported.", total, ATLAS_MAX_SLOTS, first_without_slot));
+	}
+}
+
 static void _util_mesh_udim_build_tiles() {
 	mesh_object_t_array_t *paint_objects = g_project->_->paint_objects;
-	util_mesh_udim_tile_count            = 0;
-	util_mesh_udim_tiles_spent           = false;
+	bool                   seen[1000]    = {0}; // Tile id - 1000, util_mesh_udim_tile() gives 1001 to 1999
+	i32                    total         = 0;
+	i32                    untiled       = 0;
+	char                  *untiled_name  = NULL;
 	for (i32 i = 0; i < paint_objects->length; ++i) {
-		i32 id = util_mesh_udim_tile(paint_objects->buffer[i]->base->name);
+		char *name = paint_objects->buffer[i]->base->name;
+		i32   id   = util_mesh_udim_tile(name);
 		if (id < 0) {
-			continue;
+			untiled_name = untiled++ == 0 ? name : untiled_name;
 		}
-		i32 pos = 0;
-		while (pos < util_mesh_udim_tile_count && util_mesh_udim_tiles[pos] < id) {
-			pos++;
+		else if (!seen[id - 1000]) {
+			seen[id - 1000] = true;
+			total++;
 		}
-		if (pos < util_mesh_udim_tile_count && util_mesh_udim_tiles[pos] == id) {
+	}
+	util_mesh_udim_tile_count = 0;
+	i32 first_without_slot    = 0;
+	for (i32 i = 0; i < 1000; ++i) {
+		if (!seen[i]) {
 			continue;
 		}
 		if (util_mesh_udim_tile_count == ATLAS_MAX_SLOTS) {
-			util_mesh_udim_tiles_spent = true;
-			continue;
+			first_without_slot = 1000 + i;
+			break;
 		}
-		for (i32 j = util_mesh_udim_tile_count; j > pos; --j) {
-			util_mesh_udim_tiles[j] = util_mesh_udim_tiles[j - 1];
-		}
-		util_mesh_udim_tiles[pos] = id;
-		util_mesh_udim_tile_count++;
+		util_mesh_udim_tiles[util_mesh_udim_tile_count++] = 1000 + i;
 	}
+	_util_mesh_udim_report(total, first_without_slot, total > 1 ? untiled : 0, untiled_name);
 }
 
 // Shared layers of a mesh split by udim tile keep every tile in its own atlas slot
@@ -184,7 +210,7 @@ i32 util_mesh_udim_slot(i32 tile) {
 			return i;
 		}
 	}
-	return util_mesh_udim_tiles_spent ? ATLAS_MAX_SLOTS - 1 : 0;
+	return -1; // STUDIO-PATCH(udim-tile-limit): no slot, upstream gave 63 past 64 tiles and 0 without a tile
 }
 
 bool util_mesh_udim_layer(slot_layer_t *l) {
@@ -215,7 +241,9 @@ i32 util_mesh_atlas_slot(object_t *object) {
 	mesh_object_t_array_t *paint_objects = g_project->_->paint_objects;
 	for (i32 i = 0; i < paint_objects->length; ++i) {
 		if (paint_objects->buffer[i]->base == object) {
-			return _util_mesh_atlas_slot_for_object(paint_objects->buffer[i]);
+			// STUDIO-PATCH(udim-tile-limit): an object without a slot gets the first slot past the grid, see _atlas_transform
+			i32 slot = _util_mesh_atlas_slot_for_object(paint_objects->buffer[i]);
+			return slot < 0 ? ATLAS_MAX_SLOTS : slot;
 		}
 	}
 	return -1; // Merged object or 2d plane, uvs already in atlas space
@@ -361,6 +389,11 @@ static mesh_data_t *util_mesh_build_merged_data(mesh_object_t_array_t *paint_obj
 		for (i32 j = 0; j < vas->buffer[2]->values->length / 2; ++j) {
 			va2->buffer[j * 2 + voff * 2]     = vas->buffer[2]->values->buffer[j * 2] / (float)atlas_stride + tile_x;
 			va2->buffer[j * 2 + 1 + voff * 2] = vas->buffer[2]->values->buffer[j * 2 + 1] / (float)atlas_stride + tile_y;
+		}
+		if (slot < 0) { // STUDIO-PATCH(udim-tile-limit): an object without a slot has all its uvs on one texel off the atlas, nothing painted
+			for (i32 j = 0; j < vas->buffer[2]->values->length; ++j) {
+				va2->buffer[j + voff * 2] = -32767;
+			}
 		}
 		// Tex1
 		if (vatex1 != NULL) {

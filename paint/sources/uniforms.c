@@ -234,6 +234,9 @@ vec4_t uniforms_ext_vec3_link(object_t *object, shader_data_t *mat, char *link) 
 		if (slot < 0) {
 			return (vec4_t){0.0, 0.0, 1.0, 1.0};
 		}
+		if (slot >= stride * stride) { // STUDIO-PATCH(udim-tile-limit): object without a slot, its uvs on one texel off the atlas
+			return (vec4_t){-1.0, -1.0, 0.0, 1.0};
+		}
 		return (vec4_t){(slot % stride) / (f32)stride, (slot / stride) / (f32)stride, 1.0 / stride, 1.0};
 	}
 	else if (string_equals(link, "_decal_layer_loc")) {
