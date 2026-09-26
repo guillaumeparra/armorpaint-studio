@@ -9,7 +9,9 @@
 # "robot.export_settings.json", commun aux versions). La fenêtre seule le lit et l'écrit (ArmorPaint n'y touche pas) :
 #   "presets" : presets enregistrés par l'artiste ("Save as preset"), au format des presets studio ;
 #   "export"  : ses choix, remis à l'ouverture (preset, espace, mode, marge, dossier, et par preset : bits et résolution
-#               par map, maps désactivées, fichiers décochés).
+#               par map, maps désactivées, fichiers décochés, modèle de nom des fichiers).
+# Les jeux de textures (atlas) ne sont pas dans le sidecar : ils changent dans le projet (op "atlases"), enregistrés
+# avec le .arm comme ceux de l'onglet Atlases d'ArmorPaint.
 # Écrit après un export abouti, un enregistrement de preset et à la fermeture ; pas de sidecar pour un projet jamais
 # enregistré. Les presets studio des dossiers (data/, STUDIO_EXPORT_PRESETS) sont seulement lus.
 #
@@ -17,9 +19,11 @@
 # des choix, tous optionnels (absents : ceux du sidecar ou d'ArmorPaint) : "preset", "color_space", "dir", "mode",
 # "padding", "skip" (fichiers décochés : [[texture, variant, udim]...]), "group" ("map" ou "set"), "overrides"
 # ({map: {"bits", "resolution"}}), "disabled" (maps), "bits_all" et "resolution_all" (appliqués à toutes les maps),
-# "save_preset" (nom : enregistré dans le sidecar avant l'export), "no_export" (fermer sans exporter). La fenêtre les
-# applique, attend le préflight, exporte, écrit {"state","restored","preflight","export","summary","files","groups",
-# "maps"...} dans "result", puis se ferme.
+# "naming" (modèle de nom des fichiers), "atlases" ({"names", "objects"} : jeux de textures, envoyés à ArmorPaint avant
+# le reste), "save_preset" (nom : enregistré dans le sidecar avant l'export), "no_export" (fermer sans exporter),
+# "screenshot" (image PNG de la fenêtre à la fin). La
+# fenêtre les applique, attend le préflight, exporte, écrit {"state","restored","preflight","export","summary","files",
+# "groups","maps","naming","sets"...} dans "result", puis se ferme.
 
 import copy
 import ctypes
@@ -42,6 +46,9 @@ FILE_KEY_ROLE = QtCore.Qt.UserRole
 RESOLUTIONS = [8192, 4096, 2048, 1024, 512, 256]
 SIDECAR_SUFFIX = ".export_settings.json"
 PRESET_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+MARKER = re.compile(r"<([^<>]*)>")
+TILE_OBJECT = re.compile(r"^(.+)\.(1\d{3})$")  # cube.1001 : une tuile UDIM de cube, séparée à l'import
+NEW_SET = "__new__"
 
 ACCENT = "#2f6fb0"
 MUTED = "#8c8c8c"
@@ -246,6 +253,26 @@ def set_label(f):
     return "  ·  ".join(parts) if parts else "All objects"
 
 
+def naming_problem(pattern, variables):
+    """Ce qui cloche dans un modèle de nom (comme studio_naming_check), None s'il est bon."""
+    if not pattern.strip():
+        return "enter a file name pattern"
+    known = {v.lower() for v in variables}
+    for m in MARKER.finditer(pattern):
+        if m.group(1).lower() not in known:
+            return "unknown variable <%s>" % m.group(1)
+    return None
+
+
+def object_groups(objects):
+    """[(nom, [indices])] dans l'ordre d'ArmorPaint : les tuiles UDIM d'un objet (cube.1001, cube.1002...) ensemble."""
+    groups = {}
+    for i, o in enumerate(objects):
+        m = TILE_OBJECT.match(o["name"])
+        groups.setdefault(m.group(1) if m else o["name"], []).append(i)
+    return list(groups.items())
+
+
 def composition(files, mode):
     """« 9 maps × 7 UDIM tiles » : ce que représentent les fichiers."""
     maps = len({f.get("texture") for f in files})
@@ -253,7 +280,7 @@ def composition(files, mode):
     variants = len({f.get("variant") for f in files if f.get("variant")})
     parts = [plural(maps, "map")]
     if variants:
-        parts.append(plural(variants, "object" if mode == 2 else "texture set"))
+        parts.append(plural(variants, "object" if mode in (1, 2) else "texture set"))
     if tiles:
         parts.append(plural(tiles, "UDIM tile"))
     return " × ".join(parts)
@@ -352,7 +379,9 @@ class ExportWindow(QtWidgets.QDialog):
         self.dirty = False
         self.exported = None
         self.presets = []  # presets du menu : ceux des dossiers (lus) et ceux du sidecar du projet
-        self.per_preset = {}  # clé du preset -> {"overrides", "disabled", "skip"}
+        self.per_preset = {}  # clé du preset -> {"overrides", "disabled", "skip", "naming"}
+        self.naming_error = None  # modèle de nom refusé : pas d'export
+        self.sets_busy = False  # jeux de textures envoyés, réponse attendue
         self.sidecar = None  # chemin, None sans projet enregistré
         self.sidecar_data = {}
         self.sidecar_saved = None  # contenu tel que lu ou écrit : rien n'est réécrit s'il n'a pas changé
@@ -360,7 +389,7 @@ class ExportWindow(QtWidgets.QDialog):
         self.expanded = set()  # groupes ouverts
         self.test_log = {}
         self.setWindowTitle("Export Textures")
-        self.resize(860, 820)
+        self.resize(860, 880)
         self._build()
         self.timer = QtCore.QTimer(self, singleShot=True, interval=PREFLIGHT_DELAY_MS)
         self.timer.timeout.connect(self.preflight)
@@ -433,6 +462,7 @@ class ExportWindow(QtWidgets.QDialog):
         self.mode = QtWidgets.QComboBox()
         self.mode.addItems(MODES)
         self.mode.currentIndexChanged.connect(self.schedule)
+        self.mode.currentIndexChanged.connect(lambda *_: self._update_sets_note())
         self.padding = QtWidgets.QCheckBox("Padding")
         self.padding.setToolTip("Dilate the painted areas past the UV islands before exporting (as ArmorPaint's export).")
         layers_box = QtWidgets.QHBoxLayout()
@@ -451,7 +481,73 @@ class ExportWindow(QtWidgets.QDialog):
         dir_box.addWidget(self.dir, 1)
         dir_box.addWidget(browse)
         form.addRow("Destination", dir_box)
+
+        # Nom des fichiers : le modèle du preset, modifiable pour cet export (gardé par preset dans le sidecar).
+        self.naming = QtWidgets.QLineEdit()
+        self.naming.setToolTip(
+            "File name of each map. <variable> is replaced by its value; a [section] is dropped when a variable in it\n"
+            "is empty. A '/' makes folders under the destination."
+        )
+        self.naming.textEdited.connect(self._on_naming)
+        self.variables = QtWidgets.QPushButton("Variables")
+        self.variables.setToolTip("Insert a variable at the cursor")
+        self.variables.setFocusPolicy(QtCore.Qt.NoFocus)  # la sélection du champ reste, pour [section]
+        self.variables.setMenu(QtWidgets.QMenu(self.variables))
+        self.reset_naming = QtWidgets.QPushButton("Reset")
+        self.reset_naming.setObjectName("link")
+        self.reset_naming.setToolTip("Back to the preset's file names")
+        self.reset_naming.clicked.connect(self._reset_naming)
+        naming_row = QtWidgets.QHBoxLayout()
+        naming_row.addWidget(self.naming, 1)
+        naming_row.addWidget(self.variables)
+        naming_row.addWidget(self.reset_naming)
+        self.naming_note = muted()
+        self.naming_note.setTextFormat(QtCore.Qt.RichText)
+        naming_box = QtWidgets.QVBoxLayout()
+        naming_box.setSpacing(4)
+        naming_box.addLayout(naming_row)
+        naming_box.addWidget(self.naming_note)
+        form.addRow("File names", naming_box)
         root.addLayout(form)
+
+        # Jeux de textures (atlas d'ArmorPaint) : seulement quand le projet a plusieurs objets.
+        self.sets_section = QtWidgets.QWidget()
+        sets_layout = QtWidgets.QVBoxLayout(self.sets_section)
+        sets_layout.setContentsMargins(0, 0, 0, 0)
+        sets_layout.setSpacing(6)
+        sets_header = QtWidgets.QHBoxLayout()
+        sets_title = QtWidgets.QLabel("Texture sets")
+        sets_title.setObjectName("section")
+        sets_header.addWidget(sets_title)
+        self.sets_note = muted()
+        self.sets_note.setWordWrap(False)
+        sets_header.addWidget(self.sets_note, 1)
+        self.rename_set = QtWidgets.QPushButton("Rename...")
+        self.rename_set.setObjectName("link")
+        self.rename_set.setToolTip("Rename a texture set (the name goes into the file names: <atlas>)")
+        self.rename_set.clicked.connect(self._on_rename_set)
+        sets_header.addWidget(self.rename_set)
+        self.merge_sets = QtWidgets.QPushButton("One set")
+        self.merge_sets.setObjectName("link")
+        self.merge_sets.setToolTip("Put every object back into the first set: one set of maps for all")
+        self.merge_sets.clicked.connect(self._merge_sets)
+        sets_header.addWidget(self.merge_sets)
+        sets_layout.addLayout(sets_header)
+        self.sets = QtWidgets.QTreeWidget()
+        self.sets.setHeaderLabels(["Object", "Texture set"])
+        self.sets.setRootIsDecorated(False)
+        self.sets.setAlternatingRowColors(True)
+        self.sets.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.sets.setFocusPolicy(QtCore.Qt.NoFocus)
+        header_view = self.sets.header()
+        header_view.setStretchLastSection(False)
+        header_view.setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
+        header_view.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
+        sets_layout.addWidget(self.sets)
+        self.sets_layers = muted()
+        sets_layout.addWidget(self.sets_layers)
+        self.sets_section.hide()
+        root.addWidget(self.sets_section)
 
         # Maps : une ligne par texture du preset, avec ses bits et sa résolution pour cet export.
         maps_header = QtWidgets.QHBoxLayout()
@@ -509,7 +605,7 @@ class ExportWindow(QtWidgets.QDialog):
         files_header.addWidget(self.group_label)
         self.group = QtWidgets.QComboBox()
         self.group.addItem("Map", "map")
-        self.group.addItem("Object / Tile", "set")
+        self.group.addItem("Set / Object / Tile", "set")
         self.group.currentIndexChanged.connect(lambda *_: self._show_files(self.report))
         files_header.addWidget(self.group)
         self.check_all = QtWidgets.QPushButton("All")
@@ -646,8 +742,10 @@ class ExportWindow(QtWidgets.QDialog):
         for w in widgets:
             w.blockSignals(False)
         self._fill_resolutions()
+        self._fill_variables()
         self._set_enabled(True)
         self.space.setEnabled(ocio["ready"])
+        self._show_sets()
         self._on_preset()
         if self.sidecar_error:
             log("export settings not read: %s" % self.sidecar_error)
@@ -664,6 +762,7 @@ class ExportWindow(QtWidgets.QDialog):
                         "overrides": {n: dict(o) for n, o in (value.get("overrides") or {}).items() if isinstance(o, dict)},
                         "disabled": set(value.get("disabled") or []),
                         "skip": {tuple(k) for k in value.get("skip") or [] if isinstance(k, list) and len(k) == 3},
+                        "naming": value.get("naming") if isinstance(value.get("naming"), str) else None,
                     }
             return {
                 "preset": prefs.get("preset") or "",
@@ -681,6 +780,7 @@ class ExportWindow(QtWidgets.QDialog):
                 "overrides": data.get("overrides") or {},
                 "disabled": disabled,
                 "skip": {k for k in skip if k[1:] != ("*", "*")},
+                "naming": data.get("naming") or None,
             }
         return {"preset": key, "color_space": data["color_space"], "mode": data["mode"], "padding": data["padding"],
                 "dir": data["dir"], "group": "map"}
@@ -752,7 +852,7 @@ class ExportWindow(QtWidgets.QDialog):
 
     def settings(self, key=None):
         key = key or self.preset_key()
-        return self.per_preset.setdefault(key, {"overrides": {}, "disabled": set(), "skip": set()})
+        return self.per_preset.setdefault(key, {"overrides": {}, "disabled": set(), "skip": set(), "naming": None})
 
     def textures(self):
         return self.current().get("textures", [])
@@ -786,6 +886,9 @@ class ExportWindow(QtWidgets.QDialog):
             "skip": [list(k) for k in sorted(s["skip"]) if k[0] not in s["disabled"]] + [[n, "*", "*"] for n in disabled],
             "overrides": self.overrides(),
         }
+        naming = self.naming_override()
+        if naming:
+            args["naming"] = naming
         if preset.get("project"):
             args["preset_json"] = preset.get("json") or {}
             args["preset_source"] = self.sidecar or ""
@@ -802,6 +905,7 @@ class ExportWindow(QtWidgets.QDialog):
         self.description.setToolTip(preset.get("path", "") or "")
         self.delete_preset.setVisible(bool(preset.get("project")))
         self._show_maps()
+        self._show_naming()
         self.schedule()
 
     def _on_space(self, *_):
@@ -821,20 +925,243 @@ class ExportWindow(QtWidgets.QDialog):
     def _set_enabled(self, enabled):
         for w in (self.preset, self.space, self.mode, self.padding, self.dir, self.browse, self.files, self.group,
                   self.check_all, self.check_none, self.maps, self.bits_all, self.res_all, self.reset_maps,
-                  self.save_preset, self.delete_preset):
+                  self.save_preset, self.delete_preset, self.naming, self.variables, self.reset_naming, self.sets,
+                  self.rename_set, self.merge_sets):
             w.setEnabled(enabled)
         if enabled and self.state is not None:
             self.space.setEnabled(self.state["ocio"]["ready"])
+            template = self.state.get("naming_template") is not None
+            for w in (self.naming, self.variables, self.reset_naming):
+                w.setEnabled(not template)
+            for w in (self.sets, self.rename_set, self.merge_sets):
+                w.setEnabled(not self.sets_busy)
             self.save_preset.setEnabled(self.sidecar is not None)
             self.save_preset.setToolTip(
-                "Save these maps, bit depths, resolutions and colour space as a preset of this project"
+                "Save these maps, bit depths, resolutions, colour space and file names as a preset of this project"
                 if self.sidecar else "Save the project first: its presets are kept next to it"
             )
         self._update_export_button()
 
     def _update_export_button(self):
         blocked = self.report is not None and not self.report.get("ok", True)
-        self.export.setEnabled(self.state is not None and not self.busy and bool(self.dir.text().strip()) and not blocked)
+        self.export.setEnabled(self.state is not None and not self.busy and bool(self.dir.text().strip()) and not blocked
+                               and self.naming_error is None and not self.sets_busy)
+
+    # -- nom des fichiers
+
+    def _fill_variables(self):
+        menu = self.variables.menu()
+        menu.clear()
+        for v in self.state.get("naming_variables", []):
+            action = menu.addAction("<%s>    %s" % (v["name"], v["description"]))
+            action.triggered.connect(lambda _=False, n=v["name"]: self._insert_naming("<%s>" % n))
+        menu.addSeparator()
+        action = menu.addAction("[ ]    optional section: dropped when a variable in it is empty")
+        action.triggered.connect(self._insert_section)
+
+    def preset_naming(self):
+        return self.current().get("naming") or ""
+
+    def naming_override(self):
+        """Modèle de nom choisi pour cet export s'il diffère de celui du preset (sans objet sous un template ShotGrid)."""
+        naming = self.settings().get("naming")
+        if not naming or naming == self.preset_naming() or (self.state or {}).get("naming_template") is not None:
+            return None
+        return naming
+
+    def _show_naming(self):
+        if self.state is None:
+            return
+        template = self.state.get("naming_template")
+        self.naming.setText(template if template is not None else self.naming_override() or self.preset_naming())
+        self.naming.setCursorPosition(0)
+        self._check_naming()
+
+    def _check_naming(self):
+        template = self.state.get("naming_template")
+        variables = [v["name"] for v in self.state.get("naming_variables", [])]
+        self.naming_error = None if template is not None else naming_problem(self.naming.text(), variables)
+        overridden = self.naming_override() is not None
+        self.naming.setStyleSheet("border-color: %s;" % ERROR if self.naming_error
+                                  else "color: %s;" % ACCENT if overridden else "")
+        self.reset_naming.setVisible(overridden or self.naming_error is not None)
+        self._update_naming_note()
+        self._update_export_button()
+
+    def _on_naming(self, text):
+        self.settings()["naming"] = text if text != self.preset_naming() else None
+        self._check_naming()
+        if self.naming_error is None:
+            self.schedule()
+
+    def _insert_naming(self, text):
+        self.naming.insert(text)  # à la place de la sélection
+        self.naming.setFocus()
+        self._on_naming(self.naming.text())
+
+    def _insert_section(self):
+        field = self.naming
+        if field.hasSelectedText():
+            field.insert("[%s]" % field.selectedText())
+        else:
+            field.insert("[]")
+            field.cursorBackward(False)
+        field.setFocus()
+        self._on_naming(field.text())
+
+    def _reset_naming(self):
+        self.settings()["naming"] = None
+        self._show_naming()
+        self.schedule()
+
+    def _update_naming_note(self):
+        """Sous le champ : l'erreur, sinon un nom de fichier de cet export, et les maps qui gardent leur propre nom."""
+        if self.state is None:
+            return
+        template = self.state.get("naming_template")
+        if template is not None:
+            self.naming_note.setText(html.escape("Names come from the ShotGrid template of this project."))
+            return
+        if self.naming_error:
+            self.naming_note.setText('<span style="color:%s">%s</span>' % (ERROR, html.escape(self.naming_error)))
+            return
+        own = [t["name"] for t in self.textures() if t.get("naming")]
+        files = [f for f in self._report_files() if self._selected(f) and f.get("texture") not in own]
+        parts = []
+        if files:
+            dest = self.dir.text().strip()
+            path = files[0]["path"]
+            parts.append("e.g. " + html.escape(os.path.relpath(path, dest) if dest and path.startswith(dest) else
+                                                os.path.basename(path)))
+        if own:
+            parts.append(html.escape("%s: own name from the preset" % ", ".join(own)))
+        self.naming_note.setText("  ·  ".join(parts))
+
+    # -- jeux de textures
+
+    def _atlases(self):
+        return (self.state or {}).get("atlases") or {"names": [], "objects": [], "layers": []}
+
+    def _show_sets(self):
+        """Une ligne par objet (ses tuiles UDIM ensemble), avec son jeu ; pas de section pour un seul objet."""
+        atlases = self._atlases()
+        groups = object_groups(atlases["objects"])
+        self.sets_section.setVisible(len(groups) > 1)
+        tree = self.sets
+        tree.clear()
+        if len(groups) < 2:
+            return
+        names = atlases["names"]
+        for name, indices in groups:
+            label = name if len(indices) == 1 else "%s  (%s)" % (name, plural(len(indices), "UDIM tile"))
+            item = QtWidgets.QTreeWidgetItem([label, ""])
+            item.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemNeverHasChildren)
+            item.setToolTip(0, ", ".join(atlases["objects"][i]["name"] for i in indices))
+            tree.addTopLevelItem(item)
+            box = QtWidgets.QComboBox()
+            current = {atlases["objects"][i]["atlas"] for i in indices}
+            if len(current) > 1:
+                box.addItem("(several)", None)
+            for k, n in enumerate(names):
+                box.addItem(n, k)
+            box.insertSeparator(box.count())
+            box.addItem("New set...", NEW_SET)
+            box.setCurrentIndex(max(0, box.findData(current.pop())) if len(current) == 1 else 0)
+            box.activated.connect(lambda _, b=box, idx=indices: self._on_set_chosen(idx, b.currentData()))
+            tree.setItemWidget(item, 1, box)
+            item.setSizeHint(0, QtCore.QSize(0, box.sizeHint().height() + 2))
+        rows = min(tree.topLevelItemCount(), 4)  # au-delà, défilement : les maps gardent la place
+        tree.setFixedHeight(tree.header().sizeHint().height() + tree.sizeHintForRow(0) * rows + 6)
+        layers = atlases.get("layers") or []
+        self.sets_layers.setText("Limited to a set: %s" % ", ".join("%s (%s)" % (l["layer"], names[l["atlas"]])
+                                                                   for l in layers if 0 <= l["atlas"] < len(names)))
+        self.sets_layers.setVisible(bool(layers))
+        self.rename_set.setVisible(bool(names))
+        self._update_sets_note()
+
+    def _used_sets(self):
+        return sorted({o["atlas"] for o in self._atlases()["objects"]})
+
+    def _update_sets_note(self):
+        used = len(self._used_sets())
+        if self.mode.currentIndex() != 0:
+            text = "used by the Visible export"
+        elif used > 1:
+            text = "Visible: one set of maps per texture set (<atlas> in the names)"
+        else:
+            text = "all objects in one set of maps; choose New set... to split them"
+        self.sets_note.setText(text)
+        self.merge_sets.setVisible(used > 1)
+
+    def _set_name_dialog(self, title, label, text=""):
+        name, ok = QtWidgets.QInputDialog.getText(self, title, label, text=text)
+        return name.strip() if ok else None
+
+    def _on_set_chosen(self, indices, choice):
+        atlases = self._atlases()
+        names = list(atlases["names"])
+        objects = [o["atlas"] for o in atlases["objects"]]
+        if choice is None:
+            return
+        if choice == NEW_SET:
+            name = self._set_name_dialog("New texture set", "Name of the texture set:", "set_%d" % (len(names) + 1))
+            if not name:
+                self._show_sets()
+                return
+            if name in names:
+                choice = names.index(name)
+            else:
+                names.append(name)
+                choice = len(names) - 1
+        for i in indices:
+            objects[i] = choice
+        self._send_atlases(names, objects)
+
+    def _on_rename_set(self):
+        names = self._atlases()["names"]
+        if not names:
+            return
+        menu = QtWidgets.QMenu(self)
+        for k, n in enumerate(names):
+            menu.addAction(n).setData(k)
+        action = menu.exec(self.rename_set.mapToGlobal(QtCore.QPoint(0, self.rename_set.height())))
+        if action is None:
+            return
+        k = action.data()
+        name = self._set_name_dialog("Rename texture set", "New name of %s:" % names[k], names[k])
+        if name and name != names[k]:
+            renamed = list(names)
+            renamed[k] = name
+            self._send_atlases(renamed, [o["atlas"] for o in self._atlases()["objects"]])
+
+    def _merge_sets(self):
+        atlases = self._atlases()
+        first = self._used_sets()[0] if atlases["objects"] else 0
+        self._send_atlases(atlases["names"], [first] * len(atlases["objects"]))
+
+    def _send_atlases(self, names, objects):
+        """Les jeux changent dans le projet d'ArmorPaint (enregistrés avec le .arm) ; il vérifie et répond."""
+        self.sets_busy = True
+        self._set_enabled(not self.busy)
+        self.channel.request("atlases", {"names": names, "objects": objects}, self._on_atlases)
+
+    def _on_atlases(self, data, error):
+        self.sets_busy = False
+        if error is not None:
+            self._say_error("Texture sets not changed: %s" % error.get("message", ""))
+        elif not data.get("ok"):
+            self._say_error("Texture sets not changed: %s" % data.get("error", ""))
+        if data is not None and data.get("atlases"):
+            self.state["atlases"] = data["atlases"]
+        self._show_sets()
+        self._set_enabled(not self.busy)
+        if self.test is not None:
+            self.test_log["atlases_reply"] = data if error is None else {"error": error}
+            if self.test.get("_atlases_first"):
+                self.test["_atlases_first"] = False
+                self._run_test_setup()
+                return
+        self.schedule()
 
     # -- maps
 
@@ -1053,6 +1380,7 @@ class ExportWindow(QtWidgets.QDialog):
             self.issues_frame.show()
         else:
             self.issues_frame.hide()
+        self._update_naming_note()
         self._update_summary()
 
     def _fit_issues(self, lines):
@@ -1272,6 +1600,9 @@ class ExportWindow(QtWidgets.QDialog):
             self._say_error("No map to save: enable at least one")
             return
         data["textures"] = textures
+        naming = self.naming_override()
+        if naming:
+            data["naming"] = naming
         if preset.get("project"):
             data["description"] = preset.get("description", "")
         else:
@@ -1292,7 +1623,7 @@ class ExportWindow(QtWidgets.QDialog):
         presets[name] = data
         # Le preset porte maintenant les réglages : ils repartent de zéro ; les fichiers décochés restent.
         skip = set(self.settings(previous)["skip"])
-        self.per_preset[key] = {"overrides": {}, "disabled": set(), "skip": skip}
+        self.per_preset[key] = {"overrides": {}, "disabled": set(), "skip": skip, "naming": None}
         self.presets = [p for p in self.presets if p["key"] != key]
         self.presets.append(dict(info, key=key, project=True, shipped=False, path=self.sidecar, json=data))
         self._fill_presets(key)
@@ -1340,6 +1671,8 @@ class ExportWindow(QtWidgets.QDialog):
                 entry["disabled"] = sorted(s["disabled"])
             if s["skip"]:
                 entry["skip"] = [list(k) for k in sorted(s["skip"])]
+            if s.get("naming"):
+                entry["naming"] = s["naming"]
             if entry:
                 per[key] = entry
         return {
@@ -1441,6 +1774,10 @@ class ExportWindow(QtWidgets.QDialog):
         t = self.test
         self.test_log["state"] = self.state
         self.test_log["sidecar"] = self.sidecar
+        if "atlases" in t and not t.get("_atlases_sent"):
+            t["_atlases_sent"] = t["_atlases_first"] = True  # le reste à la réponse (_on_atlases)
+            self._send_atlases(t["atlases"]["names"], t["atlases"]["objects"])
+            return
         if "preset" in t:
             key = t["preset"] if ":" in t["preset"] else "file:" + t["preset"]
             self.preset.setCurrentIndex(self._preset_index(key))
@@ -1466,6 +1803,9 @@ class ExportWindow(QtWidgets.QDialog):
             self._apply_all_resolutions(t["resolution_all"])
         if "dir" in t:
             self.dir.setText(t["dir"])
+        if "naming" in t:
+            self.naming.setText(t["naming"])
+            self._on_naming(t["naming"])
         if "save_preset" in t:
             self._save_preset(t["save_preset"])
         self.schedule()
@@ -1496,6 +1836,16 @@ class ExportWindow(QtWidgets.QDialog):
         self.test_log["composition"] = self.composition.text()
         self.test_log["project"] = self.project.text()
         self.test_log["issues"] = self.issues.text() if not self.issues_frame.isHidden() else ""
+        self.test_log["naming"] = {"text": self.naming.text(), "note": self.naming_note.text(),
+                                   "error": self.naming_error, "enabled": self.naming.isEnabled()}
+        self.test_log["sets"] = {
+            "shown": not self.sets_section.isHidden(),
+            "note": self.sets_note.text(),
+            "rows": [[self.sets.topLevelItem(i).text(0), self.sets.itemWidget(self.sets.topLevelItem(i), 1).currentText()]
+                     for i in range(self.sets.topLevelItemCount())],
+        }
+        if self.test.get("screenshot"):
+            self.grab().save(self.test["screenshot"])
         with open(self.test["result"], "w") as f:
             json.dump(self.test_log, f, indent=1)
         self.close()

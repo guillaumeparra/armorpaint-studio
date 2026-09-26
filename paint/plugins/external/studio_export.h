@@ -50,6 +50,11 @@ const char *studio_export_preset_source(void);
 // "resolution": 2048}}. "" : ceux du preset.
 const char *studio_export_overrides(void);
 void        studio_export_set_overrides(const char *json);
+// Modèle de nom des fichiers pour ce preset (pour tous tant qu'aucun n'est choisi), à la place du "naming" du preset
+// (pas de celui d'une texture qui a le sien) : variables de studio_naming_variables, vérifiées à l'export. "" : celui
+// du preset. Ignoré quand un template ShotGrid nomme les textures (studio_export_naming.h).
+const char *studio_export_naming(void);
+void        studio_export_set_naming(const char *pattern);
 
 // Export ou préflight seul (preflight_only) avec ce preset et ce mode (EXPORT_MODE_*, -1 : celui d'ArmorPaint), sans
 // boîte de message d'ArmorPaint : l'appelant affiche studio_export_last_report() et studio_export_last_error(). Rend

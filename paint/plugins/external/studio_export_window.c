@@ -11,8 +11,11 @@
 #include "engine.h"
 #include "../../sources/types.h"
 #include "studio.h"
+#include "studio_atlas.h"
+#include "studio_export_naming.h"
 #include "studio_export.h"
 #include "studio_json.h"
+#include "studio_naming.h"
 #include "studio_ocio.h"
 #include "studio_preset.h"
 #include "studio_proc.h"
@@ -281,7 +284,14 @@ static void put_textures(text_t *b, const studio_preset_t *p) {
 		for (int k = 0; k < n; ++k) {
 			put(b, "%s%d", k > 0 ? "," : "", bits[k]);
 		}
-		put(b, "],\"resolution\":%d,\"channels\":%d,\"color_space\":", t->resolution, t->channels);
+		put(b, "],\"resolution\":%d,\"channels\":%d,\"naming\":", t->resolution, t->channels);
+		if (t->naming != NULL) { // nom propre à la texture : le nom de l'export ne s'y applique pas
+			put_quoted(b, t->naming);
+		}
+		else {
+			put(b, "null");
+		}
+		put(b, ",\"color_space\":");
 		put_quoted(b, studio_preset_color(t));
 		put(b, ",\"color\":%s}",
 		    studio_preset_texture_is_color(t, studio_ocio_ready() ? studio_ocio_is_data : NULL) ? "true" : "false");
@@ -289,7 +299,7 @@ static void put_textures(text_t *b, const studio_preset_t *p) {
 	put(b, "]");
 }
 
-// {"name","description","valid","error","textures"} d'un preset lu (p) ou refusé (err).
+// {"name","description","valid","error","naming","textures"} d'un preset lu (p) ou refusé (err).
 static void put_preset_info(text_t *b, const char *name, const studio_preset_t *p, const char *err) {
 	put(b, "{\"name\":");
 	put_quoted(b, name);
@@ -297,6 +307,8 @@ static void put_preset_info(text_t *b, const char *name, const studio_preset_t *
 	put_quoted(b, p != NULL && p->description != NULL ? p->description : "");
 	put(b, ",\"valid\":%s,\"error\":", p != NULL ? "true" : "false");
 	put_quoted(b, p != NULL ? "" : err);
+	put(b, ",\"naming\":");
+	put_quoted(b, p != NULL ? p->naming : "");
 	put(b, ",\"textures\":");
 	if (p != NULL) {
 		put_textures(b, p);
@@ -385,6 +397,27 @@ static char *state_json(const char *req) {
 		put_quoted(&b, tiles->buffer[i]);
 	}
 	put(&b, "]},");
+	// Jeux de textures (atlas) du projet, et nommage : variables, modèle de la session, template ShotGrid qui l'emporte.
+	char *atlases = studio_atlas_json();
+	put(&b, "\"atlases\":%s,\"naming\":", atlases != NULL ? atlases : "null");
+	free(atlases);
+	put_quoted(&b, studio_export_naming());
+	put(&b, ",\"naming_template\":");
+	if (studio_export_naming_template() != NULL) {
+		put_quoted(&b, studio_export_naming_template());
+	}
+	else {
+		put(&b, "null");
+	}
+	put(&b, ",\"naming_variables\":[");
+	for (int i = 0; i < studio_naming_variable_count; ++i) {
+		put(&b, i > 0 ? ",{\"name\":" : "{\"name\":");
+		put_quoted(&b, studio_naming_variables[i].name);
+		put(&b, ",\"description\":");
+		put_quoted(&b, studio_naming_variables[i].description);
+		put(&b, "}");
+	}
+	put(&b, "],");
 
 	put(&b, "\"presets\":[");
 	int count = studio_export_preset_count(); // relit les dossiers : les noms valent jusqu'à la relecture suivante
@@ -490,19 +523,21 @@ static void adopt(const char *dir, int mode, bool padding) {
 
 // Choix de l'export courant, pour les rendre si la requête n'aboutit pas.
 typedef struct {
-	char *preset, *json, *source, *overrides, *color_space, *skip;
+	char *preset, *json, *source, *overrides, *naming, *color_space, *skip;
 } selection_t;
 
 static selection_t selection_save(void) {
 	return (selection_t){strdup(studio_export_preset()),    strdup(studio_export_preset_json()),
 	                     strdup(studio_export_preset_source()), strdup(studio_export_overrides()),
-	                     strdup(studio_export_color_space()), strdup(studio_export_skip())};
+	                     strdup(studio_export_naming()),     strdup(studio_export_color_space()),
+	                     strdup(studio_export_skip())};
 }
 
 static void selection_free(selection_t *s, bool restore) {
 	if (restore) {
 		studio_export_set_preset(s->preset, s->json, s->source);
 		studio_export_set_overrides(s->overrides);
+		studio_export_set_naming(s->naming);
 		studio_export_set_color_space(s->color_space);
 		studio_export_set_skip(s->skip);
 	}
@@ -510,6 +545,7 @@ static void selection_free(selection_t *s, bool restore) {
 	free(s->json);
 	free(s->source);
 	free(s->overrides);
+	free(s->naming);
 	free(s->color_space);
 	free(s->skip);
 }
@@ -540,6 +576,7 @@ static void run_request(int id, const char *req, bool preflight_only) {
 	char *preset_json = arg_raw(req, "preset_json");
 	char *source      = arg_text(req, "preset_source");
 	char *overrides   = arg_raw(req, "overrides");
+	char *naming      = arg_text(req, "naming");
 	char *space       = arg_text(req, "color_space");
 	char *dir         = arg_text(req, "dir");
 	int   mode        = (int)studio_json_int(studio_json_find(req, "/args/mode"), EXPORT_MODE_VISIBLE);
@@ -559,6 +596,7 @@ static void run_request(int id, const char *req, bool preflight_only) {
 		char       *skip     = skip_keys(req);
 		studio_export_set_preset(preset, preset_json, source);
 		studio_export_set_overrides(overrides);
+		studio_export_set_naming(naming);
 		studio_export_set_color_space(space);
 		studio_export_set_skip(skip);
 		free(skip);
@@ -582,8 +620,27 @@ static void run_request(int id, const char *req, bool preflight_only) {
 	free(preset_json);
 	free(source);
 	free(overrides);
+	free(naming);
 	free(space);
 	free(dir);
+}
+
+// args : {"names": [...], "objects": [...]} (studio_atlas_set) -> {"ok", "error", "atlases"} : les jeux de textures
+// changent dans le projet (enregistrés avec lui), comme l'onglet Atlases de la boîte d'export d'ArmorPaint.
+static void atlases_request(int id, const char *req) {
+	studio_json_value_t args = studio_json_find(req, "/args");
+	char               *json = args.type == STUDIO_JSON_OBJECT ? strndup(args.start, args.len) : strdup("");
+	char                err[512];
+	bool                ok      = studio_atlas_set(json, err, sizeof(err));
+	char               *atlases = studio_atlas_json();
+	text_t              b       = {0};
+	put(&b, "{\"ok\":%s,\"error\":", ok ? "true" : "false");
+	put_quoted(&b, ok ? "" : err);
+	put(&b, ",\"atlases\":%s}", atlases != NULL ? atlases : "null");
+	reply(id, b.data != NULL ? b.data : "null");
+	free(b.data);
+	free(atlases);
+	free(json);
 }
 
 // args : {"name", "preset": {...}} -> {"name","description","valid","error","textures"} : un preset que la fenêtre va
@@ -627,6 +684,9 @@ static void handle_request(void *data) {
 	}
 	else if (strcmp(op, "inspect") == 0) {
 		inspect_request(id, req);
+	}
+	else if (strcmp(op, "atlases") == 0) {
+		atlases_request(id, req);
 	}
 	else {
 		reply_error(id, "bad_request", string_tmp("unknown operation: %s", op));

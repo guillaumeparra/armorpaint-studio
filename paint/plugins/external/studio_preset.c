@@ -1,6 +1,7 @@
 #include "studio_preset.h"
 #include "studio_fs.h"
 #include "studio_json.h"
+#include "studio_naming.h"
 #include "studio_sha256.h"
 #include <stdarg.h>
 #include <stdio.h>
@@ -83,6 +84,13 @@ static char *want_string(ctx_t *c, studio_json_value_t v, const char *where) {
 		fail(c, "out of memory");
 	}
 	return s;
+}
+
+static void check_naming(ctx_t *c, const char *naming, const char *where) {
+	char err[400];
+	if (naming != NULL && !studio_naming_check(naming, err, sizeof(err))) {
+		fail(c, "%s: %s", where, err);
+	}
 }
 
 static int want_int(ctx_t *c, studio_json_value_t v, const char *where, int min, int max) {
@@ -366,6 +374,7 @@ static void parse_texture(ctx_t *c, studio_json_value_t v, studio_preset_texture
 		}
 		else if (strcmp(key, "naming") == 0) {
 			t->naming = want_string(c, val, sub);
+			check_naming(c, t->naming, sub);
 		}
 		else if (strcmp(key, "channels") == 0) {
 			parse_channels(c, val, t, where);
@@ -531,6 +540,7 @@ studio_preset_t *studio_preset_parse(const char *json, const char *name, char *e
 		}
 		else if (strcmp(key, "naming") == 0) {
 			p->naming = want_string(&c, val, "naming");
+			check_naming(&c, p->naming, "naming");
 		}
 		else if (strcmp(key, "defaults") == 0) {
 			parse_defaults(&c, val, &d);

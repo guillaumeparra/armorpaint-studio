@@ -363,6 +363,36 @@ static void test_naming(void) {
 	check_format("<<file>>", "f", "", "", "", "", "<f>");
 	check_format("", "f", "", "", "", "", "");
 	check_format("[<UDIM>][<UDIM>]", "f", "", "", "1001", "", "10011001");
+	check_format("<File>_<CHANNEL>[.<udim>].<Ext>", "f", "", "c", "1001", "exr", "f_c.1001.exr"); // sans égard à la casse
+
+	// Modèles vérifiés (studio_naming_check) : variables connues seulement.
+	const char *good[] = {STUDIO_PRESET_DEFAULT_NAMING, "<name>_v<version>_<atlas>_<object>_<channel>.<ext>",
+	                      "<preset>/<resolution>/<bits>/<file>.<udim>.<EXT>", "plain.png", "a<b", "a<b<name>",
+	                      "<<file>>"};
+	for (int i = 0; i < (int)(sizeof(good) / sizeof(good[0])); ++i) {
+		char err[256] = "";
+		CHECK(studio_naming_check(good[i], err, sizeof(err)), "naming '%s' refused: %s", good[i], err);
+	}
+	const char *bad[][2] = {{"", "empty"}, {"<name>_<shader>.<ext>", "unknown variable <shader> (file, name,"},
+	                        {"<>.<ext>", "unknown variable <>"}, {"[<nope>]", "unknown variable <nope>"}};
+	for (int i = 0; i < (int)(sizeof(bad) / sizeof(bad[0])); ++i) {
+		char err[256] = "";
+		CHECK(!studio_naming_check(bad[i][0], err, sizeof(err)) && strstr(err, bad[i][1]) != NULL,
+		      "naming '%s': '%s' expected, got '%s'", bad[i][0], bad[i][1], err);
+	}
+
+	// Version en fin de nom de fichier.
+	const char *split[][3] = {{"robot_v003", "robot", "003"}, {"robot.V12", "robot", "12"}, {"robot-v1", "robot", "1"},
+	                          {"robot", "robot", ""},           {"robot_v", "robot_v", ""},  {"v003", "v003", ""},
+	                          {"robot_v3a", "robot_v3a", ""},  {"robotv003", "robotv003", ""}, {"", "", ""}};
+	for (int i = 0; i < (int)(sizeof(split) / sizeof(split[0])); ++i) {
+		char *name = NULL, *version = NULL;
+		bool  ok   = studio_naming_split_version(split[i][0], &name, &version);
+		CHECK(ok && strcmp(name, split[i][1]) == 0 && strcmp(version, split[i][2]) == 0, "split '%s' = '%s' '%s'",
+		      split[i][0], name, version);
+		free(name);
+		free(version);
+	}
 }
 
 // ---- Presets ---------------------------------------------------------------------------------------------------------
@@ -480,6 +510,9 @@ static void test_presets(const char *shipped_dir) {
 	expect_error("{\"textures\": [{\"name\": \"a\", \"channels\": [\"occ\"], \"format\": \"png\", "
 	             "\"color_space\": \"\"}]}",
 	             "OCIO colorspace name");
+	expect_error("{\"naming\": \"<name>_<shader>.<ext>\", \"textures\": [{\"name\": \"a\", \"channels\": [\"occ\"]}]}",
+	             "naming: unknown variable <shader>");
+	expect_error("{\"textures\": [{\"name\": \"a\", \"channels\": [\"occ\"], \"naming\": \"\"}]}", "empty name");
 	expect_error("{\"textures\": [{\"name\": \"a\", \"channels\": [\"occ\"], \"format\": \"png\", "
 	             "\"color_space\": \"ocio\"}]}",
 	             "color_space 'ocio'");

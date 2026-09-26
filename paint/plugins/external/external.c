@@ -1,4 +1,5 @@
 #include "studio.h"
+#include "studio_atlas.h"
 #include "studio_exec.h"
 #include "studio_export.h"
 #include "studio_export_window.h"
@@ -21,6 +22,7 @@ void external_init(void) {
 	studio_shotgrid_init();
 	studio_workfiles_init();
 	studio_export_naming_init();
+	studio_atlas_init();
 	studio_export_init();
 	studio_export_window_init();
 }

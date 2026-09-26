@@ -12,6 +12,7 @@
 #include "engine.h"
 #include "../../sources/types.h"
 #include "studio.h"
+#include "studio_atlas.h"
 #include "studio_export_naming.h"
 #include "studio_exr.h"
 #include "studio_exr_codec.h"
@@ -277,6 +278,7 @@ static struct {
 	bool             args_consumed;  // --export-textures : le preset de la ligne de commande ne sert qu'une fois
 	studio_preset_t *preset;
 	char            *overrides; // chosen.overrides appliqués à ce preset, NULL sinon
+	char            *naming;    // chosen.naming appliqué à ce preset, NULL sinon
 	char            *dir;
 
 	studio_plan_file_t *files;
@@ -288,6 +290,8 @@ static struct {
 	bool                layers_counted;
 	char               *naming_error;
 	char               *file_base;
+	char               *project_name; // file_base sans version ("robot_v003" -> "robot")
+	char               *version;      // "003", "" sans version
 	int                 source_bits;
 
 	staged_t *staged;
@@ -303,12 +307,13 @@ static struct {
 
 // Preset studio de l'export courant (fenêtre d'export, script) : repris par Ctrl+E. json : un preset qui n'est pas dans
 // les dossiers de presets (sidecar du projet), source : d'où il vient (manifeste). overrides : bits et résolution par
-// texture (studio_preset_apply_overrides).
+// texture (studio_preset_apply_overrides). naming : modèle de nom à la place de celui du preset.
 static struct {
 	char *name;
 	char *json;
 	char *source;
 	char *overrides;
+	char *naming;
 } chosen = {0};
 
 // Espace imposé aux textures de couleur des presets studio (fenêtre d'export, STUDIO_EXPORT_COLOR_SPACE, script) ; NULL :
@@ -376,6 +381,10 @@ static void reset_plan(void) {
 	ex.naming_error = NULL;
 	free(ex.file_base);
 	ex.file_base = NULL;
+	free(ex.project_name);
+	ex.project_name = NULL;
+	free(ex.version);
+	ex.version = NULL;
 	for (int i = 0; i < ex.staged_count; ++i) {
 		if (ex.staged[i].tmp != NULL) {
 			studio_fs_remove(ex.staged[i].tmp);
@@ -402,6 +411,8 @@ static void finish(void) {
 	ex.preset = NULL;
 	free(ex.overrides);
 	ex.overrides = NULL;
+	free(ex.naming);
+	ex.naming = NULL;
 	free(ex.dir);
 	ex.dir   = NULL;
 	ex.phase = PHASE_IDLE;
@@ -473,9 +484,20 @@ static char *texture_path(const char *dir, const char *variant, const char *udim
 	if (r != 0) {
 		return sg;
 	}
-	const char *names[]  = {"file", "variant", "channel", "UDIM", "ext"};
-	const char *values[] = {ex.file_base, variant, t->suffix, udim, ext};
-	char       *name     = studio_naming_format(t->naming != NULL ? t->naming : ex.preset->naming, names, values, 5);
+	// La variante est un objet (Per Object, masque d'objet en Selected) ou un jeu de textures (Visible avec des jeux).
+	export_mode_t mode   = g_context->layers_export;
+	const char   *object = mode == EXPORT_MODE_PER_OBJECT || mode == EXPORT_MODE_SELECTED ? variant : "";
+	const char   *atlas  = mode == EXPORT_MODE_VISIBLE && studio_atlas_active() ? variant : "";
+	int           w, h;
+	studio_preset_output_size(t, config_get_texture_res_x(), config_get_texture_res_y(), &w, &h);
+	char        resolution[16], bits[8];
+	snprintf(resolution, sizeof(resolution), "%d", w);
+	snprintf(bits, sizeof(bits), "%d", t->bits);
+	const char *names[]  = {"file",  "name", "version", "variant", "object", "atlas", "channel",
+	                        "UDIM", "resolution", "bits", "preset", "ext"};
+	const char *values[] = {ex.file_base, ex.project_name, ex.version, variant,        object,        atlas, t->suffix,
+	                        udim,         resolution,      bits,       ex.preset->name, ext};
+	char       *name     = studio_naming_format(t->naming != NULL ? t->naming : ex.preset->naming, names, values, 12);
 	if (name == NULL) {
 		*error = strdup("out of memory");
 		return NULL;
@@ -1252,7 +1274,14 @@ static char *manifest_json(const char *dir, const studio_report_t *r) {
 		put(&b, "null");
 	}
 	// Réglages de l'export par-dessus le preset (bits, résolution par texture) : l'objet validé, tel quel.
-	put(&b, ", \"overrides\": %s},\n", ex.overrides != NULL ? ex.overrides : "null");
+	put(&b, ", \"overrides\": %s, \"naming\": ", ex.overrides != NULL ? ex.overrides : "null");
+	if (ex.naming != NULL) {
+		put_quoted(&b, ex.naming);
+	}
+	else {
+		put(&b, "null");
+	}
+	put(&b, "},\n");
 	put(&b, "  \"resolution\": [%d, %d],\n  \"source_bits\": %d,\n  \"mode\": \"%s\",\n", config_get_texture_res_x(),
 	    config_get_texture_res_y(), ex.source_bits, mode_name());
 	const char *tmpl = studio_export_naming_template();
@@ -1663,19 +1692,38 @@ bool studio_export_begin(char *path, bool bake_material) {
 		show_text("Texture export: invalid settings", err, true);
 		return false;
 	}
-	if (color_override != NULL &&
-	    studio_preset_override_color(preset, color_override, studio_ocio_ready() ? studio_ocio_is_data : NULL) < 0) {
+	// Sans preset choisi (script : studio_export_set_naming seul), le modèle vaut pour tous.
+	bool renamed = chosen.naming != NULL && (chosen.name == NULL || strcmp(chosen.name, name) == 0);
+	if (renamed && !studio_naming_check(chosen.naming, err, sizeof(err))) {
+		studio_preset_free(preset);
+		show_text("Texture export: invalid file name", string_tmp("%s: %s", chosen.naming, err), true);
+		return false;
+	}
+	char *naming = renamed ? strdup(chosen.naming) : NULL;
+	if (renamed && naming != NULL) {
+		free(preset->naming);
+		preset->naming = strdup(naming);
+	}
+	if ((renamed && (naming == NULL || preset->naming == NULL)) ||
+	    (color_override != NULL &&
+	     studio_preset_override_color(preset, color_override, studio_ocio_ready() ? studio_ocio_is_data : NULL) < 0)) {
+		free(naming);
 		studio_preset_free(preset);
 		show_text("Texture export failed", "out of memory", true);
 		return false;
 	}
 	reset_plan();
 	ex.preset      = preset;
+	ex.naming      = naming;
 	ex.overrides   = overridden ? strdup(chosen.overrides) : NULL;
 	ex.dir         = strdup(path);
 	ex.source_bits = source_bits();
 	const char *f  = ui_files_filename != NULL && ui_files_filename[0] != 0 ? ui_files_filename : "untitled";
 	ex.file_base   = clean_base(f);
+	if (ex.file_base == NULL || !studio_naming_split_version(ex.file_base, &ex.project_name, &ex.version)) {
+		ex.project_name = strdup("");
+		ex.version      = strdup("");
+	}
 
 	// Passe à blanc : l'upstream parcourt objets, tuiles et atlas ; chaque appel de studio_export_layers note ses
 	// fichiers sans rien lire ni écrire.
@@ -1881,6 +1929,14 @@ void studio_export_set_overrides(const char *json) {
 	set_text(&chosen.overrides, json);
 }
 
+const char *studio_export_naming(void) {
+	return chosen.naming != NULL ? chosen.naming : "";
+}
+
+void studio_export_set_naming(const char *pattern) {
+	set_text(&chosen.naming, pattern);
+}
+
 const char *studio_export_color_space(void) {
 	return color_override != NULL ? color_override : "";
 }
@@ -1968,6 +2024,11 @@ static minic_val_t mn_studio_export_set_overrides(minic_val_t *a, int n) {
 	return minic_val_int(0);
 }
 
+static minic_val_t mn_studio_export_set_naming(minic_val_t *a, int n) {
+	studio_export_set_naming(minic_arg_p(a, n, 0));
+	return minic_val_int(0);
+}
+
 static minic_val_t mn_studio_export_set_color_space(minic_val_t *a, int n) {
 	return minic_val_int(studio_export_set_color_space(minic_arg_p(a, n, 0)) ? 1 : 0);
 }
@@ -1995,5 +2056,6 @@ void studio_export_init(void) {
 	minic_register("studio_export_set_skip", "v(p)", mn_studio_export_set_skip);
 	minic_register("studio_export_set_preset", "v(p,p,p)", mn_studio_export_set_preset);
 	minic_register("studio_export_set_overrides", "v(p)", mn_studio_export_set_overrides);
+	minic_register("studio_export_set_naming", "v(p)", mn_studio_export_set_naming);
 #endif
 }

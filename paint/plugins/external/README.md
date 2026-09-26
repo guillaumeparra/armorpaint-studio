@@ -43,7 +43,7 @@ Modules, un par lot (voir `ARMORPAINT_LOTS.md` à la racine d'armorpaint) :
 | `studio_sg`, `studio_shotgrid`, `studio_json`, `assets/studio_sg_*.py` | C2 | ✅ sidecar ShotGrid (Toolkit), superviseur, API de scripting (macOS ; validé sur site simulé) |
 | `studio_workfiles`, `tk-armorpaint/` | C3 | ✅ Workfiles (tk-multi-workfiles2) et menu ShotGrid, par le moteur Toolkit tk-armorpaint (macOS ; validé sur site simulé) |
 | `studio_shotgrid` (UI) | C4-C5 | à faire |
-| `studio_export_window`, `assets/studio_export_window.py` | B6 | ✅ fenêtre d'export Qt (PySide6) à la place de la boîte d'export : presets studio, espace OCIO, préflight en direct (macOS) |
+| `studio_export_window`, `assets/studio_export_window.py`, `studio_atlas` | B6 | ✅ fenêtre d'export Qt (PySide6) à la place de la boîte d'export : presets studio, espace OCIO, préflight en direct, nom des fichiers, jeux de textures (macOS) |
 
 Build : `../base/make --compile` depuis `paint/`. Le log de démarrage affiche `studio: external <version>
 loaded`, puis une ligne par module.
@@ -392,7 +392,7 @@ La lecture est stricte : une clé inconnue, un type faux ou une combinaison impo
 | `compression` | png `fast`, `default`, `best` ; tiff `none`, `lzw`, `deflate` (défaut) ; exr `none`, `rle`, `zips`, `zip`, `piz`, `pxr24`, `b44`, `b44a`, `htj2k256`, `htj2k32` (défaut : `STUDIO_EXR_COMPRESSION`) ; jpg : `quality` 1-100 (défaut 90) |
 | `color_space` | `raw` : valeurs d'ArmorPaint telles quelles (le `linear` des presets upstream) ; `linear` : couleurs décodées (gamma 2.2 → linéaire) ; `srgb` : décodées, calculées, puis réencodées. Les données, les constantes et l'alpha ne sont jamais transformés. Tout autre nom est un espace OCIO (nom, alias ou rôle : `ACEScg`, `sRGB - Texture`, `Raw`…) : voir « Export (A3) ». Les trois mots-clés s'écrivent en minuscules ; `Raw` est l'espace OCIO |
 | `channels` | 1, 3 ou 4 expressions (pas de 4e canal en JPG) |
-| `naming` | marqueurs `<file>`, `<variant>` (objet ou atlas), `<channel>` (`suffix`, sinon `name`), `<UDIM>`, `<ext>`. Une section `[…]` disparaît si un marqueur qu'elle contient est vide. Un chemin relatif part du dossier choisi ; des sous-dossiers sont permis |
+| `naming` | variables (sans égard à la casse) : `<file>` (fichier du projet, `robot_v003`), `<name>` (sans sa version, `robot`), `<version>` (`003`, vide sans version), `<variant>` (objet ou jeu exporté à part), `<object>` (Per Object, ou l'objet du calque en Selected), `<atlas>` (jeu de textures, en Visible), `<channel>` (`suffix`, sinon `name`), `<UDIM>`, `<resolution>` (largeur du fichier), `<bits>`, `<preset>`, `<ext>`. Une variable inconnue est refusée. Une section `[…]` disparaît si une variable qu'elle contient est vide. Un chemin relatif part du dossier choisi ; des sous-dossiers sont permis |
 | `resolution` | côté le plus long du fichier, proportions gardées (1 à 65536) ; `0` : celle du projet (défaut). Par texture ou dans `defaults`. Réduire moyenne les pixels par zone ; agrandir est bilinéaire et donne une note `upscaled` |
 | `resolutions` | résolutions admises par le show, vérifiées pour chaque texture à sa taille de sortie : une autre est bloquante |
 | `overwrite` | `warn` (défaut : remplace et le signale), `allow`, `block` |
@@ -456,6 +456,19 @@ une fenêtre Qt à la place de la boîte d'export d'ArmorPaint (patch `export-wi
 - **Color space** : « From preset », ou un espace OCIO imposé aux textures de couleur ; les données restent brutes.
 - **Layers** : Visible, Selected, Per Object, Per UDIM Tile, et la marge (padding) de l'upstream.
 - **Destination** : dossier ; défaut : celui du dernier export, sinon celui du projet.
+- **File names** : le modèle de nom du preset (`naming`), modifiable pour cet export. « Variables » insère une
+  variable au curseur (liste ci-dessus, avec leur description) ou met la sélection entre `[ ]` (section retirée si une
+  de ses variables est vide). Sous le champ, un nom de fichier de cet export ; une variable inconnue est signalée tout
+  de suite et bloque l'export. Le modèle est gardé par preset dans le sidecar et fait partie d'un « Save as
+  preset » ; une map qui a son propre `naming` dans le preset le garde. Quand un template ShotGrid nomme les
+  textures (B3), le champ montre le template et reste figé.
+- **Texture sets** (projet à plusieurs objets) : les jeux de textures, les « atlas » d'ArmorPaint. Chaque objet
+  (les tuiles UDIM d'un objet ensemble) est dans un jeu ; « New set… » en crée un, « Rename… » en renomme un, « One
+  set » les réunit. En Visible, chaque jeu utilisé devient un jeu de maps : calques partagés, calques des objets du
+  jeu et calques limités au jeu, nommé par `<atlas>` (et `<variant>`). Les jeux changent dans le projet d'ArmorPaint
+  et sont enregistrés avec le `.arm`, pas dans le sidecar. Un calque limité à un jeu y reste quand le jeu est
+  renommé ; vider un tel jeu de ses objets est refusé. Les objets gardent leurs UV : un jeu ne réagence rien, il
+  choisit quels calques vont dans quels fichiers. Les jeux ne se combinent pas avec Per UDIM Tile (upstream).
 - **Maps** : une ligne par texture du preset, avec une case (map désactivée : aucun de ses fichiers n'est écrit), sa
   profondeur (les valeurs permises par son format) et sa résolution (celle du projet, ou 8192 à 256), puis la taille
   de sortie. « Set all bits » et « Set all resolutions » les règlent pour toutes les maps (une map dont le format n'a
@@ -488,32 +501,43 @@ log et jamais écrasé.
 	"export": {
 		"preset": "project:robot_hero", "color_space": "", "mode": 3, "padding": false, "dir": "/show/…", "group": "map",
 		"presets": { "file:karma": { "overrides": { "normal": { "bits": 32 } }, "disabled": ["opacity"],
-		                             "skip": [["height", "", "1002"]] } }
+		                             "skip": [["height", "", "1002"]], "naming": "<name>_<atlas>_<channel>.<ext>" } }
 	}
 }
 ```
 
 `presets` a le format des presets studio. `export` garde les choix, remis à la réouverture ; par preset (`file:<nom>`
-pour ceux des dossiers, `project:<nom>` pour ceux du sidecar), les réglages des maps, les maps désactivées et les
-fichiers décochés. Un preset du projet est envoyé en JSON à ArmorPaint à chaque export et noté au manifeste avec le
+pour ceux des dossiers, `project:<nom>` pour ceux du sidecar), les réglages des maps, les maps désactivées, les
+fichiers décochés et le modèle de nom s'il diffère de celui du preset. Un preset du projet est envoyé en JSON à ArmorPaint à chaque export et noté au manifeste avec le
 chemin du sidecar.
 
 **Un jeu de maps par matériau.** À l'import OBJ ou FBX, « Split By: Material » crée un objet par matériau. En mode
 Per Object, ArmorPaint écrit un jeu par objet qui a au moins un calque qui lui est propre (masque d'objet du calque) ;
-les calques partagés vont dans chaque jeu. Sans calque propre à un objet, Per Object donne un seul jeu.
+les calques partagés vont dans chaque jeu. Sans calque propre à un objet, Per Object donne un seul jeu. Le nom du
+matériau est alors le nom de l'objet : `<object>` (ArmorPaint ne garde pas d'affectation de shader par objet). Autre
+voie : un jeu de textures par matériau (Texture sets), export Visible, `<atlas>`.
 
-L'onglet Presets (éditeur de presets upstream), l'onglet Atlases et « Pack into project » de la boîte d'export ne
-sont plus accessibles. La résolution du projet (celle des calques) ne change pas : chaque map est mise à sa résolution
+**UDIM.** À l'import, « Split By: UDIM Tile » fait un objet par tuile (`cube.1001`…). ArmorPaint peint toutes les
+tuiles dans chaque texture de calque, rangées en grille (côté : racine carrée du nombre de tuiles arrondie au-dessus,
+8 au plus, soit 64 tuiles) : une tuile a la résolution du projet divisée par ce côté (projet 4096, 6 tuiles → grille
+3 × 3 → 1365 pixels par tuile). Per UDIM Tile découpe la tuile et la remet à la résolution de la map : les fichiers
+ont la taille demandée (`<resolution>`), pas plus de détail. Pour des tuiles à 4096, un projet à 3 × 4096. En
+Visible, un maillage UDIM donne la grille entière (avertissement du préflight).
+
+L'onglet Presets (éditeur de presets upstream) et « Pack into project » de la boîte d'export ne sont plus
+accessibles ; l'onglet Atlases est remplacé par la section Texture sets. La résolution du projet (celle des calques) ne change pas : chaque map est mise à sa résolution
 à l'export. Pas encore sous Windows (`studio_proc`).
 
 **Protocole**, une ligne JSON par message sur stdin et stdout de la fenêtre (détail dans `studio_export_window.h`) :
-requêtes `state` (`args.presets` : presets du sidecar à vérifier), `inspect` (un preset JSON), `preflight` et `export`
-(`args` : `preset`, `preset_json` et `preset_source` pour un preset du projet, `overrides`, `color_space`, `dir`,
-`mode`, `padding`, `skip`), réponses
+requêtes `state` (`args.presets` : presets du sidecar à vérifier ; la réponse donne aussi `atlases`,
+`naming_template`, `naming_variables`), `inspect` (un preset JSON), `atlases` (`{"names", "objects"}` : jeux de
+textures du projet), `preflight` et `export` (`args` : `preset`, `preset_json` et `preset_source` pour un preset du
+projet, `overrides`, `naming`, `color_space`, `dir`, `mode`, `padding`, `skip`), réponses
 `{"id", "ok", "data" | "error"}`, évènement `{"event": "raise", "mode"}`. Un autre outil peut remplacer la fenêtre
 par `STUDIO_EXPORT_WINDOW`. `STUDIO_EXPORT_WINDOW_TEST=<choix.json>` la fait tourner sans intervention (bancs).
 
-L'espace imposé est noté `color_space_override` dans le manifeste (`preset`) et dans le rapport du préflight.
+L'espace imposé est noté `color_space_override` dans le manifeste (`preset`) et dans le rapport du préflight, le
+modèle de nom de l'export dans `naming` (`null` : celui du preset).
 
 ### Scripts (minic)
 
@@ -528,6 +552,12 @@ char *studio_export_skip(void);                      // fichiers décochés : li
 void  studio_export_set_skip(char *keys);            // "" : tous les fichiers ; "<texture>\t*\t*" : toute la map ; gardé pour les exports suivants
 void  studio_export_set_preset(char *name, char *json, char *source); // preset courant (Ctrl+E) ; json : preset hors des dossiers, source : son fichier
 void  studio_export_set_overrides(char *json);       // {"<texture>": {"bits": 16, "resolution": 1024}} pour ce preset ; "" : ceux du preset
+void  studio_export_set_naming(char *pattern);       // modèle de nom pour ce preset (pour tous sans preset choisi) ; "" : celui du preset
+char *studio_atlases(void);                          // {"names", "objects": [{"name", "atlas"}], "layers": [{"layer", "atlas"}]}
+char *studio_set_atlases(char *json);                // {"names": [...], "objects": [jeu de chaque objet]} ; "" si fait, sinon la raison
+int   studio_layer_set_atlas(int atlas);             // limite le calque courant à un jeu ; -1 : partagé
+int   studio_layer_set_object(int index);            // limite le calque courant à un objet (ordre de studio_atlases) ; -1 : partagé
+int   studio_import_mesh(char *path, int split);     // remplace le maillage ; split : 0 objet, 1 matériau, 2 tuile UDIM ; fini au retour
 void  studio_export_window_show(void);               // ouvre la fenêtre d'export, ou la ramène devant
 int   studio_export_window_is_open(void);
 ```
@@ -700,8 +730,13 @@ STUDIO_TEST_TK_CORE=<tk-core> .tests/sg.sh [dossier de travail]   # ShotGrid (C2
 .tests/ocio_export_app.sh [dossier]    # export OCIO (A3) dans l'app : pixels = PyOpenColorIO, préflight, manifeste, cas bloquants
 .tests/ocio_view_app.sh [dossier]      # viewport OCIO (A2) dans l'app : compositeur = PyOpenColorIO, menu (API), rechargement, variables
 .tests/export_window_app.sh [dossier]  # fenêtre d'export (B6) dans l'app, Qt offscreen : état, préflight, export, fichiers décochés, blocage, réouverture, bits et résolution par map, sidecar, preset du projet ; PY=<python PySide6>
-<python PySide6> .tests/export_window_ui.py [dossier]  # fenêtre d'export contre un faux ArmorPaint : liste groupée (tuiles UDIM, objets), cases, décomptes, problèmes affichés, tableau des maps, sidecar
+<python PySide6> .tests/export_window_ui.py [dossier]  # fenêtre d'export contre un faux ArmorPaint : liste groupée (tuiles UDIM, objets), cases, décomptes, problèmes affichés, tableau des maps, sidecar, nom des fichiers, jeux de textures
+.tests/sets_app.sh [dossier]           # jeux de textures, nom des fichiers et UDIM dans l'app, avec les maillages de udim_gen.py ; PY=<python PySide6>
+python3 .tests/udim_gen.py [dossier]   # maillages de test (défaut .tests/meshes) : udim_cube.obj (une face par tuile, 1001-1003 et 1011-1013 ; matériaux body et cap), props.obj (crate, barrel, ball)
 ```
+
+Les maillages de `.tests/meshes` s'ouvrent aussi à la main dans ArmorPaint (File > Import Mesh, « Split By » : UDIM
+Tile, Material ou Object) pour essayer peinture et export.
 
 `ocio.sh` compare au bit près à PyOpenColorIO, la roue officielle à la même version, installée dans `.ocio/venv`
 au premier lancement. Pour chaque configuration (celle du banc avec LUT, looks et file_rules, puis

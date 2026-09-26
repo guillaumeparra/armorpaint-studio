@@ -2,11 +2,12 @@
 """Fenêtre d'export (lot B6) contre un faux ArmorPaint : le protocole de studio_export_window.h, sans l'app. Projet
 à 2 objets et 3 tuiles UDIM, export par tuile : liste groupée par map puis par tuile, fichiers décochés envoyés à
 l'export, décomptes, notes et fichiers existants hors de la liste des problèmes ; tableau des maps (bits et résolution
-par map, pour toutes, maps désactivées), sidecar du projet (choix remis à l'ouverture, preset enregistré).
+par map, pour toutes, maps désactivées), sidecar du projet (choix remis à l'ouverture, preset enregistré) ; nom des
+fichiers (modèle modifié, refusé, enregistré dans un preset, template ShotGrid) et jeux de textures (op atlases).
 
     <python avec PySide6> .tests/export_window_ui.py [dossier de travail]
 """
-import json, os, subprocess, sys, tempfile
+import json, os, re, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, "..", "assets", "studio_export_window.py")
@@ -33,6 +34,44 @@ with open(os.path.join(work, "basic.json"), "w") as f:
     json.dump(BASIC, f)
 
 
+DEFAULT_NAMING = "<name>[_<variant>]_<channel>[.<UDIM>].<ext>"
+VARIABLES = [{"name": n, "description": n} for n in
+             ("file", "name", "version", "variant", "object", "atlas", "channel", "UDIM", "resolution", "bits", "preset",
+              "ext")]
+ATLASES = {}
+TEMPLATE = [None]
+
+
+def reset_atlases():
+    ATLASES.clear()
+    ATLASES.update({"names": ["Atlas 1"], "objects": [{"name": "head", "atlas": 0}, {"name": "body", "atlas": 0}],
+                    "layers": []})
+
+
+def set_atlases(args):
+    """Comme studio_atlas_set, en plus court : noms uniques, un jeu par objet."""
+    names, objects = args.get("names", []), args.get("objects", [])
+    if len(set(names)) != len(names) or not all(names):
+        return {"ok": False, "error": "texture sets: name 2 is empty, too long, or used twice", "atlases": ATLASES}
+    if len(objects) != len(ATLASES["objects"]) or not all(0 <= k < len(names) for k in objects):
+        return {"ok": False, "error": "one set per object expected", "atlases": ATLASES}
+    ATLASES["names"] = names
+    for o, k in zip(ATLASES["objects"], objects):
+        o["atlas"] = k
+    return {"ok": True, "error": "", "atlases": ATLASES}
+
+
+def expand(pattern, values):
+    """studio_naming_format : <variable> remplacée, [section] retirée si une de ses variables est vide."""
+    def sub(text):
+        return re.sub(r"<([^<>]*)>", lambda m: values.get(m.group(1).lower(), m.group(0)), text)
+
+    def section(m):
+        empty = any(not values.get(n.lower()) for n in re.findall(r"<([^<>]*)>", m.group(1)))
+        return "" if empty else sub(m.group(1))
+    return sub(re.sub(r"\[([^\]]*)\]", section, pattern))
+
+
 def textures(preset):
     """Ce qu'ArmorPaint dit des textures d'un preset (put_textures), pour ce faux preset simplifié."""
     out = []
@@ -47,7 +86,7 @@ def textures(preset):
 
 def info(name, preset):
     return {"name": name, "description": preset.get("description", ""), "valid": True, "error": "",
-            "textures": textures(preset)}
+            "naming": preset.get("naming", DEFAULT_NAMING), "textures": textures(preset)}
 
 
 def state(args):
@@ -60,6 +99,7 @@ def state(args):
         "preset": "basic", "preset_project": False, "overrides": None, "skip": [],
         "ocio": {"ready": True, "config": "studio", "status": "ok"},
         "color_spaces": ["ACEScg", "sRGB - Texture"], "color_space": "", "dir": "/out", "mode": 3, "padding": False,
+        "atlases": ATLASES, "naming": None, "naming_template": TEMPLATE[0], "naming_variables": VARIABLES,
     }
 
 
@@ -67,17 +107,23 @@ def report(args):
     skip = {tuple(k) for k in args.get("skip", [])}
     preset = args.get("preset_json") or BASIC
     overrides = args.get("overrides", {})
+    naming = args.get("naming") or preset.get("naming", DEFAULT_NAMING)
+    used = sorted({o["atlas"] for o in ATLASES["objects"]})
+    sets = [("", t) for t in TILES] if args["mode"] == 3 else \
+        [(ATLASES["names"][k], "") for k in used] if len(used) > 1 else [("", "")]
     files = []
-    for tile in TILES:
+    for variant, tile in sets:
         for t in textures(preset):
             o = overrides.get(t["name"], {})
             bits, res = o.get("bits", t["bits"]), o.get("resolution", t["resolution"]) or 2048
-            files.append({"path": "%s/robot_%s.%s.exr" % (args["dir"], t["name"], tile), "texture": t["name"],
-                          "variant": "", "udim": tile, "width": res, "height": res, "format": t["format"], "bits": bits,
+            name = expand(naming, {"name": "robot", "file": "robot_v003", "version": "003", "variant": variant,
+                                   "atlas": variant, "channel": t["name"], "udim": tile, "ext": "exr"})
+            files.append({"path": "%s/%s" % (args["dir"], name), "texture": t["name"],
+                          "variant": variant, "udim": tile, "width": res, "height": res, "format": t["format"], "bits": bits,
                           "channels": t["channels"], "compression": "zip", "color_space": t["color_space"],
                           "size_estimate": res * res * t["channels"] * bits // 8,
                           "exists": tile == "1001" and t["name"] == "base_color",
-                          "skip": (t["name"], "", tile) in skip or (t["name"], "*", "*") in skip})
+                          "skip": (t["name"], variant, tile) in skip or (t["name"], "*", "*") in skip})
     issues = [{"level": "note", "code": "height_8bit", "message": "height: in 8 bits"},
               {"level": "warning", "code": "exists", "message": "1 file already exists and will be replaced"},
               {"level": "warning", "code": "udim_gaps", "message": "missing UDIM tiles between 1001 and 1004: 1002"}]
@@ -101,6 +147,8 @@ def run(name, choices):
             data = state(args)
         elif op == "inspect":
             data = info(args["name"], args["preset"])
+        elif op == "atlases":
+            data = set_atlases(args)
         else:
             data = {"ok": True, "report": report(args), "error": ""}
         p.stdin.write(json.dumps({"id": req["id"], "ok": True, "data": data}) + "\n")
@@ -114,6 +162,7 @@ def sidecar():
     return json.load(open(SIDECAR)) if os.path.exists(SIDECAR) else None
 
 
+reset_atlases()
 if os.path.exists(SIDECAR):
     os.remove(SIDECAR)
 r, exports, _ = run("map", {"preset": "basic", "dir": "/out", "mode": 3, "skip": [["height", "", "1002"]]})
@@ -187,6 +236,44 @@ check("réouverture : preset du projet choisi, en tête du menu",
       r["restored"]["key"] == "project:robot_hero" and r["presets"][0] == "Robot Hero  ·  project", r["presets"])
 check("nom refusé : celui d'un preset studio",
       run("clash", {"save_preset": "basic", "no_export": True})[0].get("errors", [""])[0].startswith("A studio preset"))
+
+# Nom des fichiers et jeux de textures.
+os.remove(SIDECAR)
+r, exports, requests = run("sets", {"preset": "basic", "mode": 0, "atlases": {"names": ["hero", "props"], "objects": [0, 1]},
+                                    "naming": "<name>_<atlas>_<channel>.<ext>"})
+ops = [q["op"] for q in requests]
+check("jeux : envoyés à ArmorPaint avant le préflight", "atlases" in ops and ops.index("atlases") < ops.index("preflight"),
+      ops)
+check("jeux : une ligne par objet, avec son jeu", r["sets"]["shown"] and r["sets"]["rows"] == [["head", "hero"],
+                                                                                              ["body", "props"]], r["sets"])
+check("jeux : note du mode Visible", "one set of maps per texture set" in r["sets"]["note"], r["sets"]["note"])
+check("nom : modèle envoyé à l'export", exports and exports[0].get("naming") == "<name>_<atlas>_<channel>.<ext>", exports)
+check("nom : exemple sous le champ", "e.g. robot_hero_base_color.exr" in r["naming"]["note"], r["naming"])
+check("nom : 6 fichiers (3 maps × 2 jeux)", "Exported 6 files" in r["summary"] and r["composition"] ==
+      "3 maps × 2 texture sets", (r["summary"], r["composition"]))
+check("nom : gardé par preset dans le sidecar", (sidecar() or {}).get("export", {}).get("presets", {})
+      .get("file:basic", {}).get("naming") == "<name>_<atlas>_<channel>.<ext>", sidecar())
+r, exports, _ = run("sets_reopen", {"no_export": True})
+check("réouverture : modèle de nom remis", r["naming"]["text"] == "<name>_<atlas>_<channel>.<ext>", r["naming"])
+
+r, exports, _ = run("sets_bad", {"atlases": {"names": ["a", "a"], "objects": [0, 1]}, "no_export": True})
+check("jeux refusés : erreur montrée, jeux inchangés", r.get("errors", [""])[0].startswith("Texture sets not changed") and
+      r["sets"]["rows"] == [["head", "hero"], ["body", "props"]], (r.get("errors"), r["sets"]))
+
+r, exports, requests = run("naming_bad", {"naming": "<name>_<shader>.<ext>"})
+check("nom refusé : variable inconnue, pas d'export", r["naming"]["error"] == "unknown variable <shader>" and not exports,
+      (r["naming"], exports))
+
+r, exports, _ = run("naming_preset", {"naming": "<name>_<channel>_<resolution>.<ext>", "save_preset": "robot_named"})
+saved = (sidecar() or {}).get("presets", {}).get("robot_named", {})
+check("preset enregistré avec le modèle de nom", saved.get("naming") == "<name>_<channel>_<resolution>.<ext>", saved)
+check("preset enregistré : export sans modèle par-dessus", exports and "naming" not in exports[0], exports)
+
+TEMPLATE[0] = "/shots/robot/<channel>/robot.<UDIM>.<ext>"
+r, exports, _ = run("naming_sg", {"preset": "basic"})
+check("template ShotGrid : champ figé, modèle non envoyé", not r["naming"]["enabled"] and
+      r["naming"]["text"] == TEMPLATE[0] and exports and "naming" not in exports[0], (r["naming"], exports))
+TEMPLATE[0] = None
 
 print("== OK" if not FAIL else "== FAIL")
 sys.exit(1 if FAIL else 0)
