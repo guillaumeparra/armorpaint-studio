@@ -24,6 +24,7 @@ Modules, un par lot (voir `ARMORPAINT_LOTS.md` à la racine d'armorpaint) :
 | Module | Lot | État |
 |---|---|---|
 | `studio_exr` | B1 | ✅ lecture et écriture EXR par tinyexr |
+| `studio_proc`, `studio_exec` | C1 | ✅ exécution de processus, jobs asynchrones, API de scripting (macOS ; Linux écrit, non testé) |
 | `studio_export` | B2-B5 | à faire |
 | `studio_ocio` | A | à faire |
 | `studio_shotgrid` | C | à faire |
@@ -44,10 +45,50 @@ upstream sans rebuild ; les réglages destinés aux artistes passeront par l'UI 
 | `STUDIO_EXR_READER=legacy` | rend la lecture EXR à l'importeur upstream |
 | `STUDIO_EXR_THREADS` | nombre de threads de codec (défaut : cœurs matériels) |
 
+## Exécution (C1)
+
+`studio_proc` lance un programme **sans shell** : `argv` est transmis tel quel (pas d'injection par un nom de
+fichier ou un champ ShotGrid), le programme est cherché dans le `PATH` s'il ne contient pas de `/`. Le processus
+a son propre groupe : un timeout, une annulation ou la fermeture d'ArmorPaint tuent aussi ses descendants. stdin,
+stdout et stderr sont des pipes lus en parallèle (pas d'interblocage), sortie plafonnée (64 Mio par flux par
+défaut). Pour un dialogue ligne à ligne (sidecar du lot C2) : `studio_proc_spawn` / `studio_proc_write` /
+`studio_proc_read_line`.
+
+`studio_exec` en fait des jobs identifiés par un entier, exécutés sur un thread, et les expose aux scripts minic
+(enregistrés au démarrage par `minic_register`, sans patch upstream ; absents de `--api`) :
+
+| Fonction | Rôle |
+|---|---|
+| `int studio_exec_run(any_array_t *argv, char *stdin, int timeout_ms)` | lance et attend ; retourne le job |
+| `int studio_exec_start(any_array_t *argv, char *stdin, int timeout_ms)` | lance sans attendre (0 : plus de 256 jobs ouverts) |
+| `int studio_exec_state(int job)` | `0` en cours, `1` terminé, `-1` inconnu ou libéré |
+| `int studio_exec_exit_code(int job)` | code de sortie ; `-1` si tué, introuvable ou en cours |
+| `int studio_exec_timed_out(int job)` | `1` si tué par le timeout |
+| `char *studio_exec_stdout(int job)`, `studio_exec_stderr`, `studio_exec_error` | sorties, et l'erreur de lancement ou de timeout ; valides jusqu'à `release` |
+| `void studio_exec_cancel(int job)` | tue le processus (SIGTERM, puis SIGKILL après 500 ms) |
+| `void studio_exec_release(int job)` | libère le job, l'annule s'il tourne encore |
+
+`stdin` : `NULL` pour rien. `timeout_ms < 0` : sans limite. Exemple :
+
+```c
+int main() {
+	int j = studio_exec_run(string_split("oiiotool\n--info\n/chemin/avec espaces.exr", "\n"), NULL, 10000);
+	console_log(studio_exec_stdout(j));
+	studio_exec_release(j);
+	return 0;
+}
+```
+
+⚠️ **Windows : non implémenté.** Les fonctions existent mais chaque job échoue aussitôt avec
+`studio_proc: not implemented on Windows yet` (pas de toolchain Windows pour le développer et le tester).
+
 ## Tests
 
 ```sh
-.tests/run.sh [dossier de travail]     # FUZZ=<n> pour le nombre de mutations
+.tests/run.sh [dossier de travail]     # EXR (B1) ; FUZZ=<n> pour le nombre de mutations
+.tests/proc.sh [dossier de travail]    # processus (C1)
 ```
 
-Requiert les outils OpenEXR (`brew install openexr`) comme référence indépendante.
+`run.sh` requiert les outils OpenEXR (`brew install openexr`) comme référence indépendante. La couche jobs et
+l'API de scripting se vérifient dans l'app : `ArmorPaint --background --script <fichier>` avec un script comme
+celui ci-dessus.

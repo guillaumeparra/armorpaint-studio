@@ -4,7 +4,7 @@
 // Chaque fichier .c d'ici est une unité de compilation séparée de l'app (unity build de paint/sources/) :
 // les symboles du cœur s'utilisent par forward declaration, comme dans paint/plugins/io_exr/io_exr.c.
 
-#define STUDIO_VERSION "0.2.0"
+#define STUDIO_VERSION "0.3.0"
 
 // Cœur ArmorPaint / iron
 void iron_log(const char *format, ...);

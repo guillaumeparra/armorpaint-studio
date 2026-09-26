@@ -1,4 +1,5 @@
 #include "studio.h"
+#include "studio_exec.h"
 #include "studio_exr.h"
 
 // Appelé par plugins_init() (paint/plugins/plugins.c) quand WITH_EXTERNAL est défini, après l'enregistrement des
@@ -7,4 +8,5 @@
 void external_init(void) {
 	iron_log("studio: external %s loaded", STUDIO_VERSION);
 	studio_exr_init();
+	studio_exec_init();
 }
