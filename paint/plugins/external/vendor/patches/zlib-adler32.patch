@@ -1,0 +1,16 @@
+--- a/exr_deflate.c
++++ b/exr_deflate.c
+@@ -1024,6 +1024,13 @@
+     len = dst_cap;
+     if (!inflate_raw(src + offset, src_size - offset - 4, dst, &len))
+         return EXR_ERROR_CORRUPT;
++    /* STUDIO-VENDOR-PATCH(zlib-adler32): the trailer was skipped unchecked, so a decoder desync that still filled
++       the expected size passed as valid pixels. zlib, libdeflate (exr_ld_inflate_zlib) and OpenEXR check it. */
++    {
++        const uint8_t *t = src + src_size - 4;
++        uint32_t want = ((uint32_t)t[0] << 24) | ((uint32_t)t[1] << 16) | ((uint32_t)t[2] << 8) | t[3];
++        if (exr_adler32(dst, len, 1) != want) return EXR_ERROR_CORRUPT;
++    }
+     *out_size = len;
+     return EXR_SUCCESS;
+ }

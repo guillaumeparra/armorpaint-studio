@@ -298,7 +298,7 @@ static int reverse_bits(int code, int len) {
     return rev;
 }
 
-static int ht_build(dfl_huff *table, const uint8_t *lens, int count) {
+static int ht_build(dfl_huff *table, const uint8_t *lens, int count, int kind) {
     int bl_count[DFL_MAX_BITS + 1] = {0};
     int next_code[DFL_MAX_BITS + 1] = {0};
     int max_len = 0, i, code, sym, bits;
@@ -316,8 +316,10 @@ static int ht_build(dfl_huff *table, const uint8_t *lens, int count) {
         }
     }
     table->max_bits = max_len;
-    table->kind = (count == DFL_CODELEN_CODES) ? 0 :
-                  (count > DFL_DIST_CODES ? 1 : 2);
+    /* STUDIO-VENDOR-PATCH(deflate-hdist-19): the kind was inferred from count, and a distance table with
+       HDIST = 19 codes became a code-length table (count == DFL_CODELEN_CODES). Its fast entries then lacked
+       the distance extra bits that decode_block_fast consumes with the code: desync, wrong output. */
+    table->kind = kind;
     table->slow_count = 0;
     table->long_count = 0;
     memset(table->distance_info, 0, sizeof(table->distance_info));
@@ -565,7 +567,7 @@ static int decode_dynamic_tables(dfl_br *reader, dfl_huff *litlen,
         if (reader->count < 3) br_refill(reader);
         codelen_lens[dfl_codelen_order[i]] = (uint8_t)br_read(reader, 3);
     }
-    if (!ht_build(&codelen_table, codelen_lens, DFL_CODELEN_CODES)) return 0;
+    if (!ht_build(&codelen_table, codelen_lens, DFL_CODELEN_CODES, 0)) return 0;
 
     total = hlit + hdist;
     i = 0;
@@ -593,8 +595,8 @@ static int decode_dynamic_tables(dfl_br *reader, dfl_huff *litlen,
             return 0;
         }
     }
-    if (!ht_build(litlen, all_lens, hlit)) return 0;
-    if (!ht_build(dist, all_lens + hlit, hdist)) return 0;
+    if (!ht_build(litlen, all_lens, hlit, 1)) return 0;
+    if (!ht_build(dist, all_lens + hlit, hdist, 2)) return 0;
     return 1;
 }
 
@@ -1022,6 +1024,13 @@ exr_result exr_inflate_zlib(const uint8_t *src, size_t src_size, uint8_t *dst,
     len = dst_cap;
     if (!inflate_raw(src + offset, src_size - offset - 4, dst, &len))
         return EXR_ERROR_CORRUPT;
+    /* STUDIO-VENDOR-PATCH(zlib-adler32): the trailer was skipped unchecked, so a decoder desync that still filled
+       the expected size passed as valid pixels. zlib, libdeflate (exr_ld_inflate_zlib) and OpenEXR check it. */
+    {
+        const uint8_t *t = src + src_size - 4;
+        uint32_t want = ((uint32_t)t[0] << 24) | ((uint32_t)t[1] << 16) | ((uint32_t)t[2] << 8) | t[3];
+        if (exr_adler32(dst, len, 1) != want) return EXR_ERROR_CORRUPT;
+    }
     *out_size = len;
     return EXR_SUCCESS;
 }
