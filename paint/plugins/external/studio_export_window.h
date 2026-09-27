@@ -10,11 +10,15 @@
 //   requête de la fenêtre   {"id":1,"op":"state"}                      état pour remplir la fenêtre
 //                           {"id":2,"op":"preflight","args":{...}}     rapport sans rien écrire
 //                           {"id":3,"op":"export","args":{...}}        export, puis rapport
+//                           {"id":4,"op":"naming","args":{"refresh":b}} nommage ShotGrid (redemandé avec refresh)
+//                           {"id":5,"op":"version_up"}                 projet enregistré en version suivante
 //   réponse d'ArmorPaint    {"id":N,"ok":true,"data":...} ou {"id":N,"ok":false,"error":{"code","message"}}
 //   évènement d'ArmorPaint  {"event":"raise","mode":M}                 menu rouvert : la fenêtre repasse devant
 // args : preset, color_space ("" : celui du preset), dir, mode (EXPORT_MODE_*), padding, skip (fichiers décochés :
 // [[texture, variant, udim], ...], voir studio_export_set_skip). L'état donne aussi les objets du projet et ses tuiles
-// UDIM. Les requêtes sont traitées une à une, à la frame suivante, hors du dessin. Un export abouti devient l'export
+// UDIM, et sous un template ShotGrid (lot B6) "sg_naming" : templates possibles et version du fichier de travail
+// (studio_export_naming_json) ; le template choisi est écrit par la fenêtre dans le sidecar du projet
+// ("texture_template"), puis naming avec refresh. Les requêtes sont traitées une à une, à la frame suivante, hors du dessin. Un export abouti devient l'export
 // courant d'ArmorPaint (dossier, preset, mode, marge, espace, fichiers décochés) : Ctrl+E le refait ; Cancel ne
 // change rien.
 //

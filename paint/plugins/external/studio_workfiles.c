@@ -411,3 +411,40 @@ void studio_workfiles_init(void) {
 bool studio_workfiles_busy(void) {
 	return wf.job != 0;
 }
+
+char *studio_workfiles_version_up(const char *name, char **error) {
+	*error = NULL;
+	if (studio_sg_context_task_id() <= 0) {
+		*error = strdup("the project has no ShotGrid task (ShotGrid > File Open or File Save first)");
+		return NULL;
+	}
+	if (studio_workfiles_busy()) {
+		*error = strdup("close the ShotGrid window first");
+		return NULL;
+	}
+	if (studio_sg_offline()) {
+		*error = strdup("ShotGrid is unreachable");
+		return NULL;
+	}
+	char *quoted = studio_json_quote(name);
+	int   job    = studio_sg_run("next_version", studio_sg_context_args(string_tmp("\"name\":%s", quoted)), 60000);
+	free(quoted);
+	char *path = NULL;
+	if (job == 0 || !studio_sg_ok(job)) {
+		*error = strdup(job == 0 ? "the ShotGrid sidecar is busy" : studio_sg_get(job, "/error/message"));
+	}
+	else if (!is_arm(studio_sg_get(job, "/data/path"))) {
+		*error = strdup(string_tmp("not an ArmorPaint project (.arm): %s", studio_sg_get(job, "/data/path")));
+	}
+	else {
+		path = strdup(studio_sg_get(job, "/data/path"));
+		iron_log("studio: workfiles: version up, save %s", path);
+		project_filepath_set(path);
+		export_arm_run_project(path);
+		set_title(path);
+	}
+	if (job != 0) {
+		studio_sg_release(job);
+	}
+	return path;
+}

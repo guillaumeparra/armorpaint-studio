@@ -9,7 +9,9 @@
 # "robot.export_settings.json", commun aux versions), décrit dans studio_export_choices.py. La fenêtre l'écrit (ArmorPaint
 # n'y touche pas) : "presets", les presets enregistrés par l'artiste ("Save as preset") ; "export", ses choix, remis à
 # l'ouverture (preset, espace, mode, marge, dossier, et par preset : bits et résolution par map, maps désactivées,
-# fichiers décochés, modèle de nom des fichiers). Le publish ShotGrid (lot C4) le lit aussi.
+# fichiers décochés, modèle de nom des fichiers) ; "texture_template", le template ShotGrid des textures choisi pour le
+# projet, écrit dès qu'il change (le sidecar ShotGrid le lit pour nommer les textures). Le publish ShotGrid (lot C4) le
+# lit aussi.
 # Les jeux de textures (atlas) ne sont pas dans le sidecar : ils changent dans le projet (op "atlases"), enregistrés
 # avec le .arm comme ceux de l'onglet Atlases d'ArmorPaint.
 # Écrit après un export abouti, un enregistrement de preset et à la fermeture ; pas de sidecar pour un projet jamais
@@ -21,9 +23,10 @@
 # ({map: {"bits", "resolution"}}), "disabled" (maps), "bits_all" et "resolution_all" (appliqués à toutes les maps),
 # "naming" (modèle de nom des fichiers), "atlases" ({"names", "objects"} : jeux de textures, envoyés à ArmorPaint avant
 # le reste), "save_preset" (nom : enregistré dans le sidecar avant l'export), "no_export" (fermer sans exporter),
-# "screenshot" (image PNG de la fenêtre à la fin). La
-# fenêtre les applique, attend le préflight, exporte, écrit {"state","restored","preflight","export","summary","files",
-# "groups","maps","naming","sets"...} dans "result", puis se ferme.
+# "screenshot" (image PNG de la fenêtre à la fin), "template" (template ShotGrid des textures, choisi avant le reste) et
+# "version_up" (true : Version Up avant le reste). La fenêtre les applique, attend le préflight, exporte, écrit
+# {"state","restored","preflight","export","summary","files","groups","maps","naming","sets","sg","sg_naming_first",
+# "template","version_up"...} dans "result", puis se ferme.
 
 import copy
 import ctypes
@@ -356,6 +359,7 @@ class ExportWindow(QtWidgets.QDialog):
         self.per_preset = {}  # clé du preset -> {"overrides", "disabled", "skip", "naming"}
         self.naming_error = None  # modèle de nom refusé : pas d'export
         self.sets_busy = False  # jeux de textures envoyés, réponse attendue
+        self.sg_busy = False  # template ShotGrid ou version suivante demandés, réponse attendue
         self.sidecar = None  # chemin, None sans projet enregistré
         self.sidecar_data = {}
         self.sidecar_saved = None  # contenu tel que lu ou écrit : rien n'est réécrit s'il n'a pas changé
@@ -455,6 +459,36 @@ class ExportWindow(QtWidgets.QDialog):
         dir_box.addWidget(self.dir, 1)
         dir_box.addWidget(browse)
         form.addRow("Destination", dir_box)
+
+        # ShotGrid (lot B6) : template Toolkit qui nomme les textures, choisi pour le projet (toutes ses versions), et
+        # version du fichier de travail, que Version Up fait passer à la suivante. Seulement sous un template.
+        self.sg_template = QtWidgets.QComboBox()
+        self.sg_template.setToolTip(
+            "Toolkit template that names the textures of this project, kept for all its versions.\n"
+            "It gives the folders too: the destination above is not used."
+        )
+        self.sg_template.currentIndexChanged.connect(self._on_sg_template)
+        self.sg_version = muted()
+        self.version_up = QtWidgets.QPushButton("Version Up")
+        self.version_up.setObjectName("link")
+        self.version_up.clicked.connect(lambda: self._version_up())
+        sg_row = QtWidgets.QHBoxLayout()
+        sg_row.addWidget(self.sg_template, 1)
+        sg_row.addSpacing(12)
+        sg_row.addWidget(self.sg_version)
+        sg_row.addWidget(self.version_up)
+        self.sg_note = muted()
+        self.sg_note.setTextFormat(QtCore.Qt.RichText)
+        self.sg_widget = QtWidgets.QWidget()
+        sg_box = QtWidgets.QVBoxLayout(self.sg_widget)
+        sg_box.setContentsMargins(0, 0, 0, 0)
+        sg_box.setSpacing(4)
+        sg_box.addLayout(sg_row)
+        sg_box.addWidget(self.sg_note)
+        self.sg_label = QtWidgets.QLabel("ShotGrid")
+        form.addRow(self.sg_label, self.sg_widget)
+        self.sg_label.hide()
+        self.sg_widget.hide()
 
         # Nom des fichiers : le modèle du preset, modifiable pour cet export (gardé par preset dans le sidecar).
         self.naming = QtWidgets.QLineEdit()
@@ -666,9 +700,8 @@ class ExportWindow(QtWidgets.QDialog):
                 return
         self._setup(data)
 
-    def _setup(self, data):
-        self.state = data
-        project = data["project"]
+    def _show_project(self):
+        project = self.state["project"]
         parts = [os.path.basename(project["path"]) or project["name"]]
         objects, tiles = project.get("objects", []), project.get("tiles", [])
         parts.append(plural(len(objects), "object"))
@@ -682,6 +715,10 @@ class ExportWindow(QtWidgets.QDialog):
             % (", ".join(objects), "\nUDIM tiles: %s" % ", ".join(tiles) if tiles else "",
                self.sidecar or "saved with the project once it is saved")
         )
+
+    def _setup(self, data):
+        self.state = data
+        self._show_project()
 
         sidecar_presets = self.sidecar_data.get("presets") if isinstance(self.sidecar_data.get("presets"), dict) else {}
         self.presets = []
@@ -717,6 +754,7 @@ class ExportWindow(QtWidgets.QDialog):
             w.blockSignals(False)
         self._fill_resolutions()
         self._fill_variables()
+        self._show_sg()
         self._set_enabled(True)
         self.space.setEnabled(ocio["ready"])
         self._show_sets()
@@ -895,7 +933,7 @@ class ExportWindow(QtWidgets.QDialog):
         for w in (self.preset, self.space, self.mode, self.padding, self.dir, self.browse, self.files, self.group,
                   self.check_all, self.check_none, self.maps, self.bits_all, self.res_all, self.reset_maps,
                   self.save_preset, self.delete_preset, self.naming, self.variables, self.reset_naming, self.sets,
-                  self.rename_set, self.merge_sets):
+                  self.rename_set, self.merge_sets, self.sg_template, self.version_up):
             w.setEnabled(enabled)
         if enabled and self.state is not None:
             self.space.setEnabled(self.state["ocio"]["ready"])
@@ -904,6 +942,7 @@ class ExportWindow(QtWidgets.QDialog):
                 w.setEnabled(not template)
             for w in (self.sets, self.rename_set, self.merge_sets):
                 w.setEnabled(not self.sets_busy)
+            self._update_sg_enabled()
             self.save_preset.setEnabled(self.sidecar is not None)
             self.save_preset.setToolTip(
                 "Save these maps, bit depths, resolutions, colour space and file names as a preset of this project"
@@ -914,7 +953,7 @@ class ExportWindow(QtWidgets.QDialog):
     def _update_export_button(self):
         blocked = self.report is not None and not self.report.get("ok", True)
         self.export.setEnabled(self.state is not None and not self.busy and bool(self.dir.text().strip()) and not blocked
-                               and self.naming_error is None and not self.sets_busy)
+                               and self.naming_error is None and not self.sets_busy and not self.sg_busy)
 
     # -- nom des fichiers
 
@@ -989,7 +1028,12 @@ class ExportWindow(QtWidgets.QDialog):
             return
         template = self.state.get("naming_template")
         if template is not None:
-            self.naming_note.setText(html.escape("Names come from the ShotGrid template of this project."))
+            note = "Names come from the ShotGrid template of this project"
+            files = [f for f in self._report_files() if self._selected(f)]
+            work = os.path.dirname(self.state["project"].get("path") or "")
+            if files and work:
+                note += ", e.g. " + os.path.relpath(files[0]["path"], work)
+            self.naming_note.setText(html.escape(note))
             return
         if self.naming_error:
             self.naming_note.setText('<span style="color:%s">%s</span>' % (ERROR, html.escape(self.naming_error)))
@@ -1005,6 +1049,115 @@ class ExportWindow(QtWidgets.QDialog):
         if own:
             parts.append(html.escape("%s: own name from the preset" % ", ".join(own)))
         self.naming_note.setText("  ·  ".join(parts))
+
+    # -- ShotGrid : template des textures et version du fichier de travail (lot B6)
+
+    def sg_naming(self):
+        """Nommage ShotGrid du projet ({"template", "default_template", "chosen", "templates", "name", "version",
+        "error"}, studio_export_naming_json), None hors pipeline."""
+        info = (self.state or {}).get("sg_naming")
+        return info if isinstance(info, dict) else None
+
+    def _show_sg(self):
+        info = self.sg_naming()
+        shown = info is not None and bool(info.get("templates") or info.get("template") or info.get("error"))
+        self.sg_label.setVisible(shown)
+        self.sg_widget.setVisible(shown)
+        if not shown:
+            return
+        usable = list(info.get("templates") or [])
+        default = info.get("default_template")
+        chosen = info.get("template") or self.sidecar_data.get("texture_template") or default
+        self.sg_template.blockSignals(True)
+        self.sg_template.clear()
+        for name in usable + ([chosen] if chosen and chosen not in usable else []):
+            suffix = "  (default)" if name == default else "" if name in usable else "  (not usable)"
+            self.sg_template.addItem(name + suffix, name)
+        self.sg_template.setCurrentIndex(max(0, self.sg_template.findData(chosen)))
+        self.sg_template.blockSignals(False)
+        version = info.get("version")
+        self.sg_version.setText("version %d" % version if isinstance(version, int) else "")
+        project = os.path.basename(self.state["project"].get("path") or "")
+        self.version_up.setToolTip("Save %s as the next version of the work file: the textures then go to that version"
+                                   % (project or "the project"))
+        self.sg_note.setText('<span style="color:%s">%s</span>' % (ERROR, html.escape(info["error"]))
+                             if info.get("error") else "")
+        self._update_sg_enabled()
+
+    def _update_sg_enabled(self):
+        info = self.sg_naming() or {}
+        ready = self.state is not None and not self.busy and not self.sg_busy
+        self.sg_template.setEnabled(ready and self.sidecar is not None and not self.sidecar_error
+                                    and self.sg_template.count() > 1)
+        self.version_up.setEnabled(ready and isinstance(info.get("version"), int) and bool(info.get("name")))
+
+    def _say_sg(self, text, color=ERROR):
+        self.sg_note.setText('<span style="color:%s">%s</span>' % (color, html.escape(text)))
+
+    def _on_sg_template(self, *_):
+        name = self.sg_template.currentData()
+        if name and self.sg_naming() is not None:
+            self._choose_template(name)
+
+    def _choose_template(self, name, then=None):
+        """Template des textures du projet : écrit dans son sidecar ("texture_template", retiré pour celui du réglage),
+        où le sidecar ShotGrid le lit pour l'export et le publish ; puis le nommage est redemandé à ArmorPaint."""
+        info = self.sg_naming() or {}
+        data = dict(self.sidecar_data)
+        if name == info.get("default_template"):
+            data.pop("texture_template", None)
+        else:
+            data["texture_template"] = name
+        if data != self.sidecar_data:
+            if self.sidecar is None or self.sidecar_error:
+                self._say_sg("Template not kept: %s" % (self.sidecar_error or "save the project first"))
+                return then() if then else None
+            data["version"] = 1
+            try:
+                write_sidecar(self.sidecar, data)
+            except OSError as e:
+                self._say_sg("Template not kept: %s" % e)
+                return then() if then else None
+            self.sidecar_data = data
+            self.sidecar_saved = copy.deepcopy(data)
+        self.sg_busy = True
+        self._say_sg("Asking ShotGrid...", color=MUTED)
+        self._update_sg_enabled()
+        self._update_export_button()
+        self.channel.request("naming", {"refresh": True}, lambda data, error: self._on_sg_reply(data, error, then))
+
+    def _version_up(self, then=None):
+        self.sg_busy = True
+        self._say_sg("Saving the next version...", color=MUTED)
+        self._update_sg_enabled()
+        self._update_export_button()
+        self.channel.request("version_up", {}, lambda data, error: self._on_sg_reply(data, error, then, True))
+
+    def _on_sg_reply(self, data, error, then, version_up=False):
+        """Réponse de naming (data : le nommage) ou de version_up (data : {"path", "sg_naming"})."""
+        self.sg_busy = False
+        reply = data
+        if error is None:
+            if version_up:
+                self.state["project"]["path"] = data["path"]
+                self._show_project()
+                data = data.get("sg_naming")
+            self.state["sg_naming"] = data if isinstance(data, dict) else None
+            self.state["naming_template"] = (data or {}).get("template") if isinstance(data, dict) else None
+            self._show_sg()
+            self._set_enabled(not self.busy)
+            self._show_naming()
+            if version_up and not (data or {}).get("error"):
+                self._say_sg("Saved %s" % os.path.basename(self.state["project"]["path"]), color=SUCCESS)
+            self.schedule()
+        else:
+            self._say_sg(error.get("message", ""))
+        self._update_sg_enabled()
+        self._update_export_button()
+        if self.test is not None:
+            self.test_log["version_up" if version_up else "template"] = reply if error is None else {"error": error}
+        if then:
+            then()
 
     # -- jeux de textures
 
@@ -1746,9 +1899,18 @@ class ExportWindow(QtWidgets.QDialog):
         t = self.test
         self.test_log["state"] = self.state
         self.test_log["sidecar"] = self.sidecar
+        self.test_log.setdefault("sg_naming_first", copy.deepcopy(self.state.get("sg_naming")))
         if "atlases" in t and not t.get("_atlases_sent"):
             t["_atlases_sent"] = t["_atlases_first"] = True  # le reste à la réponse (_on_atlases)
             self._send_atlases(t["atlases"]["names"], t["atlases"]["objects"])
+            return
+        if "template" in t and not t.get("_template_sent"):
+            t["_template_sent"] = True  # le reste à la réponse (_on_sg_reply)
+            self._choose_template(t["template"], then=self._run_test_setup)
+            return
+        if t.get("version_up") and not t.get("_version_up_sent"):
+            t["_version_up_sent"] = True
+            self._version_up(then=self._run_test_setup)
             return
         if "preset" in t:
             key = t["preset"] if ":" in t["preset"] else "file:" + t["preset"]
@@ -1810,6 +1972,14 @@ class ExportWindow(QtWidgets.QDialog):
         self.test_log["issues"] = self.issues.text() if not self.issues_frame.isHidden() else ""
         self.test_log["naming"] = {"text": self.naming.text(), "note": self.naming_note.text(),
                                    "error": self.naming_error, "enabled": self.naming.isEnabled()}
+        self.test_log["sg"] = {
+            "shown": not self.sg_widget.isHidden(),
+            "templates": [self.sg_template.itemText(i) for i in range(self.sg_template.count())],
+            "current": self.sg_template.currentData(),
+            "version": self.sg_version.text(),
+            "note": self.sg_note.text(),
+            "version_up_enabled": self.version_up.isEnabled(),
+        }
         self.test_log["sets"] = {
             "shown": not self.sets_section.isHidden(),
             "note": self.sets_note.text(),

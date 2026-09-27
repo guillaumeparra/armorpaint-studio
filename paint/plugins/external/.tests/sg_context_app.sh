@@ -8,7 +8,9 @@
 #      qu'ArmorPaint est au repos, titre et noms des templates reviennent ;
 #   3. ShotGrid perdu en plein publish (STUDIO_TEST_OFFLINE_AT), fenêtre d'ArmorPaint ouverte : le projet est
 #      enregistré, les textures vont dans la file ; au retour du site, la file est rejouée d'elle-même ;
-#   4. journal d'audit : évènements d'ArmorPaint et du sidecar dans un seul fichier, à chaque étape.
+#   4. fenêtre d'export (lot B6) : template des textures choisi pour le projet (sidecar d'export), Version Up, export
+#      dans la version suivante au nom du template choisi, repris par une autre session ;
+#   journal d'audit : évènements d'ArmorPaint et du sidecar dans un seul fichier, à chaque étape.
 #
 #   sh .tests/sg_context_app.sh [dossier de travail]
 #   APP=<binaire ArmorPaint> pour un autre build (défaut : build Release de paint/).
@@ -339,6 +341,80 @@ queued = [e["key"] for e in ev if e["event"] == "publish_queued"]
 assert sorted(e["key"] for e in ev if e["event"] == "publish_replayed") == sorted(queued), names
 assert {e["source"] for e in ev if e["event"].startswith("publish")} == {"sidecar"}
 assert len({(e["host"], e["user"]) for e in ev}) == 1 and len({e["pid"] for e in ev}) == 2, {(e["source"], e["pid"]) for e in ev}
+EOF
+
+echo "== 4. Fenêtre d'export : template des textures choisi pour le projet, Version Up (lot B6)"
+FROM=$(audit_lines)
+V2=$WORK/robot.v002.arm
+ASSET=$(dirname "$(dirname "$WORK")")
+cat > "$WORK/robot.export_settings.json" <<EOF
+{"export": {"preset": "file:basic", "dir": "$W/unused", "mode": 0, "padding": false,
+ "presets": {"file:basic": {"disabled": ["opacity", "normal", "occlusion", "roughness", "metallic", "height", "emission", "subsurface"]}}}}
+EOF
+printf '{"template": "armorpaint_asset_textures_publish", "version_up": true, "result": "%s"}\n' "$W/win.result.json" > "$W/win.test.json"
+rm -f "$W/win.result.json"
+# Nommage ShotGrid actif d'emblée, comme lancé par ShotGrid Desktop (ici, rien n'a encore démarré le sidecar).
+export STUDIO_EXPORT_WINDOW_TEST="$W/win.test.json" STUDIO_SG_NAMING=1
+run win "$V2" ui <<EOF
+int frame = 0;
+void update() {
+	frame++;
+	if (frame == 3) {
+		studio_export_window_show();
+	}
+	else if (frame > 3 && studio_export_window_is_open() == 0) {
+		console_log(string("t: path %s", project_filepath_get()));
+		console_log(string("t: title %s", sys_title()));
+		script_quit();
+	}
+}
+int main() {
+	script_notify_on_update(update);
+	return 0;
+}
+EOF
+unset STUDIO_EXPORT_WINDOW_TEST
+check "fenêtre : templates possibles (celui du réglage d'abord), version 2 du fichier de travail" <<'EOF'
+r = json.load(open(os.path.join(W, "win.result.json")))
+sg = r["sg_naming_first"]
+assert sg["templates"] == ["armorpaint_asset_textures", "armorpaint_asset_textures_publish"], sg
+assert (sg["template"], sg["default_template"], sg["name"], sg["version"]) == ("armorpaint_asset_textures", "armorpaint_asset_textures", "robot", 2), sg
+EOF
+check "template choisi : gardé dans le sidecar du projet, nommage redemandé" <<'EOF'
+r = json.load(open(os.path.join(W, "win.result.json")))
+assert r["template"]["template"] == "armorpaint_asset_textures_publish" and r["template"]["chosen"] is True, r["template"]
+side = json.load(open(os.path.join(os.path.dirname(V1), "robot.export_settings.json")))
+assert side["texture_template"] == "armorpaint_asset_textures_publish" and side["export"]["preset"] == "file:basic", side
+EOF
+check "Version Up : robot.v003.arm enregistré (audit), titre ; la fenêtre suit la version 3" <<'EOF'
+r = json.load(open(os.path.join(W, "win.result.json")))
+v3 = os.path.join(os.path.dirname(V1), "robot.v003.arm")
+assert r["version_up"]["path"] == v3 and os.path.isfile(v3), r["version_up"]
+assert r["version_up"]["sg_naming"]["version"] == 3, r["version_up"]
+assert t("win", "path") == [v3], t("win", "path")
+assert t("win", "title") == ["robot.v003 - %s - ArmorPaint" % label], t("win", "title")
+assert r["sg"]["current"] == "armorpaint_asset_textures_publish" and r["sg"]["version"] == "version 3", r["sg"]
+assert [e["path"] for e in ev if e["event"] == "project_save"] == [v3], [e["event"] for e in ev]
+EOF
+check "export : la couleur de base dans publish/armorpaint/textures/v003 (template choisi, version 3)" <<'EOF'
+r = json.load(open(os.path.join(W, "win.result.json")))
+asset = os.path.dirname(os.path.dirname(os.path.dirname(V1)))
+want = os.path.join(asset, "publish", "armorpaint", "textures", "v003", "robot_base_color.exr")
+assert r["export"]["ok"] is True, r["export"]
+assert [f["path"] for f in r["export"]["report"]["files"] if not f.get("skip")] == [want], r["export"]["report"]["files"]
+assert os.path.isfile(want), want
+assert "textures/v003/robot_base_color.exr" in r["naming"]["note"], r["naming"]
+EOF
+run later "$ASSET/work/armorpaint/robot.v003.arm" <<EOF
+int main() {
+	char *r = studio_export_preflight("$W/unused", "basic", 0);
+	console_log(string("t: publish_v003 %d", string_index_of(r, "/publish/armorpaint/textures/v003/robot_base_color.exr")));
+	return 0;
+}
+EOF
+unset STUDIO_SG_NAMING
+check "session suivante (--background) : le template choisi nomme encore les textures" <<'EOF'
+assert t("later", "publish_v003") and int(t("later", "publish_v003")[0]) > 0, t("later", "publish_v003")
 EOF
 
 [ $FAIL -eq 0 ] && echo "sg_context_app: tout passe" || echo "sg_context_app: ÉCHECS (journaux dans $W)"

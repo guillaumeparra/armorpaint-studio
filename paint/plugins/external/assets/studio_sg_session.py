@@ -31,6 +31,7 @@ import socket
 import sys
 
 import studio_audit
+import studio_export_choices
 import studio_sg_bridge
 import studio_sg_queue
 from studio_sg_bridge import BridgeError
@@ -738,7 +739,12 @@ class Session(object):
         tuile ; pattern_udim : avec (null si le template n'a pas de clé UDIM, ou si elle est obligatoire pour
         pattern). template null (et reason) : fichier hors des templates du projet, ou pas de template de textures
         pour son type d'entité ; ArmorPaint garde alors ses noms. Projet : project_id (sauf d'un autre site,
-        _other_site), sinon celui du chemin (_project_from_path), sinon celui déjà amorcé, sinon _default_project()."""
+        _other_site), sinon celui du chemin (_project_from_path), sinon celui déjà amorcé, sinon _default_project().
+        Un autre template (lot B6) : args template, sinon celui choisi pour le projet dans la fenêtre d'export
+        ("texture_template" de son sidecar, studio_export_choices.py) ; chosen le dit. Pour la fenêtre, la réponse
+        donne aussi default_template (celui du réglage, null sans), templates (ceux du projet qui nomment des textures
+        et se remplissent depuis path) et name, version (champs du fichier de travail, null s'il n'en a pas) ; l'erreur
+        template_missing les porte aussi, pour choisir un autre template."""
         path = _str(args, "path")
         project_id = _int(args, "project_id", required=False)
         if self._other_site(args):
@@ -755,24 +761,50 @@ class Session(object):
         entity_type = (ctx.entity or {}).get("type")
         if entity_type is None:  # dossiers absents du path cache : le type d'après le template de travail
             entity_type = next((t for t, n in self.settings["work_templates"].items() if n == work.name), None)
-        name = self.settings["texture_templates"].get(entity_type)
+        fields = work.get_fields(path)
+        default = self.settings["texture_templates"].get(entity_type)
+        chosen = _str(args, "template", required=False) or studio_export_choices.texture_template(path)
+        info = {
+            "default_template": default,
+            "chosen": chosen is not None,
+            "templates": self._texture_templates(tk, ctx, fields, default),
+            "name": fields.get("name"),
+            "version": fields.get("version"),
+        }
+        name = chosen or default
         if name is None:
-            return {"template": None, "reason": "no texture template configured for %s (%s)" % (entity_type, work.name)}
+            return dict(info, template=None,
+                        reason="no texture template configured for %s (%s)" % (entity_type, work.name))
         template = tk.templates.get(name)
+        where = " (chosen for this project in %s)" % studio_export_choices.sidecar_path(path) if chosen else ""
         if template is None:
-            raise BridgeError("template_missing", "template '%s' is not defined in the project configuration" % name)
+            raise BridgeError("template_missing", "template '%s' is not defined in the project configuration%s"
+                              % (name, where), details=info)
         keys = self.settings["texture_keys"]
         for role in ("channel", "ext"):
             if keys[role] not in template.keys:
                 raise BridgeError(
-                    "template_missing", "template '%s' has no {%s} key (texture %s)" % (name, keys[role], role)
+                    "template_missing", "template '%s' has no {%s} key (texture %s)%s" % (name, keys[role], role, where),
+                    details=info,
                 )
+        pattern, pattern_udim = self._texture_fill(template, ctx, fields)
+        if pattern is None and pattern_udim is None:
+            raise BridgeError(
+                "template_missing", "template '%s' cannot be filled from %s (%s)%s" % (name, path, work.name, where),
+                details=info,
+            )
+        return dict(info, template=name, pattern=pattern, pattern_udim=pattern_udim)
+
+    def _texture_fill(self, template, ctx, fields, quiet=False):
+        """(pattern, pattern_udim) de template rempli avec le contexte et les champs du fichier de travail ; None pour
+        celui qui ne se remplit pas (dit au journal, sauf quiet)."""
+        keys = self.settings["texture_keys"]
         try:
             values = ctx.as_template_fields(template)
         except Exception as e:  # noqa: BLE001 — TankError : contexte sans dossiers ; les champs du fichier suffisent
             log.debug("texture_pattern: no context fields for %s: %s", template, e)
             values = {}
-        values.update(work.get_fields(path))
+        values.update(fields)
         values.pop(keys["udim"], None)
         # Marqueurs hors du type des clés (ignore_types, API interne de Template stable depuis tk-core 0.18) : une clé
         # channel en alphanumeric ou à choix refuserait "<channel>". Les autres champs sont validés normalement.
@@ -783,7 +815,7 @@ class Session(object):
             try:
                 return template._apply_fields(fields, ignore_types=ignore, skip_defaults=skip_defaults)
             except self.sgtk.TankError as e:
-                log.info("texture_pattern: %s: %s", template, e)
+                log.log(logging.DEBUG if quiet else logging.INFO, "texture_pattern: %s: %s", template, e)
                 return None
 
         # Sans tuile : la clé UDIM (une séquence a un défaut, %04d) ne doit pas remplir sa section optionnelle.
@@ -792,11 +824,21 @@ class Session(object):
         defaults = {k: key.default for k, key in template.keys.items() if key.default is not None and k != keys["udim"]}
         pattern = resolve(dict(defaults, **values), skip_defaults=True)
         pattern_udim = resolve(dict(values, **{keys["udim"]: "<UDIM>"})) if keys["udim"] in template.keys else None
-        if pattern is None and pattern_udim is None:
-            raise BridgeError(
-                "template_missing", "template '%s' cannot be filled from %s (%s)" % (name, path, work.name)
-            )
-        return {"template": name, "pattern": pattern, "pattern_udim": pattern_udim}
+        return pattern, pattern_udim
+
+    def _texture_templates(self, tk, ctx, fields, default):
+        """Noms des templates de chemin du projet qui peuvent nommer les textures de ce fichier de travail : clés du
+        canal et de l'extension, et remplis par son contexte et ses champs. Celui du réglage d'abord."""
+        keys = self.settings["texture_keys"]
+        names = []
+        for name, template in sorted(tk.templates.items()):
+            if not isinstance(template, self.sgtk.TemplatePath):
+                continue
+            if keys["channel"] not in template.keys or keys["ext"] not in template.keys:
+                continue
+            if any(p is not None for p in self._texture_fill(template, ctx, fields, quiet=True)):
+                names.append(name)
+        return sorted(names, key=lambda n: n != default)
 
     # ---- Apps Toolkit (moteur tk-armorpaint) -------------------------------------------------------------------------
 

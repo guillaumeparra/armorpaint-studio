@@ -31,6 +31,16 @@ int studio_export_naming_path(const char *variant, const char *channel, const ch
 // Template Toolkit qui nomme les textures du projet ouvert, NULL hors pipeline.
 const char *studio_export_naming_template(void);
 
+// Lot B6, fenêtre d'export : ce que le sidecar a répondu pour le projet ouvert (attendu si besoin), objet JSON (malloc)
+// {"template", "default_template", "chosen", "templates", "name", "version", "error"} : template qui nomme les textures
+// (null : noms d'ArmorPaint), celui du réglage, choisi pour le projet ou non ("texture_template" de son sidecar
+// d'export), templates possibles, nom et version du fichier de travail, message d'erreur (null sans) ; "null" hors
+// pipeline ou sans réponse.
+char *studio_export_naming_json(void);
+// Redemande le modèle du projet ouvert (template choisi dans la fenêtre) ; la réponse est attendue au prochain export
+// ou studio_export_naming_json().
+void studio_export_naming_refresh(void);
+
 // Modèle donné pour le projet path, à la place de celui qu'on demanderait au sidecar (réponse de texture_pattern :
 // template NULL ou "" pour les noms d'ArmorPaint). Pour le publish (lot C4) : le sidecar est occupé par la fenêtre qui
 // publie, une requête texture_pattern attendrait sa fermeture ; il calcule le modèle et le passe avec sa requête host.

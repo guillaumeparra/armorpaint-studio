@@ -384,6 +384,30 @@ class TestToolkit(Base):
         # test_texture_name_refused_by_template).
         self.assertEqual(tp["pattern"], os.path.join(tex, "robot_<channel>.<ext>"))
         self.assertEqual(tp["pattern_udim"], os.path.join(tex, "robot_<channel>.<UDIM>.<ext>"))
+        # Lot B6 : les templates qui peuvent nommer ces textures (ceux des Shots ne se remplissent pas depuis un
+        # Asset), celui du réglage d'abord ; nom et version du fichier de travail.
+        self.assertEqual(tp["templates"], ["armorpaint_asset_textures", "armorpaint_asset_textures_publish"])
+        self.assertEqual((tp["default_template"], tp["chosen"], tp["name"], tp["version"]),
+                         ("armorpaint_asset_textures", False, "robot", 1))
+        # Un autre template : demandé, puis choisi pour le projet (sidecar de la fenêtre d'export, commun aux versions).
+        pub = os.path.join(os.path.dirname(os.path.dirname(work)), "publish", "armorpaint", "textures", "v001")
+        tp = s.data("texture_pattern", {"path": nv["path"], "template": "armorpaint_asset_textures_publish"})
+        self.assertEqual((tp["template"], tp["chosen"]), ("armorpaint_asset_textures_publish", True))
+        self.assertEqual(tp["pattern"], os.path.join(pub, "robot_<channel>.<ext>"))
+        sidecar = os.path.join(work, "robot.export_settings.json")
+        write(sidecar, json.dumps({"version": 1, "texture_template": "armorpaint_asset_textures_publish"}))
+        tp = s.data("texture_pattern", {"path": nv["path"]})
+        self.assertEqual((tp["template"], tp["chosen"]), ("armorpaint_asset_textures_publish", True))
+        self.assertEqual(tp["pattern_udim"], os.path.join(pub, "robot_<channel>.<UDIM>.<ext>"))
+        # Choisi mais absent de la configuration, ou sans canal : erreur qui nomme le sidecar, pas de repli silencieux.
+        write(sidecar, json.dumps({"version": 1, "texture_template": "nope"}))
+        code, reply = s.error("texture_pattern", {"path": nv["path"]})
+        self.assertEqual(code, "template_missing")
+        self.assertIn("robot.export_settings.json", reply["error"]["message"])
+        self.assertEqual(reply["error"]["templates"], ["armorpaint_asset_textures", "armorpaint_asset_textures_publish"])
+        self.assertEqual(s.error("texture_pattern", {"path": nv["path"], "template": "armorpaint_asset_work"})[0],
+                         "template_missing")
+        os.remove(sidecar)
 
         # Un Shot, dossiers absents du path cache (type d'entité d'après le template de travail) : template sans clé
         # UDIM ; le projet déjà amorcé sert sans project_id.

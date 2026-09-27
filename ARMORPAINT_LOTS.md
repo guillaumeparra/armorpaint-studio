@@ -379,7 +379,7 @@ que la production maintient déjà dans `templates.yml`. On n'ajoute ni langage 
 - ✅ **Injection upstream `export-naming`** (11 lignes dans `export_texture_run_layers`). Le suffixe objet ou atlas
   se place devant le canal.
 - Textures versionnées avec le `.arm` : `robot.v003.arm` → `textures/v003/robot_base.png`. Le dossier de la boîte
-  d'export est ignoré quand un template s'applique ; B6 donnera une UI dédiée.
+  d'export est ignoré quand un template s'applique ; B6 donnera une UI dédiée (fait : ligne « ShotGrid » de la fenêtre d'export).
 - Écarté : prévisualisation live (B6), variables `colorspace`/`res`/`bits`/`date`/`user` (ce seraient des clés
   Toolkit à passer au sidecar : à faire si un template en a besoin), export « bake material ».
 - Non rejoué dans l'app : export par tuile UDIM et par objet, qui ne se règlent que dans l'UI. Les tests couvrent le
@@ -436,6 +436,7 @@ Ce qui distingue un exporter studio d'un bouton « Export ».
 - Sélection preset / template / version / destination, prévisualisation, rapport de preflight
 - Un bouton dans le menubar → injection de **2 lignes** dans `ui_menubar.c`
 - ✅ **Fait le 2026-09-26** (macOS), en Qt (PySide6, environnement Python fourni par rez) plutôt qu'en boîte native : fenêtre `external/studio_export_window.c` + `assets/studio_export_window.py`. Au lieu d'un bouton de plus, toutes les entrées d'export de textures (menu File, icône, menu de calque, raccourcis) ouvrent la fenêtre : patch `export-window` (4 lignes dans `box_export_show_textures`). Preset, espace OCIO, calques, destination, préflight en direct ; Ctrl+E refait le dernier export. Template/version : pris du fichier de travail (B3), pas encore choisis dans la fenêtre.
+- ✅ **Template et version ShotGrid** (2026-09-27) : ligne « ShotGrid » dans la fenêtre quand le projet est dans un contexte. Le template des textures se choisit parmi ceux de la config (celui de `STUDIO_SG_TEXTURE_TEMPLATES` d'abord, puis ceux qui ont les clés du canal et de l'extension et se remplissent avec le contexte et les champs du fichier de travail) ; le choix est gardé par projet dans le sidecar (`"texture_template"`), où le sidecar ShotGrid le relit pour l'export, le `--background` et le publish. La version est celle du fichier de travail ; « Version Up » enregistre la version suivante (`next_version`, comme le Save de workfiles) et la fenêtre suit, noms compris. Section 4 de `.tests/sg_context_app.sh`.
 - ✅ **Maps et sidecar du projet** (2026-09-26) : profondeur et résolution par map dans la fenêtre (avec « pour toutes »), maps désactivables, sans toucher au preset ; clé `resolution` des presets (mise à l'échelle à l'export, la résolution du projet ne change pas ; résolutions du show vérifiées par texture). Les presets studio sont **seulement lus** (plus aucun fichier écrit dans `data/`, le dossier de l'app n'étant pas inscriptible au studio). Presets du projet et choix de la fenêtre dans un sidecar à côté du `.arm` (`<nom sans version>.export_settings.json`), écrit par la fenêtre seule.
 - ✅ **Nom des fichiers et jeux de textures** (2026-09-26) : modèle de nom modifiable dans la fenêtre (menu de variables : `<name>`, `<version>`, `<atlas>`, `<object>`, `<UDIM>`, `<resolution>`, `<bits>`, `<preset>`…, variables inconnues refusées), gardé par preset dans le sidecar et dans « Save as preset » ; le template ShotGrid (B3) reste prioritaire. Les atlas d'ArmorPaint (onglet Atlases devenu inaccessible) s'éditent dans la section « Texture sets » (`external/studio_atlas.c`, enregistrés avec le `.arm`) : un jeu de maps par jeu en export Visible. Maillages de test `.tests/udim_gen.py` (cube à 6 tuiles UDIM, props), banc `.tests/sets_app.sh`. Tri, changement de parent et suppression d'objets dans l'onglet Meshes : les jeux et les calques limités à un jeu suivent les objets (patch `atlas-objects-order`, banc `.tests/atlas_order_app.sh`).
 
@@ -758,7 +759,7 @@ En C dans `external/`, sur le modèle de `studio_export_window.c` et de `studio_
 → *Export colorimétriquement juste d'abord ; le viewport ensuite.*
 
 **Phase 4 — industrialisation · 3 semaines**
-✅ `B7` (headless réel, rapport, codes de retour) → ✅ `C4` (publish) → ✅ `C5` (contexte, mode dégradé) → `B6` → 🟡 `C6` (kit prêt, recette sur le vrai site)
+✅ `B7` (headless réel, rapport, codes de retour) → ✅ `C4` (publish) → ✅ `C5` (contexte, mode dégradé) → ✅ `B6` → 🟡 `C6` (kit prêt, recette sur le vrai site)
 
 ### Risques principaux
 

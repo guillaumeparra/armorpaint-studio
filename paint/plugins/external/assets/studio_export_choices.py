@@ -5,6 +5,9 @@
 # Sidecar du projet : <dossier du .arm>/<nom sans .arm ni version>.export_settings.json ("robot_v003.arm" ->
 # "robot.export_settings.json", commun aux versions). ArmorPaint n'y touche pas :
 #   "presets" : presets enregistrés par l'artiste ("Save as preset"), au format des presets studio ;
+#   "texture_template" : template Toolkit des textures choisi pour ce projet (ShotGrid, lot B6), à la place de celui
+#               du réglage texture_templates ; l'op texture_pattern du sidecar ShotGrid le lit ici, pour l'export
+#               comme pour le publish ;
 #   "export"  : ses choix, remis à l'ouverture de la fenêtre : "preset" ("file:<nom>" pour un preset des dossiers ou
 #               livré, "project:<nom>" pour un preset de "presets"), "color_space", "mode" (EXPORT_MODE_*), "padding",
 #               "dir", "group", et par preset ("presets" : {clé: {...}}) : "overrides" (bits et résolution par map),
@@ -40,6 +43,13 @@ def read_sidecar(path):
         return data, None
     except (OSError, ValueError) as e:
         return {}, "%s: %s" % (os.path.basename(path), e)
+
+
+def texture_template(project_path):
+    """Template des textures choisi pour ce projet ("texture_template" du sidecar), None s'il n'y en a pas."""
+    data, _ = read_sidecar(sidecar_path(project_path))
+    name = data.get("texture_template")
+    return name if isinstance(name, str) and name else None
 
 
 def write_sidecar(path, data):

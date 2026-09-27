@@ -12,3 +12,8 @@ void studio_workfiles_init(void);
 
 // Vrai tant qu'une fenêtre ShotGrid est ouverte : un appel au sidecar attendrait sa fermeture.
 bool studio_workfiles_busy(void);
+
+// Lot B6 (fenêtre d'export) : enregistre le projet ouvert comme la version suivante de son fichier de travail : op
+// next_version du sidecar pour la tâche du contexte et name (champ du template de travail), puis sauvegarde à ce
+// chemin, comme File Save. Chemin du nouveau fichier (malloc), ou NULL et *error (malloc).
+char *studio_workfiles_version_up(const char *name, char **error);

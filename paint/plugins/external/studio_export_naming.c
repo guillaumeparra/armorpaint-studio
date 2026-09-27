@@ -8,6 +8,7 @@
 #include "studio_sg_context.h"
 #include "studio_sg_offline.h"
 #include "studio_workfiles.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #ifdef _WIN32
@@ -30,6 +31,7 @@ static struct {
 	char *template;     // NULL : noms d'ArmorPaint
 	char *pattern;      // sans tuile, NULL si le template exige une tuile
 	char *pattern_udim; // avec tuile, NULL si le template n'en a pas
+	char *info;         // lot B6, pour la fenêtre d'export : objet JSON (studio_export_naming_json), NULL sans réponse
 	bool  seen;         // ShotGrid sert dans la session
 	bool  told;         // console : nommage (ou son absence) déjà signalé pour path
 	int   net_serial;   // studio_sg_network_serial() déjà vu
@@ -65,8 +67,8 @@ static void forget(void) {
 		studio_sg_release(nm.job);
 		nm.job = 0;
 	}
-	free(nm.template), free(nm.pattern), free(nm.pattern_udim);
-	nm.template = nm.pattern = nm.pattern_udim = NULL;
+	free(nm.template), free(nm.pattern), free(nm.pattern_udim), free(nm.info);
+	nm.template = nm.pattern = nm.pattern_udim = nm.info = NULL;
 	nm.ready                                   = false;
 	nm.told                                    = false;
 }
@@ -96,6 +98,34 @@ static void tell_offline(void) {
 	}
 }
 
+// Membre de l'objet à base, en JSON brut (malloc) ; "null" s'il manque.
+static char *raw(const char *json, const char *base, const char *name) {
+	studio_json_value_t v = studio_json_find(json, string_tmp("%s/%s", base, name));
+	return v.type != STUDIO_JSON_INVALID ? strndup(v.start, v.len) : strdup("null");
+}
+
+// Ce que la fenêtre d'export montre (lot B6) : réponse de texture_pattern (base "/data") ou son erreur ("/error").
+static void keep_info(const char *reply, const char *base, const char *error) {
+	const char *members[] = {"template", "default_template", "chosen", "templates", "name", "version"};
+	size_t      size      = 64;
+	char       *parts[6];
+	for (int i = 0; i < 6; ++i) {
+		parts[i] = raw(reply, base, members[i]);
+		size += strlen(members[i]) + strlen(parts[i]) + 4;
+	}
+	char *quoted = studio_json_quote(error != NULL ? error : "");
+	size += strlen(quoted);
+	free(nm.info);
+	nm.info = malloc(size);
+	size_t n = (size_t)snprintf(nm.info, size, "{");
+	for (int i = 0; i < 6; ++i) {
+		n += (size_t)snprintf(nm.info + n, size - n, "\"%s\":%s,", members[i], parts[i]);
+		free(parts[i]);
+	}
+	snprintf(nm.info + n, size - n, "\"error\":%s}", error != NULL ? quoted : "null");
+	free(quoted);
+}
+
 static void collect(void) {
 	const char *reply = studio_sg_result(nm.job);
 	nm.ready          = true;
@@ -108,8 +138,10 @@ static void collect(void) {
 		console_error(string_tmp("ShotGrid texture naming: %s: %s (textures keep ArmorPaint names)", studio_sg_get(nm.job, "/error/code"),
 		                         studio_sg_get(nm.job, "/error/message")));
 		nm.told = true;
+		keep_info(reply, "/error", studio_sg_get(nm.job, "/error/message"));
 	}
 	else {
+		keep_info(reply, "/data", NULL);
 		nm.template     = reply_text(reply, "/data/template");
 		nm.pattern      = reply_text(reply, "/data/pattern");
 		nm.pattern_udim = reply_text(reply, "/data/pattern_udim");
@@ -238,6 +270,18 @@ int studio_export_naming_path(const char *variant, const char *channel, const ch
 
 const char *studio_export_naming_template(void) {
 	return ensure() ? nm.template : NULL;
+}
+
+char *studio_export_naming_json(void) {
+	ensure();
+	return strdup(nm.info != NULL ? nm.info : "null");
+}
+
+void studio_export_naming_refresh(void) {
+	char *path = project_filepath_get();
+	if (path != NULL && path[0] != 0 && enabled() && !studio_sg_offline()) {
+		track(path, true);
+	}
 }
 
 static char *text_or_null(const char *s) {

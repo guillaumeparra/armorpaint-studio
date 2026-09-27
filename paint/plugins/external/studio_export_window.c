@@ -19,6 +19,7 @@
 #include "studio_ocio.h"
 #include "studio_preset.h"
 #include "studio_proc.h"
+#include "studio_workfiles.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -431,6 +432,9 @@ static char *state_json(const char *req) {
 	else {
 		put(&b, "null");
 	}
+	char *sg_naming = studio_export_naming_json(); // lot B6 : templates possibles, version du fichier de travail
+	put(&b, ",\"sg_naming\":%s", sg_naming);
+	free(sg_naming);
 	put(&b, ",\"naming_variables\":[");
 	for (int i = 0; i < studio_naming_variable_count; ++i) {
 		put(&b, i > 0 ? ",{\"name\":" : "{\"name\":");
@@ -766,6 +770,44 @@ static void inspect_request(int id, const char *req) {
 	free(json);
 }
 
+// args : {"refresh": bool} -> studio_export_naming_json() : le nommage ShotGrid du projet, redemandé au sidecar avec
+// refresh (template choisi dans la fenêtre, écrit dans le sidecar du projet).
+static void naming_request(int id, const char *req) {
+	if (studio_json_truthy(studio_json_find(req, "/args/refresh"))) {
+		studio_export_naming_refresh();
+	}
+	char *json = studio_export_naming_json();
+	reply(id, json);
+	free(json);
+}
+
+// -> {"path", "sg_naming"} : le projet enregistré comme la version suivante de son fichier de travail (lot B6), ses
+// textures iront dans cette version ; erreur version_up sinon.
+static void version_up_request(int id) {
+	char               *naming = studio_export_naming_json();
+	studio_json_value_t v      = studio_json_find(naming, "/name");
+	char               *name   = v.type == STUDIO_JSON_STRING ? studio_json_text(v) : NULL;
+	char               *error  = NULL;
+	char               *path   = name != NULL ? studio_workfiles_version_up(name, &error) : NULL;
+	free(naming);
+	if (path == NULL) {
+		reply_error(id, "version_up", error != NULL ? error : "the work file has no name field (ShotGrid template)");
+	}
+	else {
+		naming   = studio_export_naming_json(); // modèle de la nouvelle version, attendu
+		text_t b = {0};
+		put(&b, "{\"path\":");
+		put_quoted(&b, path);
+		put(&b, ",\"sg_naming\":%s}", naming);
+		reply(id, b.data);
+		free(b.data);
+		free(naming);
+	}
+	free(path);
+	free(error);
+	free(name);
+}
+
 // Même moment que l'export de la boîte d'ArmorPaint (sys_notify_on_next_frame) : hors du dessin de l'interface.
 static void handle_request(void *data) {
 	(void)data;
@@ -790,6 +832,12 @@ static void handle_request(void *data) {
 	}
 	else if (strcmp(op, "atlases") == 0) {
 		atlases_request(id, req);
+	}
+	else if (strcmp(op, "naming") == 0) {
+		naming_request(id, req);
+	}
+	else if (strcmp(op, "version_up") == 0) {
+		version_up_request(id);
 	}
 	else {
 		reply_error(id, "bad_request", string_tmp("unknown operation: %s", op));

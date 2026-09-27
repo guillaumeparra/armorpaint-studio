@@ -53,11 +53,12 @@ def network(online, reason=None):
 class BridgeError(Exception):
     """Erreur rapportée au superviseur : un code stable (voir README.md) et un message lisible par l'artiste."""
 
-    def __init__(self, code, message, restart=False):
+    def __init__(self, code, message, restart=False, details=None):
         super().__init__(message)
         self.code = code
         self.message = message
         self.restart = restart
+        self.details = details  # membres de plus dans l'objet "error" de la réponse (dict), None sinon
 
 
 class HostError(Exception):
@@ -211,7 +212,8 @@ def handle_line(session, line):
         data = session.call(request["op"], args)
         return encode(message_id, True, data, sg=_sg()), request["op"] == "shutdown"
     except BridgeError as e:
-        return encode(message_id, False, {"code": e.code, "message": e.message}, e.restart, _sg(e)), e.restart
+        payload = dict(e.details or {}, code=e.code, message=e.message)
+        return encode(message_id, False, payload, e.restart, _sg(e)), e.restart
     except Exception as e:  # noqa: BLE001 — tout doit devenir une réponse, sinon le superviseur attend jusqu'au timeout
         error = session.classify(e)
         if error.code == "internal":

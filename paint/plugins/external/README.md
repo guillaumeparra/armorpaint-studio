@@ -52,7 +52,7 @@ Modules, un par lot (voir `ARMORPAINT_LOTS.md` à la racine d'armorpaint) :
 | `studio_publish`, `tk-armorpaint/hooks/tk-multi-publish2/` | C4 | ✅ publish ShotGrid par tk-multi-publish2 : projet copié par ArmorPaint, textures exportées puis publiées, séquences `<UDIM>`, vignette du viewport (macOS ; validé sur site simulé) |
 | `studio_sg_context`, `studio_sg_offline`, `studio_audit`, `assets/studio_sg_queue.py`, `assets/studio_audit.py` | C5 | ✅ contexte ShotGrid gardé dans le `.arm`, mode dégradé hors ligne, file d'attente des publishes rejouée au retour du site, journal d'audit (macOS ; validé sur site simulé) |
 | `tools/recette_c6.py`, `docs/` | C6 | 🟡 kit de recette prêt (outil de vérification, fiche, guide de l'artiste, runbook) ; recette sur le vrai site à faire |
-| `studio_export_window`, `assets/studio_export_window.py`, `studio_atlas` | B6 | ✅ fenêtre d'export Qt (PySide6) à la place de la boîte d'export : presets studio, espace OCIO, préflight en direct, nom des fichiers, jeux de textures (macOS) |
+| `studio_export_window`, `assets/studio_export_window.py`, `studio_atlas` | B6 | ✅ fenêtre d'export Qt (PySide6) à la place de la boîte d'export : presets studio, espace OCIO, préflight en direct, nom des fichiers, jeux de textures, template et version ShotGrid (macOS) |
 | `studio_batch` | B7 | ✅ mode batch : `--background` sans fenêtre, options `--export-mode`, `--export-naming`, `--export-color-space`, rapport JSON (`--report`), code de retour 0/1/2 (macOS) |
 
 Build : `../base/make --compile` depuis `paint/`. Le log de démarrage affiche `studio: external <version>
@@ -195,7 +195,7 @@ Le nom de publish suit la convention Toolkit : le nom de fichier sans sa version
 | `upload_thumbnail` | `entity` (`{type, id}`), `path` | `{attachment_id}` |
 | `list_commands` | `task_id` ? ou `project_id` ? | `{context, commands, favourites, has_ui}` : le menu du moteur tk-armorpaint, voir C3 |
 | `show_app` | `command`, `task_id` ? ou `project_id` ? | `{command, context}` à la fin de la commande (fermeture de la fenêtre) |
-| `texture_pattern` | `path`, `project_id` ?, `site` ? | `{template, pattern, pattern_udim}` : chemin des textures exportées depuis le fichier de travail `path`, marqueurs `<channel>`, `<UDIM>`, `<ext>` ; `template` null (et `reason`) hors pipeline. Voir B3 |
+| `texture_pattern` | `path`, `project_id` ?, `site` ?, `template` ? | `{template, pattern, pattern_udim}` : chemin des textures exportées depuis le fichier de travail `path`, marqueurs `<channel>`, `<UDIM>`, `<ext>` ; `template` null (et `reason`) hors pipeline. Voir B3. Template : `template`, sinon celui choisi pour le projet (`texture_template` de son sidecar), sinon celui du réglage ; la réponse donne aussi `default_template`, `chosen`, `templates` (ceux qui peuvent nommer ses textures) et `name`, `version` du fichier (voir « Fenêtre d'export ») |
 | `publish` | `description` ?, `skip` ?, `task_id` ? ou `project_id` ? | `{context, publishes, skipped, finalized, messages}` : publish du projet ouvert sans fenêtre, voir C4 ; `queued` : publishes mis en file, voir C5 |
 | `check_online` | — | `{online, site, version}` : le site répond, sans amorçage ; sinon `sg_unreachable`. Voir C5 |
 | `pending_publishes` | — | `{queue, count, publishes}` : la file d'attente, sans requête au site |
@@ -205,7 +205,8 @@ Le nom de publish suit la convention Toolkit : le nom de fichier sans sa version
 
 Codes d'erreur (`/error/code`) : du sidecar, `bad_request`, `unknown_op`, `auth_required` (pas de session Desktop,
 ou expirée : jamais d'invite de mot de passe), `sg_unreachable`, `sg_error`, `toolkit_unavailable` (tk-core
-introuvable), `toolkit_error`, `not_found`, `template_missing` (la config n'a pas le template de travail ou de textures),
+introuvable), `toolkit_error`, `not_found`, `template_missing` (la config n'a pas le template de travail ou de textures ; pour `texture_pattern`, l'erreur porte
+aussi `templates`, `default_template`…, de quoi en choisir un autre),
 `internal`, `app_unavailable` (moteur tk-armorpaint absent de la config, ou commande inconnue : Qt manquant…),
 `publish_invalid`, `publish_failed`, `nothing_to_publish` (op `publish`) ; du superviseur, `sidecar_failed`,
 `sidecar_died`, `timeout`, `cancelled`. `restart_required` n'arrive à l'appelant que si le rejeu échoue lui aussi.
@@ -580,7 +581,8 @@ Quand le projet ouvert est un fichier de travail ShotGrid, les textures exporté
 Toolkit des textures, rempli avec les champs du fichier : entité, étape, nom, version. Pour `robot.v003.arm`, la
 texture `base` du preset va dans `…/work/armorpaint/textures/v003/robot_base.png`. Chaque version du projet a donc
 ses textures, et le dossier choisi dans la fenêtre d'export est ignoré. La console l'indique à la première texture :
-« Textures named by ShotGrid template … ».
+« Textures named by ShotGrid template … ». Le template est celui de `STUDIO_SG_TEXTURE_TEMPLATES` pour le type
+d'entité, ou un autre choisi pour le projet dans la fenêtre d'export (B6).
 
 ```yaml
 # core/templates.yml
@@ -736,6 +738,13 @@ une fenêtre Qt à la place de la boîte d'export d'ArmorPaint (patch `export-wi
 - **Color space** : « From preset », ou un espace OCIO imposé aux textures de couleur ; les données restent brutes.
 - **Layers** : Visible, Selected, Per Object, Per UDIM Tile, et la marge (padding) de l'upstream.
 - **Destination** : dossier ; défaut : celui du dernier export, sinon celui du projet.
+- **ShotGrid** (fichier de travail dans un contexte, nommage actif : voir « Nommage des exports (B3) ») : le template
+  des textures, parmi ceux de la config qui ont les clés du canal et de l'extension et se remplissent avec ce fichier
+  (celui du réglage en premier), la version du fichier et « Version Up ». Le template choisi est gardé pour le projet
+  dans son sidecar (`texture_template`, retiré si c'est celui du réglage) : l'export, le `--background` et le publish
+  (op `texture_pattern`) le suivent. « Version Up » enregistre le projet en version suivante (op `next_version`, comme
+  le Save de workfiles, avec le journal d'audit et le titre) ; les noms suivent la nouvelle version. Export est grisé
+  pendant la demande au sidecar ; une erreur s'affiche sous la ligne.
 - **File names** : le modèle de nom du preset (`naming`), modifiable pour cet export. « Variables » insère une
   variable au curseur (liste ci-dessus, avec leur description) ou met la sélection entre `[ ]` (section retirée si une
   de ses variables est vide). Sous le champ, un nom de fichier de cet export ; une variable inconnue est signalée tout
@@ -780,6 +789,7 @@ log et jamais écrasé.
 ```json
 {
 	"version": 1,
+	"texture_template": "armorpaint_asset_textures_publish",
 	"presets": { "robot_hero": { "description": "…", "textures": [ … ] } },
 	"export": {
 		"preset": "project:robot_hero", "color_space": "", "mode": 3, "padding": false, "dir": "/show/…", "group": "map",
@@ -789,7 +799,8 @@ log et jamais écrasé.
 }
 ```
 
-`presets` a le format des presets studio. `export` garde les choix, remis à la réouverture ; par preset (`file:<nom>`
+`presets` a le format des presets studio. `texture_template` : le template ShotGrid des textures choisi pour le
+projet (absent : celui du réglage). `export` garde les choix, remis à la réouverture ; par preset (`file:<nom>`
 pour ceux des dossiers, `project:<nom>` pour ceux du sidecar), les réglages des maps, les maps désactivées, les
 fichiers décochés et le modèle de nom s'il diffère de celui du preset. Un preset du projet est envoyé en JSON à ArmorPaint à chaque export et noté au manifeste avec le
 chemin du sidecar.
@@ -835,7 +846,9 @@ accessibles ; l'onglet Atlases est remplacé par la section Texture sets. La ré
 
 **Protocole**, une ligne JSON par message sur stdin et stdout de la fenêtre (détail dans `studio_export_window.h`) :
 requêtes `state` (`args.presets` : presets du sidecar à vérifier ; la réponse donne aussi `atlases`,
-`naming_template`, `naming_variables`), `inspect` (un preset JSON), `atlases` (`{"names", "objects"}` : jeux de
+`naming_template`, `naming_variables` et `sg_naming` : `{template, default_template, chosen, templates, name, version,
+error}` sous un template ShotGrid, sinon null), `naming` (`args.refresh` : redemandé au sidecar ; réponse :
+`sg_naming`), `version_up` (réponse `{path, sg_naming}`), `inspect` (un preset JSON), `atlases` (`{"names", "objects"}` : jeux de
 textures du projet), `preflight` et `export` (`args` : `preset`, `preset_json` et `preset_source` pour un preset du
 projet, `overrides`, `naming`, `color_space`, `dir`, `mode`, `padding`, `skip`), réponses
 `{"id", "ok", "data" | "error"}`, évènement `{"event": "raise", "mode"}`. Un autre outil peut remplacer la fenêtre
