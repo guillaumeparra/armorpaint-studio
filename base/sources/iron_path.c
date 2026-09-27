@@ -183,8 +183,11 @@ char *path_data(void) {
 }
 
 char *path_to_relative(char *from, char *to) {
-	any_array_t *a = string_split(from, PATH_SEP);
-	any_array_t *b = string_split(to, PATH_SEP);
+	// STUDIO-PATCH(arm-relative-paths): normalized first, a path through dir/.. would give a relative path through dir
+	char        *from_normalized = path_normalize(from);
+	char        *to_normalized   = path_normalize(to);
+	any_array_t *a               = string_split(from_normalized, PATH_SEP);
+	any_array_t *b               = string_split(to_normalized, PATH_SEP);
 	if (a->length > 0 && !path_is_folder(from)) {
 		free(array_pop(a));
 	}
@@ -215,6 +218,8 @@ char *path_to_relative(char *from, char *to) {
 	string_buffer_free(&sb);
 	string_split_free(a);
 	string_split_free(b);
+	free(from_normalized);
+	free(to_normalized);
 	return p;
 }
 

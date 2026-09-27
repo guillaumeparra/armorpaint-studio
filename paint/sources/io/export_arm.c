@@ -279,6 +279,9 @@ void export_arm_run_project(char *path) {
 	bool same_drive = g_project->envmap != NULL ? char_at(relative_to, 0)[0] == char_at(g_project->envmap, 0)[0] : true;
 #endif
 
+	// STUDIO-PATCH(arm-relative-paths): the file gets relative mesh and envmap paths, the project keeps absolute ones
+	string_array_t *mesh_assets_abs = g_project->mesh_assets;
+	char           *envmap_abs      = g_project->envmap;
 	g_project->version         = string_copy(manifest_version_project);
 	g_project->material_groups = mgroups;
 	g_project->material_datas  = mdata2;
@@ -396,6 +399,8 @@ void export_arm_run_project(char *path) {
 
 	buffer_t *buffer = util_encode_project(g_project);
 	iron_file_save_bytes(path, buffer, buffer->length + 1);
+	g_project->mesh_assets = mesh_assets_abs; // STUDIO-PATCH(arm-relative-paths)
+	g_project->envmap      = envmap_abs;
 	array_free(buffer);
 	free(buffer);
 
