@@ -62,6 +62,7 @@ char             *util_udim_view_stats(gpu_texture_t *view);
 void              util_udim_set_tile(i32 tile);
 i32               util_udim_tile(void);
 void              util_udim_sync(void);
+slot_layer_t     *util_udim_flatten_atlas(bool height_to_normal);
 buffer_t         *gpu_get_texture_pixels(gpu_texture_t *image);
 void              history_duplicate_layer(void);
 void              layers_duplicate_layer(slot_layer_t *l);
@@ -380,8 +381,8 @@ bool studio_atlas_limit_layer(int atlas) {
 
 // ---- Fin d'un import UDIM : jeux de textures par matériau, conseil de résolution -------------------------------------
 
-// Pixels de chaque tuile et projet conseillé (studio_udim_hint). Dans la barre d'état si elle est libre, dans la
-// console seule sinon.
+// Résolution des textures de chaque tuile et mémoire d'un calque (studio_udim_hint). Dans la barre d'état si elle est
+// libre, dans la console seule sinon.
 static void udim_import_hint(void) {
 	if (!util_mesh_udim_active()) {
 		return;
@@ -395,10 +396,9 @@ static void udim_import_hint(void) {
 			tiles++;
 		}
 	}
-	int stride = util_mesh_atlas_stride();
-	int bits   = base_bits == TEXTURE_BITS_BITS8 ? 8 : base_bits == TEXTURE_BITS_BITS16 ? 16 : 32;
-	// Au-delà de stride × stride tuiles (64), les autres n'ont pas de case : util_mesh.c le dit déjà (udim-tile-limit)
-	char *hint = studio_udim_hint(tiles < stride * stride ? tiles : stride * stride, stride, config_get_texture_res_x(), config_get_texture_res_y(), bits);
+	int bits = base_bits == TEXTURE_BITS_BITS8 ? 8 : base_bits == TEXTURE_BITS_BITS16 ? 16 : 32;
+	// Au-delà de 64 tuiles, les calques ne tiennent pas les autres : util_mesh.c le dit déjà (udim-tile-limit)
+	char *hint = studio_udim_hint(tiles < 64 ? tiles : 64, config_get_texture_res_x(), config_get_texture_res_y(), bits);
 	if (hint == NULL) {
 		return;
 	}
@@ -941,7 +941,8 @@ static char *pixel_text(gpu_texture_t *t, float *c) {
 // « r g b a » de 0 à 1 ; « - » hors bornes. Channel 3, 4, 5 : cartes UV, des triangles et de dilatation du calque
 // courant, construites au besoin (i ignoré). Channel 6 : texture du nœud Bake Texture d'id i. Channel 7 : i-ème aperçu
 // de nœud du matériau (Curvature Texture...). Channel 8 : base de l'emplacement d'undo i. Channel 9, 10, 11 : base,
-// nor et pack de la pile aplatie (layers_flatten, i ignoré).
+// nor et pack de la pile aplatie (layers_flatten, i ignoré). Channel 12, 13, 14 : de même pour le raytrace
+// (util_udim_flatten_atlas : chaque calque à tuiles dans les cases de l'atlas).
 static minic_val_t mn_studio_udim_pixel(minic_val_t *a, int n) {
 	int                   i       = (int)minic_arg_i(a, n, 0);
 	int                   channel = (int)minic_arg_i(a, n, 1);
@@ -949,7 +950,7 @@ static minic_val_t mn_studio_udim_pixel(minic_val_t *a, int n) {
 	int                   x       = (int)minic_arg_i(a, n, 3);
 	int                   y       = (int)minic_arg_i(a, n, 4);
 	slot_layer_t_array_t *layers  = g_project->_->layers;
-	if ((channel <= 2 && (i < 0 || i >= (int)layers->length)) || channel < 0 || channel > 11) {
+	if ((channel <= 2 && (i < 0 || i >= (int)layers->length)) || channel < 0 || channel > 14) {
 		return minic_val_ptr(string_copy("-"));
 	}
 	gpu_texture_t *current = _draw_current;
@@ -982,8 +983,8 @@ static minic_val_t mn_studio_udim_pixel(minic_val_t *a, int n) {
 		t = i >= 0 && i < (int)history_undo_layers->length ? ((slot_layer_t *)history_undo_layers->buffer[i])->texpaint : NULL;
 	}
 	else if (channel >= 9) {
-		slot_layer_t *f = layers_flatten(false, NULL);
-		t               = channel == 9 ? f->texpaint : channel == 10 ? f->texpaint_nor : f->texpaint_pack;
+		slot_layer_t *f = channel >= 12 ? util_udim_flatten_atlas(false) : layers_flatten(false, NULL);
+		t               = channel % 3 == 0 ? f->texpaint : channel % 3 == 1 ? f->texpaint_nor : f->texpaint_pack;
 		free(f);
 	}
 	else if (channel == 7) {

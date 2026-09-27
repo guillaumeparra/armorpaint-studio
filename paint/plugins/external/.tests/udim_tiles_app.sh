@@ -34,7 +34,10 @@
 #  13. .arm (lot D2e) : chaque tuile de chaque calque sauvée (clé tiles, la dernière) ; le blob d'origine, lu par
 #      l'upstream : le composite en grille, ou la tuile de l'objet d'un calque limité à un objet ; rouvert, les mêmes
 #      tuiles et un export identique au bit près, resauvé à l'identique ; la fixture de l'ère atlas (fixtures/udim_atlas)
-#      rangée dans ses tuiles, son export par tuile comparé à celui du build D1.
+#      rangée dans ses tuiles, son export par tuile comparé à celui du build D1 ;
+#  14. raytrace (lot D2f) : le flatten du raytrace, chaque tuile dans sa case de l'atlas (le proxy du maillage fusionné) ;
+#      la vue path trace, la couleur de chaque tuile ; bakes raytracés du nœud Bake Texture (Lightmap, Occlusion), faits
+#      dans l'atlas, rendus à chaque tuile depuis sa case.
 #
 #   sh .tests/udim_tiles_app.sh [dossier de travail]
 #   APP=<binaire ArmorPaint> pour un autre build (défaut : build Release de paint/).
@@ -1043,6 +1046,81 @@ check "blob d'origine d'un calque limité à strip.1004 : sa tuile, pleine réso
 check "rouvert : les mêmes tuiles par calque, masque compris" '[ "$(line arm_open names)" = "$(line arm_save names)" ] && [ "$(for l in 0 1 2 3; do line arm_open layer$l; done)" = "$(for l in 0 1 2 3; do line arm_save layer$l; done)" ] && line arm_open layer1 | grep -q "tiles=1001,1002,1003,1004,1011 128x128"'
 check "rouvert : export par tuile et Visible identiques au bit près ; resauvé : les mêmes tuiles" '[ "$(line arm roundtrip)" = "25/25/25 5/5/5" ] && [ "$(line arm resaved)" = "1 4" ]'
 check "fixture de l'ère atlas : 3 calques rangés dans leurs tuiles, export par tuile identique à celui du build D1" 'grep -q "UDIM: 3 layers of the atlas era cut into their tiles" "$W/arm_migrate.log" && line arm_migrate layer0 | grep -q "tiles=1001,1002,1003,1004,1011 256x256" && [ "$(line arm migrated)" = "5 0" ]'
+
+echo "== 14. raytrace : proxy de l'atlas, path trace, bakes Lightmap et Occlusion"
+script raytrace <<EOF
+int frame = 0;
+int step = 0;
+int node_id = -1;
+ui_node_t *bake = NULL;
+// Les 9 cases de la grille 3 x 3 d'un flatten (canal 9 : upstream, 12 : raytrace), à leur centre
+void cells(char *what, int ch) {
+	char *s = string("t: %s %s", what, studio_udim_pixel(0, ch, -1, 21, 21));
+	for (int k = 1; k < 9; k++) {
+		s = string("%s | %s", s, studio_udim_pixel(0, ch, -1, (k % 3) * 42 + 21, (k / 3) * 42 + 21));
+	}
+	console_log(s);
+}
+void px(char *what) {
+	console_log(string("t: %s %s | %s | %s | %s | %s", what, studio_udim_pixel(node_id, 6, 1001, 32, 96), studio_udim_pixel(node_id, 6, 1002, 32, 96),
+		studio_udim_pixel(node_id, 6, 1003, 32, 96), studio_udim_pixel(node_id, 6, 1004, 32, 96), studio_udim_pixel(node_id, 6, 1011, 32, 96)));
+}
+// Path trace quelques images, puis un nœud Bake Texture sur un calque neuf : Lightmap, puis Occlusion
+void update() {
+	frame++;
+	if (frame == 12) {
+		console_log(string("t: pt %s | %s | %s | %s | %s", studio_rt_pixel("last", -0.75, 0.0, -0.25), studio_rt_pixel("last", -0.25, 0.0, -0.25),
+			studio_rt_pixel("last", 0.25, 0.0, -0.25), studio_rt_pixel("last", 0.75, 0.0, -0.25), studio_rt_pixel("last", -0.75, 0.0, 0.25)));
+		context_set_viewport_mode(0);
+		studio_layer_new();
+		studio_layer_select(1);
+		slot_material_t *m = script_material_create("bake");
+		bake = script_material_create_node_at("TEX_BAKE", -400.0, 0.0);
+		script_material_connect(bake, 0, script_material_get_node("OUTPUT_MATERIAL_PBR"), 0);
+		script_material_update();
+		script_material_set(m);
+		return;
+	}
+	if (frame < 15 || string_equals(studio_bake_state(), "baking")) {
+		return;
+	}
+	if (step == 1) {
+		px("lightmap");
+	}
+	if (step == 2) {
+		px("ao");
+		script_quit();
+		return;
+	}
+	node_id = studio_bake(bake, step == 0 ? 11 : 10, 0);
+	step++;
+}
+int main() {
+	studio_project_res(128);
+	studio_import_mesh("$W/strip.obj", 2);
+	studio_layer_op("sync");
+	studio_udim_fill(0, 0, 1001, 1.0, 0.0, 0.0, 1.0);
+	studio_udim_fill(0, 0, 1002, 0.0, 1.0, 0.0, 1.0);
+	studio_udim_fill(0, 0, 1011, 0.0, 0.0, 1.0, 1.0);
+	cells("flat", 9);
+	cells("proxy", 12);
+	context_set_viewport_mode(15);
+	script_notify_on_update(update);
+	return 0;
+}
+EOF
+# Une lettre par pixel « r g b a » d'une ligne à « | » : R, G ou B (canal dominant, au moins double des deux autres), Y
+# (gris, canaux à 30 % près), 0 (nul), ? sinon
+letters() {
+	line "$1" "$2" | awk -F' [|] ' '{ out = ""; for (k = 1; k <= NF; k++) { split($k, c, " "); r = c[1]; g = c[2]; b = c[3];
+		m = r; if (g > m) m = g; if (b > m) m = b; n = r; if (g < n) n = g; if (b < n) n = b;
+		l = (m == 0 && c[4] == 0) ? "0" : (m > 0 && n >= 0.7 * m) ? "Y" : (r == m && r >= 2 * g && r >= 2 * b) ? "R" : (g == m && g >= 2 * r && g >= 2 * b) ? "G" : (b == m && b >= 2 * r && b >= 2 * g) ? "B" : "?";
+		out = out (k > 1 ? " " : "") l } print out }'
+}
+check "flatten du raytrace : chaque tuile dans sa case (1001, 1002, 1003 ; 1004, 1011 ; vides), l'upstream garde la tuile du contexte" '[ "$(letters raytrace proxy)" = "R G Y Y B 0 0 0 0" ] && [ "$(letters raytrace flat)" = "R R R R R R R R R" ]'
+check "path trace : chaque tuile avec sa couleur (1001 rouge, 1002 vert, 1003 et 1004 gris, 1011 bleu)" '[ "$(letters raytrace pt)" = "R G Y Y B" ]'
+check "bake Lightmap : la base de chaque tuile éclairée, depuis sa case" '[ "$(letters raytrace lightmap)" = "R G Y Y B" ]'
+check "bake Occlusion : blanc sur chaque tuile (ruban plat, rien au-dessus)" '[ "$(line raytrace ao)" = "$H | $H | $H | $H | $H" ]'
 
 [ $FAIL -eq 0 ] && echo "== OK" || echo "== FAIL"
 exit $FAIL

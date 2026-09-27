@@ -1350,7 +1350,9 @@ tuile peinte, cartes UV par tuile, tuile sous le pinceau pour les pipettes et le
 (D2b). Fusion et masque appliqués tuile par tuile, boucles imbriquées, surcharges de matériau du flatten par tuile
 (D2c). Tuile de l'export posée dans le contexte, composite en grille des calques à tuiles et de leurs masques, masque
 exporté par tuile (D2d). Tuiles de chaque calque sauvées dans le `.arm` et remises à l'ouverture, blob upstream en
-grille, projets de l'ère atlas découpés (D2e).
+grille, projets de l'ère atlas découpés (D2e). Flatten du raytrace en grille (le proxy du maillage fusionné), bake
+raytracé rendu à chaque tuile depuis sa case ; le composite en grille dessiné avec le pipeline de copie du format de la
+cible (16 et 32 bits) (D2f).
 
 Le commentaire d'en-tête d'`util_udim.h` pose la règle du lot D1 : un maillage UDIM garde un objet de peinture par
 tuile, nommé `<objet>.<tuile>` comme dans le format upstream, pour que le `.arm` reste lisible par ArmorPaint et par
@@ -1780,8 +1782,8 @@ réécrit (variable gardée, ou suite choisie avant la réécriture). Rejouer le
 
 | | |
 |---|---|
-| Fichiers | `base/sources/iron.h` (`gpu_delete_texture`), `base/sources/iron_gpu.c` et `.h` (`gpu_begin`, nouveau `gpu_target_beginning`), `paint/sources/history.c` (`history_copy_to_undo`, `history_paint`), `paint/sources/slots/slot_layer.c` (`slot_layer_swap`, `_clear`, `_invert_mask`, `_duplicate`, `_resize_and_set_bits`, `layers_apply_mask`), `paint/sources/util/util_layer.c` (`layers_merge_layer`, `layers_flatten`, `layers_draw_mesh_materials`), `paint/sources/ui/ui_header.c` (`ui_header_draw_tool_properties_to_mask`), `paint/sources/io/export_texture.c` (`export_texture_run_layers`, `export_texture_run`), `paint/sources/ui/tab_layers.c` (`tab_layers_draw_layer_context_menu_export_on_file_picked`), `paint/sources/render/make_mesh.c` (`make_mesh_run`), `paint/sources/render/make_paint.c` (`make_paint_run_context`), `paint/sources/render/make_texcoord.c` (`make_texcoord_run`), `paint/sources/render/make_clone.c` (`make_clone_run`), `paint/sources/render/make_material.c` (`make_material_bake_node_preview`), `paint/sources/render/render_path_base.c` (`render_path_base_commands`, `_draw_gbuffer`), `paint/sources/render/render_path_paint.c` (`render_path_paint_bind_layers`, `_unbind_layers`, `_commands_paint`, `_commands_live_brush`, `_draw`, `_dilate`), `paint/sources/uniforms.c` (`uniforms_ext_f32_link`), `paint/sources/util/util_uv.c` (`util_uv_cache_uv_map`, `_triangle_map`, `_dilate_map`, `_uv_island_map`), `paint/sources/ui/ui_view2d.c` (`ui_view2d_update`), `paint/sources/nodes_material/bake_texture_node.c` (`bake_texture_node_clear`, `_check_result`, nouveau `bake_texture_node_bake`), `paint/sources/util/util_mesh.c` (nouveau `util_mesh_udim_tile_table`), `paint/sources/types.h` (`layer_data_t`, nouveau `layer_tile_data_t`), `paint/sources/util/util_encode.c` (`util_encode_layer_data_size`, `util_encode_project`), `paint/sources/io/export_arm.c` (`export_arm_run_project`), `paint/sources/io/import_arm.c` (`import_arm_run_project`) |
-| Commit studio | branche `d2` (lot D2, sous-lots D2a à D2e), fusionnée dans `studio` à la fin du lot |
+| Fichiers | `base/sources/iron.h` (`gpu_delete_texture`), `base/sources/iron_gpu.c` et `.h` (`gpu_begin`, nouveau `gpu_target_beginning`), `paint/sources/history.c` (`history_copy_to_undo`, `history_paint`), `paint/sources/slots/slot_layer.c` (`slot_layer_swap`, `_clear`, `_invert_mask`, `_duplicate`, `_resize_and_set_bits`, `layers_apply_mask`), `paint/sources/util/util_layer.c` (`layers_merge_layer`, `layers_flatten`, `layers_draw_mesh_materials`), `paint/sources/ui/ui_header.c` (`ui_header_draw_tool_properties_to_mask`), `paint/sources/io/export_texture.c` (`export_texture_run_layers`, `export_texture_run`), `paint/sources/ui/tab_layers.c` (`tab_layers_draw_layer_context_menu_export_on_file_picked`), `paint/sources/render/make_mesh.c` (`make_mesh_run`), `paint/sources/render/make_paint.c` (`make_paint_run_context`), `paint/sources/render/make_texcoord.c` (`make_texcoord_run`), `paint/sources/render/make_clone.c` (`make_clone_run`), `paint/sources/render/make_material.c` (`make_material_bake_node_preview`), `paint/sources/render/render_path_base.c` (`render_path_base_commands`, `_draw_gbuffer`), `paint/sources/render/render_path_raytrace.c` (`render_path_raytrace_commands`), `paint/sources/render/render_path_raytrace_bake.c` (`render_path_raytrace_bake_commands`), `paint/sources/render/render_path_paint.c` (`render_path_paint_bind_layers`, `_unbind_layers`, `_commands_paint`, `_commands_live_brush`, `_draw`, `_dilate`), `paint/sources/uniforms.c` (`uniforms_ext_f32_link`), `paint/sources/util/util_uv.c` (`util_uv_cache_uv_map`, `_triangle_map`, `_dilate_map`, `_uv_island_map`), `paint/sources/ui/ui_view2d.c` (`ui_view2d_update`), `paint/sources/nodes_material/bake_texture_node.c` (`bake_texture_node_clear`, `_check_result`, nouveau `bake_texture_node_bake`), `paint/sources/util/util_mesh.c` (nouveau `util_mesh_udim_tile_table`), `paint/sources/types.h` (`layer_data_t`, nouveau `layer_tile_data_t`), `paint/sources/util/util_encode.c` (`util_encode_layer_data_size`, `util_encode_project`), `paint/sources/io/export_arm.c` (`export_arm_run_project`), `paint/sources/io/import_arm.c` (`import_arm_run_project`) |
+| Commit studio | branche `d2` (lot D2, sous-lots D2a à D2f), fusionnée dans `studio` à la fin du lot |
 | Validé contre | upstream `85f6cf1c` (2026-09-27) |
 | Injection | points d'appel et boucles sur les tuiles ; la logique dans `util_udim.c` ([udim-core](#udim-core)) |
 
@@ -1872,13 +1874,23 @@ sans tuile). Le code upstream travaille sans changement sur la tuile du contexte
   partagé agrandie à sa tuile, comme l'exportait l'ère atlas ; un calque limité à l'objet d'une tuile (et ses masques)
   sur cette tuile, le fond ailleurs.
 
+**Points d'appel (D2f).** Le raytrace et son bake tracent le maillage fusionné, dont les uv restent celles de l'atlas :
+le proxy des tuiles, chacune à la résolution de sa case.
+- `util_layer.c` : dans `layers_flatten`, un calque à tuiles est composé de ses tuiles, chacune dans sa case
+  (`util_udim_flatten_layer`, comme l'export Visible), quand le flatten est celui du raytrace.
+- `render_path_raytrace.c` : les deux flatten de `render_path_raytrace_commands` (textures du path tracer) passent par
+  `util_udim_flatten_atlas`.
+- `render_path_raytrace_bake.c` : le flatten du bake Lightmap aussi ; le bake raytracé (Occlusion, Lightmap, Bent
+  Normal, Thickness), fait dans l'atlas, est rendu à chaque tuile depuis sa case, agrandie à la résolution des tuiles
+  (`util_udim_bake_copy`, au lieu du `copy_pass`), les tuiles dilatées ensuite comme des tuiles peintes.
+
 **Règle.** Calques et masques à tuiles quand la table a au moins deux tuiles et `uv_map != 1`, sauf un calque limité
 à un objet sans tuile ; un masque suit son calque. Une tuile qui apparaît reçoit le fond de chaque calque (son texel
 (0, 0)) ; une qui disparaît est libérée ; un calque qui passe aux tuiles garde sa texture sur la tuile du contexte.
 Un emplacement d'undo ne tient que les tuiles qu'il a sauvées ; s'il avait sauvé tout le calque, il reçoit à
 l'échange les tuiles apparues depuis. UDIM coupé : chaque calque revient à une texture.
 
-Pour régénérer : `git diff 06655d76 -- <les vingt-cinq fichiers>` (`06655d76` : `studio` avant le lot D2), sauf le hunk
+Pour régénérer : `git diff 06655d76 -- <les vingt-sept fichiers>` (`06655d76` : `studio` avant le lot D2), sauf le hunk
 [bake-derivative](#bake-derivative) de `render_path_paint.c` (diff contre une copie du fichier où il est défait) ;
 `iron.h` porte aussi ocio-import, `util_mesh.c` udim-material-uv et udim-tile-limit, `render_path_paint.c`,
 `make_texcoord.c` et `uniforms.c` udim-material-uv, `uniforms.c` aussi ocio-viewport et udim-tile-limit, `util_layer.c`
@@ -1898,9 +1910,11 @@ tuile, calque limité dans sa case, cases vides noires, aussi juste après l'imp
 résolution des tuiles, Export d'un masque par tuile (D2d) ; `.arm` : clé `tiles` la dernière, chaque tuile de chaque
 calque, blob upstream en grille (masque compris) ou tuile de l'objet d'un calque limité, réouverture avec les mêmes
 tuiles, exports par tuile et Visible identiques au bit près avant et après, resauvé identique ; fixture de l'ère atlas
-(`.tests/fixtures/udim_atlas/strip.arm`) découpée, export par tuile identique à celui du build D1 (D2e).
-`.tests/udim_app.sh` : les exports par tuile, par jeu de
-textures et les presets studio (`layer()`) passent sur les calques à tuiles. Au 2026-09-27 : 71 contrôles passent.
+(`.tests/fixtures/udim_atlas/strip.arm`) découpée, export par tuile identique à celui du build D1 (D2e) ; flatten du
+raytrace en grille (l'upstream garde la tuile du contexte), vue path trace avec la couleur de chaque tuile, bakes
+Lightmap et Occlusion du nœud Bake Texture rendus à chaque tuile (D2f). `.tests/udim_app.sh` : les exports par tuile,
+par jeu de textures et les presets studio (`layer()`) passent sur les calques à tuiles ; conseil de résolution par
+tuile. Au 2026-09-27 : 75 contrôles passent.
 
 **Signes que l'upstream l'a changé.** `gpu_delete_texture`, `gpu_begin`, `history_copy_to_undo`, `history_paint` ou
 `slot_layer_swap` réécrits ; le bloc `tex_coord_atlas` de `make_mesh_run` ou le bloc `atlas_uv` de
@@ -1909,9 +1923,16 @@ textures et les presets studio (`layer()`) passent sur les calques à tuiles. Au
 `render_path_paint_commands_paint` réorganisées ; les caches de `util_uv.c` renommés ; `layers_merge_layer`,
 `layers_apply_mask` ou `layers_draw_mesh_materials` réécrits, `layers_flatten` qui ne passe plus par
 `layers_udim_tile_slot` ; la boucle d'aplatissement d'`export_texture_run_layers` ou le calcul de `udim_slot`
-réorganisés.
+réorganisés ; les flatten de `render_path_raytrace_commands` ou le `copy_pass` de `render_path_raytrace_bake_commands`
+déplacés.
 
-**Non couvert.** Raytrace (D2f). Images clés de la timeline : origines et images clés gardent une texture par
+**Non couvert.** Raytrace : le proxy de l'atlas donne à chaque tuile la résolution de sa case (projet / côté de la
+grille), pour le path tracer comme pour les bakes raytracés, agrandis ensuite à la résolution des tuiles ; quand le
+path tracer trace les objets un par un (surcharges de matériau des maillages visibles, objets qui bougent, timeline en
+lecture), leurs uv locales lisent la grille entière (faux sur un projet UDIM). Le code upstream de l'ère atlas
+(`layers_udim_remap`, les branches de recadrage d'`export_texture_run_layers`, le `udim` de `make_paint_run_context`)
+reste en place : un calque limité à l'objet d'une tuile est à tuiles dès que la table en a deux, ces chemins ne
+servent plus qu'entre un changement de table et la synchronisation suivante. Images clés de la timeline : origines et images clés gardent une texture par
 calque, celle de la tuile du contexte (la sauvegarde la recopie sur elle-même, sans perte) ; un calque de sculpt
 n'est pas à tuiles. Export des calques de sculpt
 (`export_obj.c`, masques lus sur la tuile du contexte) et Apply Displacement (`util_mesh_apply_displacement`, upstream

@@ -920,40 +920,29 @@ static void test_fs_log(const char *work) {
 	CHECK(!studio_fs_append(path, "x", 1), "append: missing folder");
 }
 
-// ---- Conseil de résolution UDIM (lot D0) -----------------------------------------------------------------------------
+// ---- Conseil de résolution UDIM (lot D0, textures par tuile depuis D2f) -----------------------------------------------
 
-static void check_hint(int tiles, int stride, int rx, int ry, int bits, const char *want) {
-	char *got = studio_udim_hint(tiles, stride, rx, ry, bits);
-	CHECK(want == NULL ? got == NULL : got != NULL && strcmp(got, want) == 0, "udim hint %d %d %dx%d %d:\n    got  %s\n    want %s", tiles, stride, rx, ry,
-	      bits, got != NULL ? got : "NULL", want != NULL ? want : "NULL");
+static void check_hint(int tiles, int rx, int ry, int bits, const char *want) {
+	char *got = studio_udim_hint(tiles, rx, ry, bits);
+	CHECK(want == NULL ? got == NULL : got != NULL && strcmp(got, want) == 0, "udim hint %d %dx%d %d:\n    got  %s\n    want %s", tiles, rx, ry, bits,
+	      got != NULL ? got : "NULL", want != NULL ? want : "NULL");
 	free(got);
 }
 
 static void test_udim_hint(void) {
-	// ARMORPAINT_UDIM.md §3 : 5-9 tuiles en grille 3×3, 6K pour 2K par tuile, 12K et 3,6 Go le calque 16 bits pour 4K
-	check_hint(6, 3, 4096, 4096, 16,
-	           "UDIM: 6 tiles, 3x3 grid in the 4096 px layers: 1365 px per tile. For 2048 px per tile: project at 6144 px (custom, 906 MB per 16 bit "
-	           "layer). For 4096 px per tile: project at 12288 px (custom, 3.6 GB per 16 bit layer, 1 undo step).");
-	check_hint(2, 2, 4096, 4096, 8,
-	           "UDIM: 2 tiles, 2x2 grid in the 4096 px layers: 2048 px per tile. For 4096 px per tile: project at 8192 px (805 MB per 8 bit layer, 4 "
-	           "undo steps).");
-	check_hint(4, 2, 16384, 16384, 32, "UDIM: 4 tiles, 2x2 grid in the 16384 px layers: 8192 px per tile.");
-	check_hint(64, 8, 4096, 4096, 8,
-	           "UDIM: 64 tiles, 8x8 grid in the 4096 px layers: 512 px per tile. For 2048 px per tile: project at 16384 px (3.2 GB per 8 bit layer, 1 "
-	           "undo step). For 4096 px per tile: out of reach, 2048 px at most (project at 16384 px).");
-	check_hint(5, 3, 4096, 2048, 8,
-	           "UDIM: 5 tiles, 3x3 grid in the 4096x2048 px layers: 1365x682 px per tile. For 2048 px per tile: project at 6144 px (custom, 453 MB per 8 "
-	           "bit layer). For 4096 px per tile: project at 12288 px (custom, 1.8 GB per 8 bit layer, 1 undo step).");
-	check_hint(3, 2, 2048, 2048, 8,
-	           "UDIM: 3 tiles, 2x2 grid in the 2048 px layers: 1024 px per tile. For 2048 px per tile: project at 4096 px (201 MB per 8 bit layer). For "
-	           "4096 px per tile: project at 8192 px (805 MB per 8 bit layer, 4 undo steps).");
-	check_hint(1, 1, 4096, 4096, 8, NULL);   // Une tuile : pas d'UDIM actif
-	check_hint(10, 3, 4096, 4096, 8, NULL);  // Plus de tuiles que de cases
-	check_hint(4, 2, 4096, 4096, 12, NULL);  // Bits inconnus
-	check_hint(4, 2, 0, 4096, 8, NULL);      // Résolution nulle
-	check_hint(4, 2, 20000, 4096, 8, NULL);  // Au-delà de 16384
-	check_hint(4, 65, 4096, 4096, 8, NULL);  // Grille absurde
-	check_hint(-3, -2, 4096, 4096, 8, NULL); // Valeurs négatives
+	// Un calque : 3 textures de 4 canaux par tuile, à la résolution du projet
+	check_hint(6, 4096, 4096, 16, "UDIM: 6 tiles, each with its own 4096 px textures: 2.4 GB per 16 bit layer.");
+	check_hint(2, 4096, 4096, 8, "UDIM: 2 tiles, each with its own 4096 px textures: 403 MB per 8 bit layer.");
+	check_hint(4, 16384, 16384, 32, "UDIM: 4 tiles, each with its own 16384 px textures: 51.5 GB per 32 bit layer.");
+	check_hint(64, 2048, 2048, 8, "UDIM: 64 tiles, each with its own 2048 px textures: 3.2 GB per 8 bit layer.");
+	check_hint(5, 4096, 2048, 8, "UDIM: 5 tiles, each with its own 4096x2048 px textures: 503 MB per 8 bit layer.");
+	check_hint(3, 1024, 1024, 16, "UDIM: 3 tiles, each with its own 1024 px textures: 75 MB per 16 bit layer.");
+	check_hint(1, 4096, 4096, 8, NULL);   // Une tuile : pas d'UDIM actif
+	check_hint(65, 4096, 4096, 8, NULL);  // Plus que les 64 tuiles tenues
+	check_hint(4, 4096, 4096, 12, NULL);  // Bits inconnus
+	check_hint(4, 0, 4096, 8, NULL);      // Résolution nulle
+	check_hint(4, 20000, 4096, 8, NULL);  // Au-delà de 16384
+	check_hint(-3, 4096, 4096, 8, NULL);  // Valeurs négatives
 }
 
 int main(int argc, char **argv) {

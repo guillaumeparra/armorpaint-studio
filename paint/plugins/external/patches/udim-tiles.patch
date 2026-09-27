@@ -358,6 +358,56 @@ index 014dae6..e9b0c57 100644
  	if (g_config->dilate_radius > 0 && !g_context->paint2d) {
  		util_uv_cache_dilate_map();
  		layers_make_temp_img();
+diff --git a/paint/sources/render/render_path_raytrace.c b/paint/sources/render/render_path_raytrace.c
+index ddf6046c0..028539650 100644
+--- a/paint/sources/render/render_path_raytrace.c
++++ b/paint/sources/render/render_path_raytrace.c
+@@ -437,7 +437,7 @@ void render_path_raytrace_commands(bool use_live_layer) {
+ 			render_path_raytrace_build_env_cdf(scene_world->envmap);
+ 		}
+ 
+-		slot_layer_t *l = layers_flatten(true, NULL);
++		slot_layer_t *l = util_udim_flatten_atlas(true); // STUDIO-PATCH(udim-tiles): tiled layers composed into their cells
+ 		gpu_raytrace_set_textures(l->texpaint, l->texpaint_nor, l->texpaint_pack, saved_envmap, bnoise_sobol, bnoise_scramble, bnoise_rank,
+ 		                          render_path_raytrace_env_cdf);
+ 	}
+@@ -456,7 +456,7 @@ void render_path_raytrace_commands(bool use_live_layer) {
+ 				layer->texpaint_pack = render_path_paint_live_layer->texpaint_pack;
+ 			}
+ 		}
+-		layers_flatten(true, NULL);
++		util_udim_flatten_atlas(true); // STUDIO-PATCH(udim-tiles): tiled layers composed into their cells
+ 		if (is_live) {
+ 			layer->texpaint      = _texpaint;
+ 			layer->texpaint_nor  = _texpaint_nor;
+diff --git a/paint/sources/render/render_path_raytrace_bake.c b/paint/sources/render/render_path_raytrace_bake.c
+index 93a642603..85340d9c5 100644
+--- a/paint/sources/render/render_path_raytrace_bake.c
++++ b/paint/sources/render/render_path_raytrace_bake.c
+@@ -115,7 +115,7 @@ bool render_path_raytrace_bake_commands(void (*parse_paint_material)(bool)) {
+ 		if (g_context->bake_type == BAKE_TYPE_LIGHTMAP) {
+ 			gpu_texture_t *_texpaint   = g_context->layer->texpaint;
+ 			g_context->layer->texpaint = bake_texture_node_texpaint;
+-			slot_layer_t *flat         = layers_flatten(true, NULL);
++			slot_layer_t *flat         = util_udim_flatten_atlas(true); // STUDIO-PATCH(udim-tiles): tiled layers composed into their cells
+ 			tex2                       = flat->texpaint;
+ 			g_context->layer->texpaint = _texpaint;
+ 		}
+@@ -149,9 +149,11 @@ bool render_path_raytrace_bake_commands(void (*parse_paint_material)(bool)) {
+ 
+ 		i32   id          = g_context->layer->id;
+ 		char *texpaint_id = string("texpaint%d", id);
+-		render_path_set_target(texpaint_id, NULL, NULL, GPU_CLEAR_NONE, 0, 0.0);
+-		render_path_bind_target("baketex2", "tex");
+-		render_path_draw_shader("Scene/copy_pass/copy_pass");
++		if (!util_udim_bake_copy(texpaint_id, "baketex2")) { // STUDIO-PATCH(udim-tiles): tiled layer, each tile from its cell
++			render_path_set_target(texpaint_id, NULL, NULL, GPU_CLEAR_NONE, 0, 0.0);
++			render_path_bind_target("baketex2", "tex");
++			render_path_draw_shader("Scene/copy_pass/copy_pass");
++		}
+ 
+ #ifdef IRON_METAL
+ 		i32 samples_per_frame = 4;
 diff --git a/paint/sources/slots/slot_layer.c b/paint/sources/slots/slot_layer.c
 index c7c5fad2a..b7d3df10c 100644
 --- a/paint/sources/slots/slot_layer.c
@@ -664,7 +714,7 @@ index 000b47330..0981ab3e8 100644
  		return util_mesh_udim_active() ? util_mesh_atlas_stride() : 1.0;
  	}
 diff --git a/paint/sources/util/util_layer.c b/paint/sources/util/util_layer.c
-index 215a18b9c..1f23b013f 100644
+index 215a18b9c..b05a61eff 100644
 --- a/paint/sources/util/util_layer.c
 +++ b/paint/sources/util/util_layer.c
 @@ -926,6 +926,9 @@ void layers_merge_layer(slot_layer_t *l0, slot_layer_t *l1, bool use_mask) {
@@ -688,7 +738,7 @@ index 215a18b9c..1f23b013f 100644
  }
  
  static gpu_texture_t *layers_udim_a    = NULL;
-@@ -1166,7 +1171,8 @@ slot_layer_t *layers_flatten(bool height_to_normal, slot_layer_t_array_t *layers
+@@ -1166,13 +1171,15 @@ slot_layer_t *layers_flatten(bool height_to_normal, slot_layer_t_array_t *layers
  		}
  
  		// Flattened layers are in shared atlas space
@@ -698,6 +748,13 @@ index 215a18b9c..1f23b013f 100644
  		if (tile_slot == -2) { // STUDIO-PATCH(udim-tile-limit): the layer of a tile without a slot has no cell in the atlas
  			continue;
  		}
+ 		if (tile_slot >= 0) {
+ 			l1 = layers_udim_remap(l1, l1masks != NULL ? &mask : NULL, tile_slot, false);
+ 		}
++		l1 = util_udim_flatten_layer(l1, l1masks != NULL ? &mask : NULL); // STUDIO-PATCH(udim-tiles): the raytracer's atlas
+ 
+ 		if (l1->paint_base) {
+ 			draw_begin(layers_temp_image, false, 0); // Copy to temp
 diff --git a/paint/sources/util/util_mesh.c b/paint/sources/util/util_mesh.c
 index 669245e75..a17edc26e 100644
 --- a/paint/sources/util/util_mesh.c

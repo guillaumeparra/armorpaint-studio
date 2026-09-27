@@ -870,22 +870,22 @@ rassemblé d'un objet du fichier à l'autre) et un jeu de textures par matériau
 triangle à cheval sur deux tuiles est coupé le long de la frontière.
 Un fichier dont une uv sort des tuiles 1001-1990 (uv négative, u ≥ 10) ou qui a plus de 64 tuiles est refusé avec un
 message, et le projet garde son maillage. Un objet sans uv est importé sans tuile, avec un message : les calques UDIM
-ne le peignent pas. ArmorPaint peint toutes les tuiles dans chaque texture de calque, rangées en grille (côté : racine
-carrée du nombre de tuiles arrondie au-dessus, 8 au plus, soit 64 tuiles) : une tuile a la résolution du projet divisée
-par ce côté (projet 4096, 6 tuiles → grille 3 × 3 → 1365 pixels par tuile). Après l'import, la barre d'état le dit,
-avec la résolution de projet qu'il faut pour 2048 et 4096 pixels par tuile et la mémoire d'un calque
-(`studio_udim.c` ; dans la console seule si l'import a affiché un avertissement). Lot D2 (branche `d2`) : chaque
-tuile a ses propres textures, à la résolution du projet ; la grille et ce message de résolution disparaissent au
-sous-lot D2f. Per UDIM Tile écrit chaque tuile à sa résolution, sans recadrage ni ré-agrandissement (D2d). Le `.arm`
-garde les tuiles de chaque calque ; un ArmorPaint officiel l'ouvre et y lit la grille, avec sa perte ; un projet
-d'avant D2 (grille) est découpé dans ses tuiles à l'ouverture (D2e). En Visible,
-un maillage UDIM donne la grille entière, chaque tuile réduite dans sa case (avertissement du préflight). Au-delà de 64 tuiles (objets
-`nom.1xxx` ajoutés ou renommés), les suivantes ne sont ni peintes ni exportées : message, et le préflight bloque
-l'export studio (patch udim-tile-limit).
+ne le peignent pas. Chaque tuile a ses propres textures de calque, à la résolution du projet (lot D2) : la mémoire
+d'un calque est multipliée par le nombre de tuiles. Après l'import, la barre d'état le dit (« UDIM: 6 tiles, each with
+its own 4096 px textures: 2.4 GB per 16 bit layer. », `studio_udim.c` ; dans la console seule si l'import a affiché un
+avertissement). Per UDIM Tile écrit chaque tuile à sa résolution, sans recadrage ni ré-agrandissement. En Visible, un
+maillage UDIM donne une grille des tuiles (côté : racine carrée du nombre de tuiles arrondie au-dessus, 8 au plus),
+chaque tuile réduite dans sa case (avertissement du préflight). Le `.arm` garde les tuiles de chaque calque ; un
+ArmorPaint officiel l'ouvre et y lit cette grille, avec sa perte ; un projet d'avant D2 (grille) est découpé dans ses
+tuiles à l'ouverture. Le path tracer et les bakes raytracés (Occlusion, Lightmap, Bent Normal, Thickness) passent eux
+aussi par la grille, où une tuile a la résolution de sa case (projet 4096, 6 tuiles → grille 3 × 3 → 1365 pixels par
+tuile) : un bake raytracé est ensuite agrandi dans chaque tuile. Au-delà de 64 tuiles (objets `nom.1xxx` ajoutés ou
+renommés), les suivantes ne sont ni peintes ni exportées : message, et le préflight bloque l'export studio (patch
+udim-tile-limit).
 
 Les matériaux lisent les uv UDIM du fichier : un bruit procédural ou un dégradé est continu d'une tuile à sa voisine,
-comme dans le DCC, sur un calque partagé comme sur le calque d'une tuile (patch udim-material-uv ; en vue 2D, ils
-gardent l'espace de la case). Per UDIM Tile avec des jeux de textures : les maps de chaque jeu pour ses tuiles
+comme dans le DCC, sur un calque de toutes les tuiles comme sur le calque d'une tuile (patch udim-material-uv ; en vue
+2D, ceux de la tuile choisie dans le menu de la vue). Per UDIM Tile avec des jeux de textures : les maps de chaque jeu pour ses tuiles
 (`<fichier>_<jeu>_<canal>.<tuile>` à l'export upstream, `<atlas>` et `<UDIM>` dans un preset studio ; patch
 udim-export-sets). Renommer un objet dans l'onglet Meshes garde sa tuile : le champ ne montre que le nom devant
 `.1011`, et `torso` tapé pour `skin.1011` donne `torso.1011` (patch udim-tile-name).
@@ -1431,8 +1431,8 @@ int   studio_ocio_import_reconvert(void);        // recharge et reconvertit les 
 .tests/proc.sh [dossier de travail]    # processus (C1)
 .tests/obj.sh [dossier de travail]     # import OBJ (patches obj-global-indices, obj-float-exponent, udim-import) ; FUZZ=<n> pour le nombre de mutations
 .tests/fbx.sh [dossier de travail]     # import FBX (patch fbx-split) : splits = upstream, UDIM, matériaux, fuzz ; FUZZ=<n>
-.tests/udim_app.sh [dossier]           # UDIM dans l'app (lot D0) : import OBJ/FBX, refus, ajout, 70 tuiles (atlas, peinture, export), conseil de résolution, layer() par tuile
-.tests/udim_tiles_app.sh [dossier]     # jeu de textures par tuile (lot D2, patch udim-tiles) : opérations de calque, undo, table qui change (D2a) ; peinture à la couture, undo par pas, ortho, xray, symétrie, cartes, pipettes, remplissages, clone, bakes par tuile et high poly (D2b, patch bake-derivative) ; flatten, fusions, masques, groupes, surcharges de matériau, ColorID → masque par tuile (D2c) ; export par tuile identique au bit près à un projet d'une tuile, Visible en grille, par objet, Selected, masque exporté par tuile (D2d) ; .arm : tuiles sauvées, blob en grille pour l'upstream, aller-retour au bit près, migration de l'ère atlas (D2e)
+.tests/udim_app.sh [dossier]           # UDIM dans l'app (lot D0) : import OBJ/FBX, refus, ajout, 70 tuiles (plafond des calques, peinture, export), conseil de résolution, layer() par tuile
+.tests/udim_tiles_app.sh [dossier]     # jeu de textures par tuile (lot D2, patch udim-tiles) : opérations de calque, undo, table qui change (D2a) ; peinture à la couture, undo par pas, ortho, xray, symétrie, cartes, pipettes, remplissages, clone, bakes par tuile et high poly (D2b, patch bake-derivative) ; flatten, fusions, masques, groupes, surcharges de matériau, ColorID → masque par tuile (D2c) ; export par tuile identique au bit près à un projet d'une tuile, Visible en grille, par objet, Selected, masque exporté par tuile (D2d) ; .arm : tuiles sauvées, blob en grille pour l'upstream, aller-retour au bit près, migration de l'ère atlas (D2e) ; raytrace : flatten en grille, path trace, bakes Lightmap et Occlusion rendus à chaque tuile (D2f)
 .tests/sg.sh [dossier de travail]     # ShotGrid hors app : sidecar (C2), noms des exports (B3), moteur (C3), publish (C4), mode dégradé et file d'attente (C5) ; Toolkit de .shotgrid/
 .tests/publish_app.sh [dossier]        # publish ShotGrid (C4) dans l'app, site simulé : op publish, fenêtre Publish (Qt offscreen), op publish en --background ; Versions de review ; copie publiée rouverte sans le dossier de travail ; PY=<python PySide6>
 .tests/sg_context_app.sh [dossier]     # contexte et mode dégradé ShotGrid (C5) dans l'app, site simulé : contexte gardé dans le .arm, site coupé (mode fichier, retour trouvé au repos), coupure en plein publish (file rejouée), journal d'audit, sonde en ligne et journal envoyé au site

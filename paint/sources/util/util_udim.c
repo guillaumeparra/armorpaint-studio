@@ -1767,7 +1767,7 @@ static void udim_atlas_draw(slot_layer_t *l, gpu_texture_t *view, gpu_texture_t 
 		i32 slot = util_mesh_udim_slot(tile);
 		util_udim_set_tile(tile);
 		draw_begin(target, false, 0);
-		draw_set_pipeline(pipes_copy);
+		draw_set_pipeline(udim_copy_pipe(target->format));
 		draw_scaled_image(view, (slot % stride) * cw, (slot / stride) * ch, cw, ch);
 		draw_set_pipeline(NULL);
 		draw_end();
@@ -1813,7 +1813,7 @@ slot_layer_t *util_udim_atlas_layer(slot_layer_t *l, gpu_texture_t **mask) {
 				layers_merge_layer(tl, masks->buffer[j], false);
 			}
 			draw_begin(merged, false, 0);
-			draw_set_pipeline(pipes_copy);
+			draw_set_pipeline(udim_copy_pipe(merged->format));
 			draw_scaled_image(temp, (slot % stride) * cw, (slot / stride) * ch, cw, ch);
 			draw_set_pipeline(NULL);
 			draw_end();
@@ -1838,6 +1838,57 @@ bool util_udim_export_mask(slot_layer_t *l, char *file) {
 		}
 		util_udim_set_tile(tile);
 		iron_write_png(string("%s.%d.png", base, tile), gpu_get_texture_pixels(l->texpaint), l->texpaint->width, l->texpaint->height, 3); // RRR1
+	}
+	util_udim_set_tile(saved);
+	return true;
+}
+
+// Raytrace (lot D2f)
+
+static bool udim_flatten_atlas = false;
+
+slot_layer_t *util_udim_flatten_atlas(bool height_to_normal) {
+	udim_flatten_atlas = true;
+	slot_layer_t *flat = layers_flatten(height_to_normal, NULL);
+	udim_flatten_atlas = false;
+	return flat;
+}
+
+slot_layer_t *util_udim_flatten_layer(slot_layer_t *l, gpu_texture_t **mask) {
+	return udim_flatten_atlas && !gpu_in_use && util_udim_layer_tiled(l) ? util_udim_atlas_layer(l, mask) : l;
+}
+
+bool util_udim_bake_copy(char *target, char *bake) {
+	render_target_t *rt  = any_map_get(render_path_render_targets, target);
+	render_target_t *src = any_map_get(render_path_render_targets, bake);
+	if (rt == NULL || src == NULL || udim_store_of(rt->_image) == NULL || udim_in_tile_loop()) {
+		return false;
+	}
+	if (_render_path_current_image != NULL) {
+		render_path_end();
+	}
+	if (gpu_in_use) {
+		return false;
+	}
+	gpu_texture_t *view   = rt->_image;
+	gpu_texture_t *from   = src->_image;
+	i32            saved  = udim_cur;
+	i32            stride = util_mesh_atlas_stride();
+	f32            cw     = from->width / (f32)stride;
+	f32            ch     = from->height / (f32)stride;
+	for (i32 i = 0; i < udim_table_count; ++i) {
+		i32 tile = udim_table[i];
+		if (!udim_atlas_has(g_context->layer, tile)) {
+			continue;
+		}
+		i32 slot = util_mesh_udim_slot(tile);
+		util_udim_set_tile(tile);
+		draw_begin(view, false, 0); // The tile saved in the undo slot of the step when first drawn to (copy on write)
+		draw_set_pipeline(udim_copy_pipe(view->format));
+		draw_scaled_sub_image(from, (slot % stride) * cw, (slot / stride) * ch, cw, ch, 0, 0, view->width, view->height);
+		draw_set_pipeline(NULL);
+		draw_end();
+		udim_dirty_add(tile); // Dilated by render_path_paint_dilate()
 	}
 	util_udim_set_tile(saved);
 	return true;

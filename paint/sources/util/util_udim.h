@@ -3,8 +3,9 @@
 // STUDIO-PATCH(udim-core): UDIM of lot D1, see paint/plugins/external/PATCHES.md and ARMORPAINT_UDIM.md
 //
 // A UDIM mesh keeps one paint object per tile, named "<object>.<tile>" (body.1001, body.1002...), as the upstream
-// format has it: the .arm stays readable by upstream ArmorPaint and by older studio builds. The shared layers hold every
-// tile in its own cell of the layer atlas (util_mesh.c).
+// format has it: the .arm stays readable by upstream ArmorPaint and by older studio builds. The layers hold a texture
+// per tile (tile context, lot D2); the merged mesh keeps its atlas uvs, a cell per tile (util_mesh.c), as the proxy of
+// the raytracer and its bake (lot D2f).
 
 // Material uvs of the udim layers: those of the DCC, tex + (tile u, -tile v) with the v flip of the stored uvs, continuous
 // from a tile to its neighbours. util_udim_tile_uv() gives (tile u, -tile v) of a tile object, for the layers of a single
@@ -15,8 +16,7 @@ vec2_t util_udim_tile_uv(object_t *object);
 vec2_t util_udim_offset(object_t *object);
 
 // Draws the "paint" context. The udim layers are painted object by object, each object with its offset, instead of
-// through the merged mesh; the merged mesh stays for the uv, triangle and dilate maps, the raytracer, the bake and the
-// pickers, whose shaders read the layers in atlas space.
+// through the merged mesh (a tiled layer: the objects of the tile of the context, in their local uvs).
 void util_udim_draw_paint_meshes();
 
 // util_mesh.c: the objects of the merged mesh
@@ -99,6 +99,15 @@ void          util_udim_export_end();
 slot_layer_t *util_udim_atlas_layer(slot_layer_t *l, gpu_texture_t **mask);
 void          util_udim_atlas_texture(slot_layer_t *l, gpu_texture_t *view, gpu_texture_t *target); // One texture of l
 bool          util_udim_export_mask(slot_layer_t *l, char *file); // Layer > Export of a tiled mask: "<file>.<tile>.png"
+
+// Raytrace (lot D2f). The raytracer and its bake trace the merged mesh, whose uvs are those of the atlas: the proxy of
+// the tiles, each at the resolution of its cell. util_udim_flatten_atlas() is layers_flatten() with each tiled layer
+// composed from its tiles into their cells, as the Visible export does (util_udim_atlas_layer), through
+// util_udim_flatten_layer(). util_udim_bake_copy() puts a raytraced bake, done in atlas space, into each tile of the
+// layer from its cell, the tiles then dilated as painted ones; false when the target is not tiled.
+slot_layer_t *util_udim_flatten_atlas(bool height_to_normal);
+slot_layer_t *util_udim_flatten_layer(slot_layer_t *l, gpu_texture_t **mask); // In layers_flatten(): l or its composite
+bool          util_udim_bake_copy(char *target, char *bake);                  // Render target names
 
 // .arm (lot D2e). A tiled layer saves each tile in its layer data (tiles: {tile, texpaint, texpaint_nor, texpaint_pack},
 // the last key: upstream ArmorPaint decodes the keys in order and reads past it). Its own textures get what upstream

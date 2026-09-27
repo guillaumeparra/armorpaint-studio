@@ -2,7 +2,7 @@
 
 > **Décision 2026-09-26 : option B retenue** (un jeu de textures par tuile, « contexte de tuile », §6). Les options C et D sont écartées ; C reste une évolution possible de B si le nombre de draws devenait un problème (100+ tuiles).
 > **2026-09-27 : lots D0 et D1 faits** (§3, §7). D1 garde un objet de peinture par tuile : la tuile-donnée, le maillage à plages et la migration passent au lot D2 (§7, « Lot D1 »).
-> **2026-09-27 : lot D2 lancé** (go sans la recette C6), plan au §7 « Lot D2 ». Le maillage à plages et la tuile-donnée passent en D3. Sous-lots D2a à D2e faits (§7, « Lot D2a » à « Lot D2e »).
+> **2026-09-27 : lot D2 fait** (go sans la recette C6), plan au §7 « Lot D2 ». Le maillage à plages et la tuile-donnée passent en D3. Sous-lots D2a à D2f faits (§7, « Lot D2a » à « Lot D2f »), branche `d2` fusionnée dans `studio`.
 > Document de réflexion à l'origine ; le §7 sert désormais de plan (chantier D de `ARMORPAINT_LOTS.md`). Il fait l'état des UDIM après le commit upstream `99156dfc` (« paint: paint across udims », 2026-09-15), liste les limites, compare quatre architectures et propose une feuille de route.
 > Base : branche `studio` au commit `fbde517a`. Estimations en **jours-homme**, avec les mêmes hypothèses que `ARMORPAINT_LOTS.md`.
 > ⚠️ **§5.2 de `ARMORPAINT_ANALYSE.md` est en partie périmé.** Depuis `99156dfc`, on peut peindre à travers les tuiles et les calques partagés ne sont plus dupliqués par tuile. Ce document le remplace pour tout ce qui touche aux UDIM.
@@ -704,6 +704,7 @@ et `studio_export.c`. Banc `.tests/udim_tiles_app.sh`, section 12 : 65 contrôle
   Displacement (`util_mesh_apply_displacement`, que l'upstream limite déjà au premier objet).
 - **Pour D2f** : le conseil de résolution affiché après l'import (`studio_udim.c`) parle encore de la grille de
   l'atlas (« 3x3 grid in the 128 px layers: 42 px per tile ») ; chaque tuile a désormais la résolution du projet.
+  *Fait en D2f.*
 
 ### Lot D2e (2026-09-27) : fait
 
@@ -732,6 +733,35 @@ lu par `.tests/arm_read.py` (armpack et lz4 en Python).
 - **Non traités** : les images clés de la timeline (origines et images clés gardent une texture par calque, celle de la
   tuile du contexte ; la sauvegarde la recopie sur elle-même, sans perte) ; les calques de sculpt ne sont pas à
   tuiles.
+
+### Lot D2f (2026-09-27) : fait
+
+Patch `udim-tiles` (points d'appel D2f, dans `util_layer.c`, `render_path_raytrace.c` et `render_path_raytrace_bake.c`),
+`util_udim.c` (patch `udim-core`). Banc `.tests/udim_tiles_app.sh`, section 14 : 75 contrôles en tout.
+- **Proxy du raytrace.** Le path tracer et le bake raytracé tracent le maillage fusionné, dont les uv restent celles
+  de l'atlas, une case par tuile. Leur flatten (`util_udim_flatten_atlas`) compose chaque calque à tuiles de ses
+  tuiles, chacune dans sa case, comme l'export Visible (`util_udim_flatten_layer`, dans `layers_flatten`) ; les
+  autres flatten gardent la tuile du contexte. La vue path trace montre chaque tuile avec sa peinture.
+- **Bake raytracé** (Occlusion, Lightmap, Bent Normal, Thickness, par le nœud Bake Texture : l'outil Bake est caché
+  dans l'upstream). Positions et normales (passe INIT) et rayons restent dans l'atlas ; le résultat va à chaque tuile
+  depuis sa case, agrandie à la résolution des tuiles (`util_udim_bake_copy`, au lieu du `copy_pass`), puis chaque
+  tuile est dilatée comme une tuile peinte. Le Lightmap lit la base des calques dans le flatten en grille.
+- **Qualité du proxy.** Chaque tuile y a la résolution de sa case : projet / côté de la grille (2 à 4 tuiles : la
+  moitié ; 5 à 9 : le tiers ; jusqu'à 64 : le huitième). Un bake Occlusion ou Lightmap d'un projet de 5 tuiles en
+  4096 px est calculé à 1365 px par tuile, puis agrandi. Un bake par tuile à pleine résolution (cibles du bake à
+  tuiles, une passe INIT et un lancer de rayons par tuile) reste possible si le besoin se confirme.
+- **Pipelines de copie.** Le composite en grille (export Visible, blob du `.arm`, proxy) dessinait toujours avec le
+  pipeline 8 bits ; il prend celui du format de la cible (16 et 32 bits).
+- **Nettoyage.** Le conseil de résolution après l'import (`studio_udim.c`) dit la résolution des textures de chaque
+  tuile et la mémoire d'un calque (« UDIM: 6 tiles, each with its own 4096 px textures: 2.4 GB per 16 bit layer. »).
+  Sections 4 et 10 d'`udim_app.sh` relues : elles testent toujours du vrai (le maillage fusionné garde une case par
+  tuile pour le proxy ; `layer()` lit les calques à tuiles depuis D2d), leurs libellés parlent des tuiles et non plus
+  de l'atlas. Le code upstream de l'ère atlas (`layers_udim_remap`, les recadrages d'`export_texture_run_layers`, le
+  `udim` de `make_paint_run_context`) reste en place, pour ne pas grossir le patch : un calque limité à l'objet d'une
+  tuile est à tuiles dès que la table en a deux, ces chemins ne servent qu'entre un changement de table et la
+  synchronisation suivante.
+- **Non traité** : quand le path tracer trace les objets un par un (surcharges de matériau des maillages visibles,
+  objets qui bougent, timeline en lecture), leurs uv locales lisent toute la grille, faux sur un projet UDIM.
 
 ---
 

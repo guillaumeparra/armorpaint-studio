@@ -1179,6 +1179,7 @@ slot_layer_t *layers_flatten(bool height_to_normal, slot_layer_t_array_t *layers
 		if (tile_slot >= 0) {
 			l1 = layers_udim_remap(l1, l1masks != NULL ? &mask : NULL, tile_slot, false);
 		}
+		l1 = util_udim_flatten_layer(l1, l1masks != NULL ? &mask : NULL); // STUDIO-PATCH(udim-tiles): the raytracer's atlas
 
 		if (l1->paint_base) {
 			draw_begin(layers_temp_image, false, 0); // Copy to temp
