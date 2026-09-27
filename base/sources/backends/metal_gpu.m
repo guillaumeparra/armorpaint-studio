@@ -175,6 +175,43 @@ void gpu_init_internal(int depth_buffer_bits, bool vsync) {
 	next_drawable();
 }
 
+// STUDIO-PATCH(metal-target-format): a Metal pipeline writes garbage into a render target of another pixel format than the
+// one it was compiled for. paint/ draws its RGBA32 pipelines (layer and mask merges, copies, draw_image) into the RGBA64 and
+// RGBA128 layers and export images of 16 and 32 bit projects: those draws use a variant of the pipeline compiled for the
+// format of the target, built on first use and kept with the pipeline.
+static void pipeline_release_targets(gpu_pipeline_t *pipeline) {
+	for (int i = 0; i < 8; ++i) {
+		id<MTLRenderPipelineState> pipe   = (__bridge_transfer id<MTLRenderPipelineState>)pipeline->impl.target_pipeline[i];
+		pipe                              = nil;
+		pipeline->impl.target_pipeline[i] = NULL;
+	}
+	MTLRenderPipelineDescriptor *desc = (__bridge_transfer MTLRenderPipelineDescriptor *)pipeline->impl.desc;
+	desc                              = nil;
+	pipeline->impl.desc               = NULL;
+}
+
+static id<MTLRenderPipelineState> pipeline_for_target(gpu_pipeline_t *pipeline) {
+	id<MTLRenderPipelineState> pipe = (__bridge id<MTLRenderPipelineState>)pipeline->impl.pipeline;
+	if (current_render_targets_count != 1 || pipeline->color_attachment_count != 1 || pipeline->impl.desc == NULL) {
+		return pipe;
+	}
+	gpu_texture_format_t format = current_render_targets[0]->format;
+	if (format >= 8 || convert_texture_format(format) == convert_texture_format(pipeline->color_attachment[0])) {
+		return pipe;
+	}
+	if (pipeline->impl.target_pipeline[format] == NULL) {
+		MTLRenderPipelineDescriptor *desc    = [(__bridge MTLRenderPipelineDescriptor *)pipeline->impl.desc copy];
+		desc.colorAttachments[0].pixelFormat = convert_texture_format(format);
+		NSError *error                       = nil;
+		id<MTLRenderPipelineState> target    = [get_metal_device() newRenderPipelineStateWithDescriptor:desc error:&error];
+		if (target == nil) {
+			return pipe;
+		}
+		pipeline->impl.target_pipeline[format] = (__bridge_retained void *)target;
+	}
+	return (__bridge id<MTLRenderPipelineState>)pipeline->impl.target_pipeline[format];
+}
+
 void gpu_begin_internal(gpu_clear_t flags, unsigned color, float depth) {
 	render_pass_desc = [MTLRenderPassDescriptor renderPassDescriptor];
 	for (int i = 0; i < current_render_targets_count; ++i) {
@@ -246,7 +283,7 @@ void gpu_execute_and_wait() {
 		}
 		render_pass_desc.depthAttachment.loadAction = MTLLoadActionLoad;
 		command_encoder                             = [command_buffer renderCommandEncoderWithDescriptor:render_pass_desc];
-		id<MTLRenderPipelineState> pipe             = (__bridge id<MTLRenderPipelineState>)current_pipeline->impl.pipeline;
+		id<MTLRenderPipelineState> pipe             = pipeline_for_target(current_pipeline); // STUDIO-PATCH(metal-target-format)
 		[command_encoder setRenderPipelineState:pipe];
 		id<MTLDepthStencilState> depth_state = (__bridge id<MTLDepthStencilState>)current_pipeline->impl.depth;
 		[command_encoder setDepthStencilState:depth_state];
@@ -322,7 +359,7 @@ void gpu_disable_scissor() {
 }
 
 void gpu_set_pipeline_internal(gpu_pipeline_t *pipeline) {
-	id<MTLRenderPipelineState> pipe = (__bridge id<MTLRenderPipelineState>)pipeline->impl.pipeline;
+	id<MTLRenderPipelineState> pipe = pipeline_for_target(pipeline); // STUDIO-PATCH(metal-target-format)
 	[command_encoder setRenderPipelineState:pipe];
 	id<MTLDepthStencilState> depth_state = (__bridge id<MTLDepthStencilState>)pipeline->impl.depth;
 	[command_encoder setDepthStencilState:depth_state];
@@ -414,6 +451,7 @@ void gpu_pipeline_destroy_internal(gpu_pipeline_t *pipeline) {
 	id<MTLDepthStencilState> depth_state = (__bridge_transfer id<MTLDepthStencilState>)pipeline->impl.depth;
 	depth_state                          = nil;
 	pipeline->impl.depth                 = NULL;
+	pipeline_release_targets(pipeline); // STUDIO-PATCH(metal-target-format)
 }
 
 void gpu_pipeline_compile(gpu_pipeline_t *pipeline) {
@@ -498,6 +536,10 @@ void gpu_pipeline_compile(gpu_pipeline_t *pipeline) {
 	NSError                     *errors     = nil;
 	MTLRenderPipelineReflection *reflection = nil;
 
+	// STUDIO-PATCH(metal-target-format): variants of a recompiled pipeline are stale. Only forgotten, not released: the
+	// fields of a destroyed pipeline are kept (gpu_pipeline_destroy works on a copy), as impl.pipeline below
+	memset(pipeline->impl.target_pipeline, 0, sizeof(pipeline->impl.target_pipeline));
+	pipeline->impl.desc     = (__bridge_retained void *)render_pipeline_desc;
 	pipeline->impl.pipeline = (__bridge_retained void *)[device newRenderPipelineStateWithDescriptor:render_pipeline_desc
 	                                                                                         options:MTLPipelineOptionBufferTypeInfo
 	                                                                                      reflection:&reflection

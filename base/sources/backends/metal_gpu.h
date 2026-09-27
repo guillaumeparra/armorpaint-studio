@@ -3,6 +3,8 @@
 typedef struct {
 	void *pipeline;
 	void *depth;
+	void *desc;               // STUDIO-PATCH(metal-target-format): descriptor kept to compile the variants below
+	void *target_pipeline[8]; // STUDIO-PATCH(metal-target-format): variant per render target format, see metal_gpu.m
 } gpu_pipeline_impl_t;
 
 typedef struct {
