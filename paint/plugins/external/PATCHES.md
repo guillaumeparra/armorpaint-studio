@@ -1809,7 +1809,7 @@ par tuile. À la fusion :
 | | |
 |---|---|
 | Fichiers | `paint/sources/history.c` (`history_merge_group`, `history_undo_merge_group`, `history_redo_merge_group`, `history_copy_merge_group`, `history_step_slots` et `history_fit_undo_slots` ajoutées ; `history_undo`, `history_redo`, `history_push`, `history_merge_layers`, `history_action_to_string`), `paint/sources/ui/tab_layers.c` (`tab_layers_draw_layer_context_menu_merge_group`), `paint/sources/types.h` (`history_step_t`), `paint/sources/enums.h` (`HISTORY_ACTION_MERGE_GROUP`), `paint/sources/functions.h` |
-| Commit studio | `COMMIT` sur la branche `studio` |
+| Commit studio | `abe46077` sur la branche `studio` |
 | Validé contre | upstream `85f6cf1c` (2026-09-27) |
 | Constaté | 2026-09-27 ; présent en `85f6cf1c` |
 
@@ -1846,7 +1846,7 @@ plante (`slot_layer_delete(NULL)`). Causes, dans `layers_merge_group` (`util_lay
   des calques qu'elle supprime. L'historique est vidé (`history_reset`, message dans la console), puis la fusion se
   fait sans pas.
 
-Pour régénérer : `git diff COMMIT^ COMMIT -- paint/sources/enums.h paint/sources/functions.h paint/sources/history.c
+Pour régénérer : `git diff abe46077^ abe46077 -- paint/sources/enums.h paint/sources/functions.h paint/sources/history.c
 paint/sources/types.h paint/sources/ui/tab_layers.c`. `enums.h` porte aussi [udim-import](#udim-import), donc
 `git diff upstream studio` mêle les deux patches.
 
