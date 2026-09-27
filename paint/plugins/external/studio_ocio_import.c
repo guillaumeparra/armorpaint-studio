@@ -983,6 +983,21 @@ bool studio_texture_set_color_space(const char *file, const char *color_space) {
 	return ok;
 }
 
+bool studio_texture_reload(const char *file) {
+	if (file == NULL || g_project == NULL || g_project->_ == NULL) {
+		return false;
+	}
+	asset_t_array_t *assets = g_project->_->assets;
+	for (int i = 0; i < (int)assets->length; i++) {
+		asset_t *a = assets->buffer[i];
+		if (a != NULL && a->file != NULL && strcmp(a->file, file) == 0) {
+			bool was_envmap = false;
+			return reload(a, &was_envmap);
+		}
+	}
+	return false;
+}
+
 int studio_ocio_import_reconvert(void) {
 	if (!oi.enabled || g_project == NULL || g_project->_ == NULL || !ocio_on()) {
 		return 0;

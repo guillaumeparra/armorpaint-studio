@@ -17,6 +17,7 @@
 #include "studio_sg_offline.h"
 #include "studio_shotgrid.h"
 #include "studio_workfiles.h"
+#include "subzero.h"
 
 // Appelé par plugins_init() (paint/plugins/plugins.c) quand WITH_EXTERNAL est défini, après l'enregistrement des
 // importeurs upstream : un module peut donc les remplacer. Chaque module studio s'enregistre ici au fur et à mesure
@@ -40,5 +41,6 @@ void external_init(void) {
 	studio_atlas_init();
 	studio_export_init();
 	studio_export_window_init();
+	subzero_init();
 	studio_batch_init(); // en dernier : vérifie la ligne de commande avec les presets et OCIO chargés (lot B7)
 }

@@ -97,6 +97,9 @@ slot_layer_t     *layers_merge_group(slot_layer_t *l);
 slot_layer_t     *layers_flatten(bool height_to_normal, slot_layer_t_array_t *layers);
 void              slot_layer_apply_mask(slot_layer_t *raw);
 void              slot_layer_to_paint_layer(slot_layer_t *raw);
+void              slot_layer_to_fill_layer(slot_layer_t *raw);
+bool              slot_layer_is_layer(slot_layer_t *raw);
+void              history_to_fill_layer(void);
 bool              slot_layer_is_group(slot_layer_t *raw);
 void              make_material_parse_mesh_material(void);
 extern bool       bake_texture_node_baking;
@@ -1204,8 +1207,8 @@ static minic_val_t mn_studio_layer_set_opacity(minic_val_t *a, int n) {
 
 // Opération sur le calque courant, comme les menus, avec son pas d'historique, finie tout de suite : "duplicate",
 // "delete", "clear", "invert" (masque), "merge_down" (Merge Down), "merge_group" (Merge Group d'un groupe, par son menu),
-// "apply_mask" (Apply Mask d'un masque), "undo", "redo", "sync" (util_udim_sync, fait par le viewport à chaque image). 1 si
-// fait.
+// "apply_mask" (Apply Mask d'un masque), "to_fill" (To Fill Layer d'un calque de peinture, avec le matériau courant),
+// "undo", "redo", "sync" (util_udim_sync, fait par le viewport à chaque image). 1 si fait.
 static minic_val_t mn_studio_layer_op(minic_val_t *a, int n) {
 	char         *op = minic_arg_p(a, n, 0);
 	slot_layer_t *l  = g_context->layer;
@@ -1251,6 +1254,10 @@ static minic_val_t mn_studio_layer_op(minic_val_t *a, int n) {
 		context_set_layer(l->parent);
 		make_material_parse_mesh_material();
 		g_context->layers_preview_dirty = true;
+	}
+	else if (strcmp(op, "to_fill") == 0 && slot_layer_is_layer(l) && l->fill_material == NULL) { // tab_layers.c, menu du calque
+		history_to_fill_layer();
+		slot_layer_to_fill_layer(l);
 	}
 	else if (strcmp(op, "undo") == 0) {
 		history_undo();

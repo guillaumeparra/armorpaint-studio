@@ -54,6 +54,7 @@ Modules, un par lot (voir `ARMORPAINT_LOTS.md` à la racine d'armorpaint) :
 | `tools/recette_c6.py`, `docs/` | C6 | 🟡 kit de recette prêt (outil de vérification, fiche, guide de l'artiste, runbook) ; recette sur le vrai site à faire |
 | `studio_export_window`, `assets/studio_export_window.py`, `studio_atlas` | B6 | ✅ fenêtre d'export Qt (PySide6) à la place de la boîte d'export : presets studio, espace OCIO, préflight en direct, nom des fichiers, jeux de textures, template et version ShotGrid (macOS) |
 | `studio_batch` | B7 | ✅ mode batch : `--background` sans fenêtre, options `--export-mode`, `--export-naming`, `--export-color-space`, rapport JSON (`--report`), code de retour 0/1/2 (macOS) |
+| `subzero`, `assets/subzero_*.py`, `studio_window`, `assets/studio_qt.py` | E0 à E4 | ✅ subzero : matériaux .sbs/.sbsar rendus par `sbsrender` de Designer, réglés dans une fenêtre Qt, envoyés comme matériaux ordinaires (macOS, un poste) |
 
 Build : `../base/make --compile` depuis `paint/`. Le log de démarrage affiche `studio: external <version>
 loaded`, puis une ligne par module.
@@ -84,7 +85,9 @@ l'emportent sur elles, pour le lanceur d'un show.
 | `STUDIO_AUDIT_SEND` | évènements du journal envoyés au site ShotGrid : motifs séparés par des virgules (`publish*,sg_*`), tous par défaut, `none` : aucun ; voir C5 |
 | `STUDIO_EXPORT_PRESETS` | presets d'export studio : dossiers ou fichiers `.json`, séparés par `:` (`;` sous Windows), prioritaires sur les presets livrés |
 | `STUDIO_EXPORT_COLOR_SPACE` | espace OCIO imposé aux textures de couleur des exports studio au démarrage (vide : celui du preset) ; voir « Fenêtre d'export (B6) » |
-| `STUDIO_PYTHON` | interpréteur Python 3 avec PySide6 de la fenêtre d'export (défaut : `STUDIO_SG_PYTHON`, puis `python3`) |
+| `STUDIO_PYTHON` | interpréteur Python 3 avec PySide6 des fenêtres d'export et subzero (défaut : `STUDIO_SG_PYTHON`, puis `python3`) |
+| `SUBZERO_WINDOW` | script de la fenêtre subzero à la place de `data/subzero_window.py` |
+| `SUBZERO_CACHE` | cache de subzero (.sbs cuits, aperçus) à la place de `~/Library/Caches/subzero` |
 | `STUDIO_EXPORT_WINDOW` | script de la fenêtre d'export à la place de `data/studio_export_window.py` |
 | `STUDIO_EXPORT_THREADS` | threads de composition et d'encodage des exports studio (défaut : cœurs matériels) |
 | `STUDIO_PREFS` | fichier des préférences studio à la place de `studio_prefs.json` ; en `--background`, seul moyen de les lire et de les écrire ; voir « Réglages (A5) » |
@@ -942,7 +945,7 @@ int   studio_append_mesh(char *path, int split);     // ajoute un maillage à ce
 char *studio_layer_masks(void);                      // masques d'objet des calques : "Layer 1=0 Layer 2=5 filter=0" (bancs)
 int   studio_layer_new_mask(int white);              // masque blanc (1) ou noir (0) sur le calque courant, devenu courant
 int   studio_layer_select(int i);                    // calque courant : le i-ième de la pile (0 en bas)
-int   studio_layer_op(char *op);                     // "duplicate", "delete", "clear", "invert" (masque), "merge_down", "merge_group" (par le menu), "apply_mask" (masque courant), "undo", "redo", "sync" (bancs)
+int   studio_layer_op(char *op);                     // "duplicate", "delete", "clear", "invert" (masque), "merge_down", "merge_group" (par le menu), "apply_mask" (masque courant), "to_fill" (To Fill Layer, matériau courant), "undo", "redo", "sync" (bancs)
 char *studio_layer_tree(void);                       // pile de bas en haut, « nom<parent » : "Layer 1 | Layer 2<Group 3 | Group 3" (bancs)
 int   studio_layer_set_parent(int i, int group);     // met le calque i dans le groupe d'indice group (-1 : hors groupe), comme un glisser-déposer
 int   studio_layer_set_opacity(float opacity);       // opacité du calque ou du masque courant (0 à 1), comme son curseur Opacity, avec son pas d'historique
@@ -1426,6 +1429,74 @@ int   studio_ocio_prefs_show(void);              // ouvre Preferences > Color ; 
 int   studio_ocio_import_reconvert(void);        // recharge et reconvertit les textures converties ; rend leur nombre
 ```
 
+## subzero : matériaux .sbs/.sbsar (E0 à E4)
+
+Ouvre un `.sbs` ou un `.sbsar` de Substance 3D Designer, montre ses paramètres comme Painter, les rend par
+`sbsrender` et en fait un **matériau ordinaire** d'ArmorPaint : un nœud Image Texture par texture, relié à la sortie
+PBR. Le projet s'ouvre ensuite sans subzero ni Designer. Usage personnel, un poste, sous la licence Designer de
+Guillaume ; aucun fichier Adobe dans le dépôt.
+
+- **Ouvrir** : menu **subzero** > « Open... », Import Asset ou glisser-déposer d'un `.sbs`/`.sbsar` (importeur
+  studio), ou `subzero_open()`.
+- **Rééditer** : sélectionner le matériau, puis subzero > « Edit Selected Material ». Un matériau est reconnu comme
+  matériau subzero par le dossier de ses textures, qui contient la recette `subzero.json`.
+- **`sbsrender`** : Preferences > subzero (préférence `subzero.sbsrender`). Vide : cherché dans
+  `/Applications/Adobe Substance 3D Designer*/`. Sur le poste de Guillaume, il vise la copie isolée
+  `~/Desktop/code/sbsrender/MacOS/sbsrender`. `sbscooker` est cherché dans le même dossier, et il faut pour les `.sbs`.
+  Au démarrage, le log affiche `subzero: sbsrender <version> (<chemin>)`, ou la raison de l'absence. Un chemin changé
+  dans l'onglet vaut tout de suite, fenêtre ouverte comprise.
+
+**Fenêtre** (`assets/subzero_window.py`, PySide6, même Python que la fenêtre d'export) :
+- vignettes des textures ; graphe (s'il y en a plusieurs), preset, graine (« Random »), taille (celle du projet par
+  défaut, ou 512 à 4096) ;
+- paramètres groupés, avec conditions `visibleif`, infobulles et « ↺ » par paramètre. Un preset remet les autres
+  valeurs par défaut. Les paramètres techniques sont fixés d'office et masqués : normale OpenGL, et bascules
+  `channel_*` sur les canaux d'ArmorPaint ;
+- **Outputs** : sortie → canal automatique par usage, modifiable. Une sortie sans canal dit pourquoi ;
+- nom du matériau, « Live », « Duplicate », « Send to ArmorPaint » (ensuite « Update »), « Open... », « Reload »
+  (après un enregistrement dans Designer).
+
+**Rendu.** Un réglage relâché (ou 300 ms après un réglage au clavier ou à la molette) lance un rendu, qui tue celui
+en cours. Tant que le matériau n'est pas envoyé, c'est un aperçu 512 dans le cache. Ensuite, avec **Live** (par
+défaut), le rendu se fait à la taille finale, directement dans le dossier du matériau, et ArmorPaint recharge ses
+textures : le viewport suit chaque réglage. Sans Live, aperçu 512, puis « Update ». Chaque rendu part d'un geste :
+aucun batch, aucun précalcul.
+
+**Temps** (M4, colorful_planks, 6 sorties) : aperçu 512 en 0,7 s environ ; de « Send » au matériau à jour, 2,1 à 2,3 s
+en 2048 (rendu 1,8 à 1,9 s, puis 0,3 à 0,4 s pour ArmorPaint).
+
+**Fichiers** : `<dossier du .arm>/<projet>_subzero/<Nom>/`, commun aux versions du projet (`robot_v003.arm` →
+`robot_subzero/`). Pour un projet jamais enregistré, un dossier est demandé une fois. « Duplicate » crée
+`<Nom>2`, `<Nom>3`…
+- textures `<Nom>_<canal>.tga` ; normale et hauteur en `.exr` (half) dans un projet en 16 ou 32 bits. `<Nom>` est un
+  seul mot (`ColorfulPlanks`) : les règles de nom d'ArmorPaint et d'OCIO (A4) ne voient que le canal, et les noms
+  d'assets restent uniques dans le projet ;
+- **décalques** : ArmorPaint multiplie la couleur par son alpha. Une couleur de base avec un alpha utile est donc
+  réécrite en RGB, et son alpha va dans `<Nom>_opacity.tga`, relié à l'opacité ;
+- `subzero.json` : paquet (chemin absolu, chemin relatif, sha256), graphe, preset, valeurs changées, entrées image,
+  taille, sorties et canaux, fichiers, version de `sbsrender`, temps du rendu.
+
+**Dans ArmorPaint** : « Send » crée le matériau et le choisit, comme Import > Folder. « Update » (ou Live) recharge
+ses textures en place, en gardant l'espace OCIO de chacune ; les nœuds des fichiers disparus s'en vont, ceux des
+nouveaux arrivent. Les liens ajoutés à la main restent. Les calques de remplissage du matériau sont refaits. Ctrl+Z
+n'annule pas une mise à jour de textures, comme Reimport Textures. Un matériau supprimé entre-temps est recréé.
+
+**Limites (v0)** : pas de temps réel dans le viewport ; pas de surveillance du `.sbs` (« Reload ») ; pas de cartes de
+maillage automatiques (une entrée image prend un fichier) ; graphes matériau seulement ; macOS.
+
+### Scripts (minic)
+
+```c
+void  subzero_open(char *path);        // .sbs/.sbsar, dossier d'un matériau envoyé (sa recette), ou NULL : fenêtre vide ; déjà ouverte : ramenée devant
+int   subzero_is_open(void);
+char *subzero_material_dir(void *m);   // dossier subzero du matériau, "" pour un matériau ordinaire
+char *subzero_materials_json(void);    // {"materials": N, "subzero": [{"name", "dir", "current", "links": [{"file", "output", "socket"}]}]} (bancs)
+```
+
+`SUBZERO_TEST=<fichier.json>` fait tourner la fenêtre sans intervention (bancs) : paquet ou dossier à ouvrir, graphe,
+preset, valeurs, taille, Live, action (`create`, `update`, `duplicate`, `none`), puis résultat en JSON et capture ;
+détail en tête de `subzero_window.py`.
+
 ## Tests
 
 ```sh
@@ -1452,6 +1523,9 @@ python3 .tests/arm_paths.py <projet.arm> [fichier...]   # chemins des fichiers d
 .tests/ocio_prefs_app.sh [dossier]     # réglages couleur (A5) dans l'app : fichier des préférences, espace de travail du projet (.arm rouvert, autre configuration, erreurs), textures reconverties = PyOpenColorIO, viewport
 .tests/export_window_app.sh [dossier]  # fenêtre d'export (B6) dans l'app, Qt offscreen : état, préflight, export, fichiers décochés, blocage, réouverture, bits et résolution par map, sidecar, preset du projet ; PY=<python PySide6>
 <python PySide6> .tests/export_window_ui.py [dossier]  # fenêtre d'export contre un faux ArmorPaint : liste groupée (tuiles UDIM, objets), cases, décomptes, problèmes affichés, tableau des maps, sidecar, nom des fichiers, jeux de textures
+.tests/subzero.sh [dossier]            # subzero hors app (E1) : description des .sbsar, rendu et cuisson par sbsrender, erreurs ; SUBZERO_RENDER_ALL=1 : toute l'étagère
+<python PySide6> .tests/subzero_window_ui.py  # fenêtre subzero contre un faux ArmorPaint, vrai sbsrender : règles, étagère, envoi, mise à jour, Duplicate, 16 bits, preset, décalque, .sbs, sbsrender introuvable puis corrigé
+.tests/subzero_app.sh [dossier]        # subzero dans l'app, Qt offscreen : import d'un .sbsar, envoi, deux calques de remplissage, .arm rouvert, réédition depuis la recette, temps ; PY=<python PySide6>
 .tests/sets_app.sh [dossier]           # jeux de textures, nom des fichiers et UDIM dans l'app, avec les maillages de udim_gen.py ; PY=<python PySide6>
 .tests/atlas_order_app.sh [dossier]    # jeux de textures quand l'onglet Meshes trie, réapparente ou supprime des objets (patch atlas-objects-order)
 .tests/masks_app.sh [dossier]          # masques empilés (patch mask-multiply) : flatten, Apply Mask, Merge Down, Merge Group et export multiplient les masques comme la vue
