@@ -30,7 +30,11 @@
 #  12. export (lot D2d) : par tuile, chaque fichier à la résolution des tuiles, identique au bit près à celui d'un
 #      projet d'une seule tuile ; Visible, le composite en grille (une case par tuile, masques fusionnés par tuile, le
 #      calque limité à un objet dans sa case seule) ; Selected et par objet, la tuile de l'objet ; Export d'un masque :
-#      un fichier par tuile.
+#      un fichier par tuile ;
+#  13. .arm (lot D2e) : chaque tuile de chaque calque sauvée (clé tiles, la dernière) ; le blob d'origine, lu par
+#      l'upstream : le composite en grille, ou la tuile de l'objet d'un calque limité à un objet ; rouvert, les mêmes
+#      tuiles et un export identique au bit près, resauvé à l'identique ; la fixture de l'ère atlas (fixtures/udim_atlas)
+#      rangée dans ses tuiles, son export par tuile comparé à celui du build D1.
 #
 #   sh .tests/udim_tiles_app.sh [dossier de travail]
 #   APP=<binaire ArmorPaint> pour un autre build (défaut : build Release de paint/).
@@ -895,5 +899,150 @@ check "Visible juste après l'import (sans frame) : les calques passés aux tuil
 check "par objet : strip.1004 seul (l'objet du calque limité), sa tuile ; Selected : le calque limité seul, à la résolution des tuiles" '[ "$(line exports object)" = "-- -- -- MM -- 5" ] && line exports selected | grep -q "strip.1004 MM 128x128$"'
 
 check "Export d'un masque : un fichier par tuile (<nom>.<tuile>.png), 128 px, blanc à gauche" '[ "$(line export_cells mask)" = 1 ] && [ "$(line exports mask)" = "WK WK WK WK WK 5 128x128" ]'
+
+echo "== 13. .arm : tuiles sauvées, blob composite pour l'upstream, aller-retour, migration de l'ère atlas"
+mkdir -p "$W/out_arm_a" "$W/out_arm_b" "$W/out_arm_va" "$W/out_arm_vb" "$W/out_arm_mig"
+# Calque 1 : bruit ; calque 2 : 1001 rouge, 1002 vert, 1011 bleu, masqué par la carte d'id (blanc à gauche) ; calque
+# 4, limité à strip.1004 : magenta sur la 1004
+script arm_save <<EOF
+int main() {
+	studio_project_res(128);
+	studio_import_mesh("$W/strip.obj", 2);
+	$NOISE
+	script_fill_layer();
+	studio_layer_new();
+	studio_udim_fill(1, 0, 1001, 1.0, 0.0, 0.0, 1.0);
+	studio_udim_fill(1, 0, 1002, 0.0, 1.0, 0.0, 1.0);
+	studio_udim_fill(1, 0, 1011, 0.0, 0.0, 1.0, 1.0);
+	studio_layer_select(1);
+	console_log(string("t: cid %d", studio_colorid_mask("$W/cid.png", 0xff0000)));
+	studio_layer_select(2);
+	studio_layer_new();
+	int o = -1;
+	for (int i = 0; i < 8; i++) {
+		if (string_equals(studio_object_rename(i, ""), "strip.1004")) {
+			o = i;
+		}
+	}
+	console_log(string("t: limit %d", studio_layer_set_object(o)));
+	studio_udim_fill(3, 0, 1004, 1.0, 0.0, 1.0, 1.0);
+	console_log(string("t: names %s", studio_layer_masks()));
+	project_filepath_set("$W/arm.arm");
+	project_save(false);
+	for (int l = 0; l < 4; l++) {
+		console_log(string("t: layer%d %s", l, studio_udim_layer(l)));
+	}
+	studio_export_run("$W/out_arm_a", "", 3);
+	studio_export_run("$W/out_arm_va", "", 0);
+	return 0;
+}
+EOF
+script arm_open <<EOF
+int main() {
+	script_project_open("$W/arm.arm");
+	console_log(string("t: names %s", studio_layer_masks()));
+	for (int l = 0; l < 4; l++) {
+		console_log(string("t: layer%d %s", l, studio_udim_layer(l)));
+	}
+	studio_export_run("$W/out_arm_b", "", 3);
+	studio_export_run("$W/out_arm_vb", "", 0);
+	project_filepath_set("$W/arm2.arm");
+	project_save(false);
+	return 0;
+}
+EOF
+script arm_migrate <<EOF
+int main() {
+	script_project_open("$T/fixtures/udim_atlas/strip.arm");
+	console_log(string("t: names %s", studio_layer_masks()));
+	for (int l = 0; l < 3; l++) {
+		console_log(string("t: layer%d %s", l, studio_udim_layer(l)));
+	}
+	studio_export_run("$W/out_arm_mig", "", 3);
+	return 0;
+}
+EOF
+python3 - "$W" "$T" > "$W/arm.out" <<'EOF'
+import glob, os, sys
+from PIL import Image
+
+w, t = sys.argv[1], sys.argv[2]
+sys.path.insert(0, t)
+import arm_read  # noqa: E402
+
+TILES = (1001, 1002, 1003, 1004, 1011)
+p = arm_read.load(os.path.join(w, "arm.arm"))
+lds = p["layer_datas"]
+print("keys %s" % " ".join("%d:%s" % (len(ld), "/".join(list(ld)[-2:])) for ld in lds))
+print("tiles %s" % " ".join(",".join(str(x["tile"]) for x in ld["tiles"]) if ld["tiles"] else "-" for ld in lds))
+print("mask_tiles %s" % " ".join("%s%s" % (x["texpaint_nor"] is None, x["texpaint_pack"] is None) for x in lds[1]["tiles"]))
+size = 128 * 128 * 4
+
+
+def px(blob):  # RGBA : les cibles 8 bits sont lues en BGRA sous Metal (is_bgra du projet)
+    b = bytearray(arm_read.pixels(blob, size))
+    if p.get("is_bgra"):
+        b[0::4], b[2::4] = b[2::4], b[0::4]
+    return bytes(b)
+
+
+tile = lambda ld, n, key="texpaint": px(next(x for x in ld["tiles"] if x["tile"] == n)[key])
+at = lambda b, x, y: tuple(b[(y * 128 + x) * 4:(y * 128 + x) * 4 + 4])
+name = lambda c: {(255, 0, 0, 255): "R", (0, 255, 0, 255): "G", (0, 0, 255, 255): "B", (255, 0, 255, 255): "M", (0, 0, 0, 0): "0",
+                  (255, 255, 255, 255): "W", (0, 0, 0, 255): "K"}.get(c, "?")
+c = 128 / 3.0
+cell = lambda b, s, fx: name(at(b, int((s % 3 + fx) * c), int((s // 3 + 0.5) * c)))
+# Blob d'origine du calque 2 et de son masque : la grille (une case par tuile, gauche et droite), cases vides nulles
+for i, key in ((2, "layer2"), (1, "mask")):
+    b = px(lds[i]["texpaint"])
+    print("blob_%s %s" % (key, " ".join(cell(b, s, 0.25) + cell(b, s, 0.75) for s in range(9))))
+# Bruit : la moyenne de chaque case contre celle de sa tuile (réduite), écart max en niveaux
+noise = px(lds[0]["texpaint"])
+diffs = []
+for s, n in enumerate(TILES):
+    x0, y0 = int(round((s % 3) * c)), int(round((s // 3) * c))
+    cellmean = [sum(at(noise, x, y)[k] for x in range(x0 + 2, x0 + 40) for y in range(y0 + 2, y0 + 40)) / 38.0 / 38.0 for k in range(3)]
+    tb = tile(lds[0], n)
+    tilemean = [sum(at(tb, x, y)[k] for x in range(6, 120) for y in range(6, 120)) / 114.0 / 114.0 for k in range(3)]
+    diffs.append(max(abs(a - b) for a, b in zip(cellmean, tilemean)))
+empty = all(at(noise, int((s % 3 + 0.5) * c), int((s // 3 + 0.5) * c)) == (0, 0, 0, 0) for s in range(5, 9))
+print("blob_noise %.1f %d" % (max(diffs), empty))
+# Calque limité à strip.1004 : le blob d'origine est sa tuile, pleine résolution
+limited = lds[3]
+print("blob_limited %d %d %s" % (px(limited["texpaint"]) == tile(limited, 1004), px(limited["texpaint_nor"]) == tile(limited, 1004, "texpaint_nor"), name(at(px(limited["texpaint"]), 64, 64))))
+# Resauvé après réouverture : les mêmes tuiles, au bit près
+q = arm_read.load(os.path.join(w, "arm2.arm"))
+same = all(px(a[k]) == px(b[k]) for la, lb in zip(lds, q["layer_datas"]) if la["tiles"] for a, b in zip(la["tiles"], lb["tiles"]) for k in ("texpaint", "texpaint_nor", "texpaint_pack") if a[k] is not None)
+print("resaved %d %d" % (same, len(q["layer_datas"])))
+# Export avant et après réouverture : chaque fichier identique, par nom sans le préfixe du projet (untitled_, arm_)
+def compare(a, b):
+    files = lambda d: {os.path.basename(f).split("_", 1)[1]: f for f in glob.glob(os.path.join(w, d, "*.png"))}
+    fa, fb = files(a), files(b)
+    same = sum(1 for k in fa if k in fb and Image.open(fa[k]).tobytes() == Image.open(fb[k]).tobytes())
+    return "%d/%d/%d" % (same, len(fa), len(fb))
+print("roundtrip %s %s" % (compare("out_arm_a", "out_arm_b"), compare("out_arm_va", "out_arm_vb")))
+# Migration : l'export par tuile de la fixture contre celui du build D1 (ref/), écart max par canal
+worst, found = 0, 0
+for n in TILES:
+    mig = glob.glob(os.path.join(w, "out_arm_mig", "*_base.%d.png" % n))
+    ref = os.path.join(t, "fixtures", "udim_atlas", "ref", "untitled_base.%d.png" % n)
+    if not mig:
+        continue
+    found += 1
+    a, b = Image.open(mig[0]).convert("RGB"), Image.open(ref).convert("RGB")
+    if a.size != b.size:
+        worst = 999
+        continue
+    worst = max(worst, max(abs(x - y) for pa, pb in zip(a.getdata(), b.getdata()) for x, y in zip(pa, pb)))
+print("migrated %d %d" % (found, worst))
+EOF
+cat "$W/arm.out"
+check "sauvé : clé tiles la dernière (38 clés), chaque tuile de chaque calque ; masque sans nor ni pack" '[ "$(line arm keys)" = "38:path_text/tiles 38:path_text/tiles 38:path_text/tiles 38:path_text/tiles" ] && [ "$(line arm tiles)" = "1001,1002,1003,1004,1011 1001,1002,1003,1004,1011 1001,1002,1003,1004,1011 1001,1002,1003,1004,1011" ] && [ "$(line arm mask_tiles)" = "TrueTrue TrueTrue TrueTrue TrueTrue TrueTrue" ]'
+check "blob d'origine : le composite en grille (cases de 1001, 1002, 1003 ; 1004, 1011 ; vides nulles), masque compris" '[ "$(line arm blob_layer2)" = "RR GG 00 00 BB 00 00 00 00" ] && [ "$(line arm blob_mask)" = "W0 W0 W0 W0 W0 00 00 00 00" ] && line arm blob_noise | awk "{ exit !(\$1 < 4 && \$2 == 1) }"'
+check "blob d'origine d'un calque limité à strip.1004 : sa tuile, pleine résolution" '[ "$(line arm blob_limited)" = "1 1 M" ]'
+check "rouvert : les mêmes tuiles par calque, masque compris" '[ "$(line arm_open names)" = "$(line arm_save names)" ] && [ "$(for l in 0 1 2 3; do line arm_open layer$l; done)" = "$(for l in 0 1 2 3; do line arm_save layer$l; done)" ] && line arm_open layer1 | grep -q "tiles=1001,1002,1003,1004,1011 128x128"'
+check "rouvert : export par tuile et Visible identiques au bit près ; resauvé : les mêmes tuiles" '[ "$(line arm roundtrip)" = "25/25/25 5/5/5" ] && [ "$(line arm resaved)" = "1 4" ]'
+check "fixture de l'ère atlas : 3 calques rangés dans leurs tuiles, export par tuile identique à celui du build D1" 'grep -q "UDIM: 3 layers of the atlas era cut into their tiles" "$W/arm_migrate.log" && line arm_migrate layer0 | grep -q "tiles=1001,1002,1003,1004,1011 256x256" && [ "$(line arm migrated)" = "5 0" ]'
+
 [ $FAIL -eq 0 ] && echo "== OK" || echo "== FAIL"
 exit $FAIL

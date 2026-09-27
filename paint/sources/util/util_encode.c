@@ -138,6 +138,8 @@ i32 util_encode_layer_data_size(layer_data_t_array_t *datas) {
 		if (tp_sculpt != NULL) {
 			size += tp_sculpt->length;
 		}
+
+		size += util_udim_tiles_size(datas->buffer[i]->tiles); // STUDIO-PATCH(udim-tiles): the tiles of a layer (lot D2e)
 	}
 	return size;
 }
@@ -362,7 +364,7 @@ buffer_t *util_encode_project(project_t *raw) {
 	if (raw->layer_datas != NULL) {
 		armpack_encode_array(raw->layer_datas->length);
 		for (i32 i = 0; i < raw->layer_datas->length; ++i) {
-			armpack_encode_map(37);
+			armpack_encode_map(38); // STUDIO-PATCH(udim-tiles): 37 upstream, and the tiles
 			armpack_encode_string("name");
 			armpack_encode_string(raw->layer_datas->buffer[i]->name);
 			armpack_encode_string("res");
@@ -437,6 +439,9 @@ buffer_t *util_encode_project(project_t *raw) {
 			armpack_encode_i32(raw->layer_datas->buffer[i]->path_material);
 			armpack_encode_string("path_text");
 			armpack_encode_bool(raw->layer_datas->buffer[i]->path_text);
+			// STUDIO-PATCH(udim-tiles): the tiles of a layer (lot D2e), the last key: upstream decodes the keys in order
+			armpack_encode_string("tiles");
+			util_udim_encode_tiles(raw->layer_datas->buffer[i]->tiles);
 		}
 	}
 	else {

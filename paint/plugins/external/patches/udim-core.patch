@@ -44,10 +44,10 @@ index 0f3c266ba..08e5aa277 100644
  }
 diff --git a/paint/sources/util/util_udim.c b/paint/sources/util/util_udim.c
 new file mode 100644
-index 000000000..8aea91d87
+index 000000000..11e4add12
 --- /dev/null
 +++ b/paint/sources/util/util_udim.c
-@@ -0,0 +1,1870 @@
+@@ -0,0 +1,2120 @@
 +#include "../global.h"
 +
 +// STUDIO-PATCH(udim-core): see util_udim.h
@@ -1893,6 +1893,256 @@ index 000000000..8aea91d87
 +	return true;
 +}
 +
++// .arm (lot D2e)
++
++static void udim_free_blob(buffer_t *b) {
++	if (b != NULL) {
++		array_free(b);
++		free(b);
++	}
++}
++
++// The pixels of a texture, lz4, its readback let go: a tile out of the view would keep it
++static buffer_t *udim_arm_blob(gpu_texture_t *t) {
++	buffer_t *blob = lz4_encode(gpu_get_texture_pixels(t));
++	array_free(t->buffer);
++	free(t->buffer);
++	t->buffer = NULL;
++	return blob;
++}
++
++void util_udim_arm_save_layer(slot_layer_t *l, layer_data_t *d) {
++	if (!util_udim_layer_tiled(l)) {
++		return;
++	}
++	if (gpu_in_use) {
++		iron_log("UDIM: layer \"%s\" saved with the tile of the context only, a pass is drawing", l->name);
++		return;
++	}
++	gpu_texture_t             *views[3] = {l->texpaint, l->texpaint_nor, l->texpaint_pack};
++	udim_store_t              *first    = udim_store_of(l->texpaint);
++	layer_tile_data_t_array_t *tiles    = calloc(1, sizeof(layer_tile_data_t_array_t));
++	tiles->buffer                       = calloc(UDIM_MAX_TILES, sizeof(layer_tile_data_t *));
++	tiles->capacity                     = UDIM_MAX_TILES;
++	for (i32 i = 0; i < udim_table_count; ++i) {
++		i32 tile = udim_table[i];
++		if (udim_index(first, tile) < 0) {
++			continue;
++		}
++		layer_tile_data_t *t      = calloc(1, sizeof(layer_tile_data_t));
++		buffer_t         **out[3] = {&t->texpaint, &t->texpaint_nor, &t->texpaint_pack};
++		t->tile                   = tile;
++		for (i32 v = 0; v < 3; ++v) {
++			udim_store_t *s = udim_store_of(views[v]);
++			if (s != NULL && udim_index(s, tile) >= 0) {
++				udim_show(s, tile);
++				*out[v] = udim_arm_blob(views[v]);
++			}
++		}
++		tiles->buffer[tiles->length++] = t;
++	}
++	for (i32 v = 0; v < 3; ++v) {
++		udim_store_t *s = udim_store_of(views[v]);
++		if (s != NULL) {
++			udim_show(s, udim_cur);
++		}
++	}
++
++	// The textures read by upstream ArmorPaint: the atlas composite at the resolution of the project, or the tile of the
++	// object of a layer limited to one, at its resolution (upstream holds such a layer in the space of its tile)
++	buffer_t      **blobs[3]   = {&d->texpaint, &d->texpaint_nor, &d->texpaint_pack};
++	gpu_texture_t **targets[3] = {&udim_atlas_a, &udim_atlas_b, &udim_atlas_c};
++	i32             own        = udim_mask_tile(l);
++	for (i32 v = 0; v < 3; ++v) {
++		udim_store_t *s = udim_store_of(views[v]);
++		if (s == NULL) {
++			continue;
++		}
++		udim_free_blob(*blobs[v]);
++		if (own >= 0 && udim_index(s, own) >= 0) {
++			udim_show(s, own);
++			*blobs[v] = udim_arm_blob(views[v]);
++			udim_show(s, udim_cur);
++		}
++		else {
++			gpu_texture_t *target = udim_atlas_target(targets[v], views[v]);
++			udim_atlas_draw(l, views[v], target);
++			*blobs[v] = udim_arm_blob(target);
++		}
++	}
++	d->tiles = tiles;
++}
++
++void util_udim_arm_free_layer(layer_data_t *d) {
++	layer_tile_data_t_array_t *tiles = d->tiles;
++	if (tiles == NULL) {
++		return;
++	}
++	for (i32 i = 0; i < tiles->length; ++i) {
++		layer_tile_data_t *t = tiles->buffer[i];
++		udim_free_blob(t->texpaint);
++		udim_free_blob(t->texpaint_nor);
++		udim_free_blob(t->texpaint_pack);
++		free(t);
++	}
++	free(tiles->buffer);
++	free(tiles);
++	d->tiles = NULL;
++}
++
++i32 util_udim_tiles_size(layer_tile_data_t_array_t *tiles) {
++	i32 size = 0;
++	for (i32 i = 0; tiles != NULL && i < tiles->length; ++i) {
++		layer_tile_data_t *t        = tiles->buffer[i];
++		buffer_t          *blobs[3] = {t->texpaint, t->texpaint_nor, t->texpaint_pack};
++		size += 128; // Keys and headers
++		for (i32 v = 0; v < 3; ++v) {
++			size += blobs[v] != NULL ? blobs[v]->length : 0;
++		}
++	}
++	return size;
++}
++
++void util_udim_encode_tiles(layer_tile_data_t_array_t *tiles) {
++	if (tiles == NULL) {
++		armpack_encode_null();
++		return;
++	}
++	armpack_encode_array(tiles->length);
++	for (i32 i = 0; i < tiles->length; ++i) {
++		layer_tile_data_t *t = tiles->buffer[i];
++		armpack_encode_map(4);
++		armpack_encode_string("tile");
++		armpack_encode_i32(t->tile);
++		armpack_encode_string("texpaint");
++		armpack_encode_array_u8(t->texpaint);
++		armpack_encode_string("texpaint_nor");
++		armpack_encode_array_u8(t->texpaint_nor);
++		armpack_encode_string("texpaint_pack");
++		armpack_encode_array_u8(t->texpaint_pack);
++	}
++}
++
++// The saved content of a texture of a layer (0 base, 1 nor, 2 pack) on a tile, NULL when not saved
++static buffer_t *udim_arm_tile_blob(layer_data_t *ld, i32 tile, i32 v) {
++	layer_tile_data_t_array_t *tiles = ld->tiles;
++	for (i32 i = 0; tiles != NULL && i < tiles->length; ++i) {
++		layer_tile_data_t *t = tiles->buffer[i];
++		if (t->tile == tile) {
++			return v == 0 ? t->texpaint : v == 1 ? t->texpaint_nor : t->texpaint_pack;
++		}
++	}
++	return NULL;
++}
++
++// A tile of a view (shown) from its saved content, or, missing (a project of the atlas era), from the texture upstream
++// loaded: the cell of the tile, upscaled as the atlas era exported it, or for a layer limited to a tile's object its
++// texture on that tile and its background on the others
++static void udim_arm_load_tile(gpu_texture_t *view, buffer_t *blob, gpu_texture_t *loaded, i32 tile, i32 own, gpu_texture_t **bg) {
++	i32 w = view->width;
++	i32 h = view->height;
++	if (blob != NULL) {
++		buffer_t      *pixels = lz4_decode(blob, w * h * gpu_texture_format_size(view->format));
++		gpu_texture_t *t      = gpu_create_texture_from_bytes_raw(pixels, w, h, view->format);
++		array_free(pixels);
++		free(pixels);
++		draw_begin(view, true, 0x00000000);
++		draw_set_pipeline(g_project->is_bgra ? pipes_copy_bgra : pipes_copy); // As import_arm_run_project() loads a layer
++		draw_image(t, 0, 0);
++		draw_set_pipeline(NULL);
++		draw_end();
++		gpu_delete_texture(t);
++		return;
++	}
++	if (own >= 0 && tile != own && *bg == NULL) {
++		*bg = udim_background(loaded);
++	}
++	draw_begin(view, true, 0x00000000);
++	draw_set_pipeline(pipes_copy);
++	if (own >= 0) {
++		if (tile == own) {
++			draw_image(loaded, 0, 0);
++		}
++		else {
++			draw_scaled_image(*bg, 0, 0, w, h);
++		}
++	}
++	else if (util_mesh_udim_slot(tile) >= 0) { // As layers_udim_remap() cut a tile from the atlas
++		i32 slot   = util_mesh_udim_slot(tile);
++		i32 stride = util_mesh_atlas_stride();
++		f32 cx     = (slot % stride) / (f32)stride;
++		f32 cy     = (slot / stride) / (f32)stride;
++		draw_scaled_sub_image(loaded, cx * w, cy * h, w / (f32)stride, h / (f32)stride, 0, 0, w, h);
++	}
++	draw_set_pipeline(NULL);
++	draw_end();
++}
++
++static void udim_arm_load_layer(slot_layer_t *l, layer_data_t *ld) {
++	gpu_texture_t *views[3]  = {l->texpaint, l->texpaint_nor, l->texpaint_pack};
++	gpu_texture_t *loaded[3] = {NULL, NULL, NULL};
++	for (i32 v = 0; v < 3; ++v) {
++		bool missing = false;
++		for (i32 i = 0; i < udim_table_count; ++i) {
++			missing = missing || udim_arm_tile_blob(ld, udim_table[i], v) == NULL;
++		}
++		if (views[v] != NULL && missing) { // Kept aside: the view goes to a tile, drawn over
++			loaded[v] = gpu_create_render_target(views[v]->width, views[v]->height, views[v]->format);
++			draw_begin(loaded[v], false, 0);
++			draw_set_pipeline(udim_copy_pipe(views[v]->format));
++			draw_image(views[v], 0, 0);
++			draw_set_pipeline(NULL);
++			draw_end();
++		}
++	}
++	util_udim_tile_layer(l, false);
++	i32 own = udim_mask_tile(l);
++	for (i32 v = 0; v < 3; ++v) {
++		udim_store_t  *s  = udim_store_of(views[v]);
++		gpu_texture_t *bg = NULL;
++		for (i32 k = 0; s != NULL && k < s->count; ++k) {
++			udim_show(s, s->ids[k]);
++			udim_arm_load_tile(views[v], udim_arm_tile_blob(ld, s->ids[k], v), loaded[v], s->ids[k], own, &bg);
++		}
++		if (s != NULL) {
++			udim_show(s, udim_cur);
++		}
++		if (bg != NULL) {
++			gpu_delete_texture(bg);
++		}
++		if (loaded[v] != NULL) {
++			gpu_delete_texture(loaded[v]);
++		}
++	}
++}
++
++void util_udim_arm_load(layer_data_t_array_t *datas) {
++	if (datas == NULL) {
++		return;
++	}
++	if (gpu_in_use) {
++		iron_log("UDIM: project loaded with its layers on the tile of the context, a pass is drawing");
++		return;
++	}
++	udim_update_table();
++	if (udim_table_count < 2) {
++		return;
++	}
++	slot_layer_t_array_t *layers   = g_project->_->layers;
++	i32                   migrated = 0;
++	for (i32 i = 0; i < layers->length && i < datas->length; ++i) {
++		slot_layer_t *l = layers->buffer[i];
++		if (slot_layer_is_group(l) || util_udim_layer_tiled(l) || !util_udim_layer_should_tile(l)) {
++			continue;
++		}
++		migrated += datas->buffer[i]->tiles == NULL ? 1 : 0;
++		udim_arm_load_layer(l, datas->buffer[i]);
++	}
++	if (migrated > 0) {
++		iron_log("UDIM: %d layers of the atlas era cut into their tiles", migrated);
++	}
++}
++
 +char *util_udim_stats() {
 +	i32 partial  = 0;
 +	i32 contents = 0;
@@ -1920,10 +2170,10 @@ index 000000000..8aea91d87
 +}
 diff --git a/paint/sources/util/util_udim.h b/paint/sources/util/util_udim.h
 new file mode 100644
-index 000000000..3becabfd3
+index 000000000..1d74b0e83
 --- /dev/null
 +++ b/paint/sources/util/util_udim.h
-@@ -0,0 +1,108 @@
+@@ -0,0 +1,120 @@
 +#pragma once
 +
 +// STUDIO-PATCH(udim-core): UDIM of lot D1, see paint/plugins/external/PATCHES.md and ARMORPAINT_UDIM.md
@@ -2025,6 +2275,18 @@ index 000000000..3becabfd3
 +slot_layer_t *util_udim_atlas_layer(slot_layer_t *l, gpu_texture_t **mask);
 +void          util_udim_atlas_texture(slot_layer_t *l, gpu_texture_t *view, gpu_texture_t *target); // One texture of l
 +bool          util_udim_export_mask(slot_layer_t *l, char *file); // Layer > Export of a tiled mask: "<file>.<tile>.png"
++
++// .arm (lot D2e). A tiled layer saves each tile in its layer data (tiles: {tile, texpaint, texpaint_nor, texpaint_pack},
++// the last key: upstream ArmorPaint decodes the keys in order and reads past it). Its own textures get what upstream
++// reads: the atlas composite at the resolution of the project (Visible export), or the tile of the object of a layer
++// limited to one, at its resolution. util_udim_arm_load(), once the tile table is built, puts each saved tile back; a
++// project of the atlas era (no tiles) is cut: each shared layer's cell upscaled to its tile, as the atlas era exported
++// it, a layer limited to a tile's object (and its masks) on that tile.
++void util_udim_arm_save_layer(slot_layer_t *l, layer_data_t *d); // export_arm_run_project(), d from the tile of the context
++void util_udim_arm_free_layer(layer_data_t *d);
++i32  util_udim_tiles_size(layer_tile_data_t_array_t *tiles);
++void util_udim_encode_tiles(layer_tile_data_t_array_t *tiles);
++void util_udim_arm_load(layer_data_t_array_t *datas);
 +
 +// 2d view (lot D2b): a tiled layer shows and paints the tile of the context, the 2d plane with the material uvs of that
 +// tile. util_udim_view2d_tile() draws the combo choosing it, false when the layer is not tiled.

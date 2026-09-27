@@ -2,7 +2,7 @@
 
 > **Décision 2026-09-26 : option B retenue** (un jeu de textures par tuile, « contexte de tuile », §6). Les options C et D sont écartées ; C reste une évolution possible de B si le nombre de draws devenait un problème (100+ tuiles).
 > **2026-09-27 : lots D0 et D1 faits** (§3, §7). D1 garde un objet de peinture par tuile : la tuile-donnée, le maillage à plages et la migration passent au lot D2 (§7, « Lot D1 »).
-> **2026-09-27 : lot D2 lancé** (go sans la recette C6), plan au §7 « Lot D2 ». Le maillage à plages et la tuile-donnée passent en D3. Sous-lots D2a à D2d faits (§7, « Lot D2a » à « Lot D2d »).
+> **2026-09-27 : lot D2 lancé** (go sans la recette C6), plan au §7 « Lot D2 ». Le maillage à plages et la tuile-donnée passent en D3. Sous-lots D2a à D2e faits (§7, « Lot D2a » à « Lot D2e »).
 > Document de réflexion à l'origine ; le §7 sert désormais de plan (chantier D de `ARMORPAINT_LOTS.md`). Il fait l'état des UDIM après le commit upstream `99156dfc` (« paint: paint across udims », 2026-09-15), liste les limites, compare quatre architectures et propose une feuille de route.
 > Base : branche `studio` au commit `fbde517a`. Estimations en **jours-homme**, avec les mêmes hypothèses que `ARMORPAINT_LOTS.md`.
 > ⚠️ **§5.2 de `ARMORPAINT_ANALYSE.md` est en partie périmé.** Depuis `99156dfc`, on peut peindre à travers les tuiles et les calques partagés ne sont plus dupliqués par tuile. Ce document le remplace pour tout ce qui touche aux UDIM.
@@ -705,12 +705,40 @@ et `studio_export.c`. Banc `.tests/udim_tiles_app.sh`, section 12 : 65 contrôle
 - **Pour D2f** : le conseil de résolution affiché après l'import (`studio_udim.c`) parle encore de la grille de
   l'atlas (« 3x3 grid in the 128 px layers: 42 px per tile ») ; chaque tuile a désormais la résolution du projet.
 
+### Lot D2e (2026-09-27) : fait
+
+Patch `udim-tiles` (points d'appel D2e, dans `types.h`, `util_encode.c`, `export_arm.c` et `import_arm.c`),
+`util_udim.c` (patch `udim-core`). Banc `.tests/udim_tiles_app.sh`, section 13 : 71 contrôles en tout ; le `.arm` y est
+lu par `.tests/arm_read.py` (armpack et lz4 en Python).
+- **Format.** Chaque calque à tuiles gagne `tiles`, un tableau de `{tile, texpaint, texpaint_nor, texpaint_pack}`
+  (lz4, comme les textures upstream ; `NULL` pour le nor et le pack d'un masque), **la dernière clé** du calque (38 au
+  lieu de 37). L'armpack d'iron décode les clés dans l'ordre et prend la taille d'une structure sur le premier
+  élément : un ArmorPaint officiel ou un build d'avant D2e lit le calque et ignore la clé qui dépasse ; un `.arm`
+  d'avant D2e se lit avec `tiles` à `NULL`. Un calque sans tuiles écrit `tiles: null`.
+- **Blob d'origine** (ce que lit l'upstream) : le composite en grille à la résolution du projet, celui de l'export
+  Visible (`util_udim_atlas_layer`), masques compris ; pour un calque limité à l'objet d'une tuile, cette tuile à sa
+  résolution (l'upstream tient un tel calque dans l'espace de sa tuile). Un ArmorPaint officiel ouvre donc le fichier,
+  avec la perte de la grille.
+- **Ouverture** : une fois la table des tuiles construite (fin d'`import_arm_run_project`, maillage fusionné), chaque
+  tuile sauvée est remise dans son calque (`util_udim_arm_load`). Réouvert, un projet redonne les mêmes tuiles, des
+  exports par tuile et Visible identiques au bit près, et se resauve à l'identique.
+- **Migration de l'ère atlas** (un `.arm` sans `tiles`, table d'au moins deux tuiles) : la case de chaque calque
+  partagé est recadrée puis agrandie à sa tuile, comme l'exportait l'ère atlas ; un calque limité à l'objet d'une
+  tuile (et ses masques) va sur cette tuile, le fond sur les autres. Le journal dit « UDIM: N layers of the atlas era
+  cut into their tiles ». La fixture `.tests/fixtures/udim_atlas/strip.arm` (écrite par le build D1) donne un export
+  par tuile identique à celui du build D1 (`ref/`).
+- **Pixels BGRA.** Sous Metal, les textures 8 bits sont relues en BGRA (`is_bgra` du projet, comme l'upstream) : les
+  tuiles se rechargent par `pipes_copy_bgra`, les bancs qui lisent les blobs permutent R et B.
+- **Non traités** : les images clés de la timeline (origines et images clés gardent une texture par calque, celle de la
+  tuile du contexte ; la sauvegarde la recopie sur elle-même, sans perte) ; les calques de sculpt ne sont pas à
+  tuiles.
+
 ---
 
 ## 8. Coût de maintenance du fork
 
 - **Surface.** La phase 2 touche environ 12 fichiers upstream, dont les 6 plus actifs (§4.8). Il faut compter **une demi-journée à deux jours de résolution de conflits par pull** sur la durée de vie du fork, davantage si upstream continue à retravailler les UDIM, ce qui est probable après `99156dfc`.
-- **Format.** Des `.arm` écrits par notre build ne s'ouvrent plus dans un ArmorPaint officiel. Il faut prévoir un **export « compatible upstream »**, qui écrit l'atlas en grille avec perte, si des fichiers doivent circuler hors studio.
+- **Format.** Des `.arm` écrits par notre build ne s'ouvrent plus dans un ArmorPaint officiel. Il faut prévoir un **export « compatible upstream »**, qui écrit l'atlas en grille avec perte, si des fichiers doivent circuler hors studio. *Fait autrement en D2e : le blob d'origine de chaque calque reçoit cette grille, un ArmorPaint officiel ouvre le fichier tel quel.*
 - **Règle `PATCHES.md`.** Un `STUDIO-PATCH(udim-*)` par point d'entrée : `udim-tiles`, `udim-ranges`, `udim-layer-tiles`, `udim-arm`, `udim-export`. Au lot D1 : `udim-core` (le fichier `util_udim.c`), `udim-material-uv`, `udim-export-sets`, `udim-tile-name`. Chacun a son `.patch` et son `.base`, et on accepte que `check_patches.sh` en signale souvent. Le registre existant supporte ce fonctionnement, mais le volume change d'ordre de grandeur (aujourd'hui : injections de quelques lignes).
 - **Pour limiter la surface :**
   - mettre la logique (table des tuiles, allocation, éviction, migration) dans un **nouveau fichier** `paint/sources/util/util_udim.c`, qu'upstream ne touche pas ;

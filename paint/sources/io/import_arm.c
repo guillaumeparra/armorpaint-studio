@@ -1026,6 +1026,10 @@ void import_arm_run_project(char *path) {
 		g_context->merged_object->base->visible = true;
 	}
 
+	// STUDIO-PATCH(udim-tiles): the tiles of the layers, or those of a project of the atlas era cut from its cells, once
+	// the tile table is built (merged mesh), see paint/sources/util/util_udim.h
+	util_udim_arm_load(g_project->layer_datas);
+
 	sys_notify_on_next_frame(&import_arm_run_project_on_next_frame, NULL);
 
 	base_update_workflow();

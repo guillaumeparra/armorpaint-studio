@@ -763,3 +763,114 @@ index c9d168cf3..33fcabf42 100644
  	free(coords_y);
 +	util_udim_set_tile(udim_saved); // STUDIO-PATCH(udim-tiles)
  }
+diff --git a/paint/sources/io/export_arm.c b/paint/sources/io/export_arm.c
+index a94348b08..78233e3ce 100644
+--- a/paint/sources/io/export_arm.c
++++ b/paint/sources/io/export_arm.c
+@@ -275,6 +275,9 @@ void export_arm_run_project(char *path) {
+ 		                              .path_curved        = l->path_curved,
+ 		                              .path_text          = l->path_text,
+ 		                              .path_material      = l->path_material != NULL ? array_index_of(g_project->_->materials, l->path_material) : -1});
++		// STUDIO-PATCH(udim-tiles): a tiled layer saves its tiles, its textures the atlas composite (or the tile of its
++		// object for a layer limited to one) for upstream ArmorPaint, see paint/sources/util/util_udim.h
++		util_udim_arm_save_layer(l, d);
+ 		any_array_push(ld, d);
+ 	}
+ 
+@@ -421,6 +424,7 @@ void export_arm_run_project(char *path) {
+ 		export_arm_free_buffer(d->texpaint_nor);
+ 		export_arm_free_buffer(d->texpaint_pack);
+ 		export_arm_free_buffer(d->texpaint_sculpt);
++		util_udim_arm_free_layer(d); // STUDIO-PATCH(udim-tiles): the tiles of a layer
+ 		if (d->decal_mat != NULL) {
+ 			array_free(d->decal_mat);
+ 			free(d->decal_mat);
+diff --git a/paint/sources/io/import_arm.c b/paint/sources/io/import_arm.c
+index 1813b387a..983d0316d 100644
+--- a/paint/sources/io/import_arm.c
++++ b/paint/sources/io/import_arm.c
+@@ -1026,6 +1026,10 @@ void import_arm_run_project(char *path) {
+ 		g_context->merged_object->base->visible = true;
+ 	}
+ 
++	// STUDIO-PATCH(udim-tiles): the tiles of the layers, or those of a project of the atlas era cut from its cells, once
++	// the tile table is built (merged mesh), see paint/sources/util/util_udim.h
++	util_udim_arm_load(g_project->layer_datas);
++
+ 	sys_notify_on_next_frame(&import_arm_run_project_on_next_frame, NULL);
+ 
+ 	base_update_workflow();
+diff --git a/paint/sources/types.h b/paint/sources/types.h
+index cdff68fe6..0ab23fb74 100644
+--- a/paint/sources/types.h
++++ b/paint/sources/types.h
+@@ -621,6 +621,14 @@ typedef struct swatch_color {
+ 	f32 subsurface;
+ } swatch_color_t;
+ 
++// STUDIO-PATCH(udim-tiles): the content of a tile of a layer (lot D2e), see paint/sources/util/util_udim.h
++typedef struct layer_tile_data {
++	i32            tile;
++	struct buffer *texpaint;
++	struct buffer *texpaint_nor;
++	struct buffer *texpaint_pack;
++} layer_tile_data_t;
++
+ typedef struct layer_data {
+ 	char             *name;
+ 	i32               res; // Width pixels
+@@ -659,6 +667,8 @@ typedef struct layer_data {
+ 	bool              path_curved;
+ 	i32               path_material;
+ 	bool              path_text;
++	// STUDIO-PATCH(udim-tiles): the tiles of a tiled layer, NULL otherwise; the last key, upstream reads past it
++	struct layer_tile_data_t_array *tiles;
+ } layer_data_t;
+ 
+ typedef struct timeline_layer_keyframe_data {
+@@ -919,6 +929,13 @@ typedef struct layer_data_t_array {
+ 	int            capacity;
+ } layer_data_t_array_t;
+ 
++// STUDIO-PATCH(udim-tiles): the tiles of a layer (lot D2e)
++typedef struct layer_tile_data_t_array {
++	layer_tile_data_t **buffer;
++	int                 length;
++	int                 capacity;
++} layer_tile_data_t_array_t;
++
+ typedef struct timeline_layer_keyframe_data_t_array {
+ 	timeline_layer_keyframe_data_t **buffer;
+ 	int                              length;
+diff --git a/paint/sources/util/util_encode.c b/paint/sources/util/util_encode.c
+index 06df490ff..aa74a2033 100644
+--- a/paint/sources/util/util_encode.c
++++ b/paint/sources/util/util_encode.c
+@@ -138,6 +138,8 @@ i32 util_encode_layer_data_size(layer_data_t_array_t *datas) {
+ 		if (tp_sculpt != NULL) {
+ 			size += tp_sculpt->length;
+ 		}
++
++		size += util_udim_tiles_size(datas->buffer[i]->tiles); // STUDIO-PATCH(udim-tiles): the tiles of a layer (lot D2e)
+ 	}
+ 	return size;
+ }
+@@ -362,7 +364,7 @@ buffer_t *util_encode_project(project_t *raw) {
+ 	if (raw->layer_datas != NULL) {
+ 		armpack_encode_array(raw->layer_datas->length);
+ 		for (i32 i = 0; i < raw->layer_datas->length; ++i) {
+-			armpack_encode_map(37);
++			armpack_encode_map(38); // STUDIO-PATCH(udim-tiles): 37 upstream, and the tiles
+ 			armpack_encode_string("name");
+ 			armpack_encode_string(raw->layer_datas->buffer[i]->name);
+ 			armpack_encode_string("res");
+@@ -437,6 +439,9 @@ buffer_t *util_encode_project(project_t *raw) {
+ 			armpack_encode_i32(raw->layer_datas->buffer[i]->path_material);
+ 			armpack_encode_string("path_text");
+ 			armpack_encode_bool(raw->layer_datas->buffer[i]->path_text);
++			// STUDIO-PATCH(udim-tiles): the tiles of a layer (lot D2e), the last key: upstream decodes the keys in order
++			armpack_encode_string("tiles");
++			util_udim_encode_tiles(raw->layer_datas->buffer[i]->tiles);
+ 		}
+ 	}
+ 	else {

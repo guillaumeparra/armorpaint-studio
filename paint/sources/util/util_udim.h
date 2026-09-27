@@ -100,6 +100,18 @@ slot_layer_t *util_udim_atlas_layer(slot_layer_t *l, gpu_texture_t **mask);
 void          util_udim_atlas_texture(slot_layer_t *l, gpu_texture_t *view, gpu_texture_t *target); // One texture of l
 bool          util_udim_export_mask(slot_layer_t *l, char *file); // Layer > Export of a tiled mask: "<file>.<tile>.png"
 
+// .arm (lot D2e). A tiled layer saves each tile in its layer data (tiles: {tile, texpaint, texpaint_nor, texpaint_pack},
+// the last key: upstream ArmorPaint decodes the keys in order and reads past it). Its own textures get what upstream
+// reads: the atlas composite at the resolution of the project (Visible export), or the tile of the object of a layer
+// limited to one, at its resolution. util_udim_arm_load(), once the tile table is built, puts each saved tile back; a
+// project of the atlas era (no tiles) is cut: each shared layer's cell upscaled to its tile, as the atlas era exported
+// it, a layer limited to a tile's object (and its masks) on that tile.
+void util_udim_arm_save_layer(slot_layer_t *l, layer_data_t *d); // export_arm_run_project(), d from the tile of the context
+void util_udim_arm_free_layer(layer_data_t *d);
+i32  util_udim_tiles_size(layer_tile_data_t_array_t *tiles);
+void util_udim_encode_tiles(layer_tile_data_t_array_t *tiles);
+void util_udim_arm_load(layer_data_t_array_t *datas);
+
 // 2d view (lot D2b): a tiled layer shows and paints the tile of the context, the 2d plane with the material uvs of that
 // tile. util_udim_view2d_tile() draws the combo choosing it, false when the layer is not tiled.
 bool util_udim_view2d_tile();
