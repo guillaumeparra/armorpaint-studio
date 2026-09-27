@@ -13,6 +13,8 @@
 #include "studio_ocio.h"
 #include "studio_ocio_import.h"
 #include "studio_ocio_lut.h"
+#include "studio_ocio_prefs.h"
+#include "studio_prefs.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,6 +34,12 @@ void              ui_menu_sub_begin(i32 items);
 void              ui_menu_sub_end(void);
 void              ui_menu_separator(void);
 void              ui_menu_label(char *text, char *shortcut);
+
+// Préférences (lot A5) : le dernier choix, repris au démarrage quand les variables d'environnement ne disent rien.
+#define PREF_VIEWPORT "ocio.viewport"
+#define PREF_DISPLAY  "ocio.display"
+#define PREF_VIEW     "ocio.view"
+#define PREF_LOOK     "ocio.look"
 
 static struct {
 	bool              enabled;
@@ -199,6 +207,7 @@ bool studio_ocio_view_set_enabled(bool on) {
 		ov.enabled = on;
 		ov.dirty   = true;
 	}
+	studio_prefs_set_bool(PREF_VIEWPORT, on);
 	ensure();
 	return studio_ocio_view_active();
 }
@@ -219,6 +228,9 @@ bool studio_ocio_view_set(const char *display, const char *view, const char *loo
 	set_name(&ov.display, display);
 	set_name(&ov.view, view);
 	set_name(&ov.look, look);
+	studio_prefs_set_string(PREF_DISPLAY, ov.display);
+	studio_prefs_set_string(PREF_VIEW, ov.view);
+	studio_prefs_set_string(PREF_LOOK, ov.look);
 	ov.dirty = true;
 	ensure();
 	return true;
@@ -341,6 +353,9 @@ static void color_menu_draw(void) {
 	}
 	if (!studio_ocio_ready() || studio_ocio_working_space() == NULL) {
 		ui_menu_label((char *)ov.status, NULL);
+		ui_menu_separator();
+		studio_ocio_prefs_working_space_menu_draw(); // un espace de travail introuvable se choisit ici
+		studio_ocio_prefs_menu_draw();
 		return;
 	}
 	ui_menu_separator();
@@ -375,7 +390,9 @@ static void color_menu_draw(void) {
 		}
 		ui_menu_sub_end();
 	}
+	studio_ocio_prefs_working_space_menu_draw();
 	studio_ocio_import_menu_draw();
+	studio_ocio_prefs_menu_draw();
 	ui_menu_separator();
 	ui_menu_label(studio_ocio_view_active() ? string_tmp("%s / %s", ov.display, ov.view) : "Filmic (ArmorPaint)", NULL);
 }
@@ -455,11 +472,14 @@ static void register_script_api(void) {
 #endif
 
 void studio_ocio_view_init(void) {
+	// Les variables d'environnement (lanceur du show, bancs de test) l'emportent sur les préférences ; display, view et
+	// look viennent ensemble des unes ou des autres.
 	const char *env = getenv("STUDIO_OCIO_VIEWPORT");
-	ov.enabled      = env == NULL || strcmp(env, "0") != 0;
-	set_name(&ov.display, getenv("STUDIO_OCIO_DISPLAY"));
-	set_name(&ov.view, getenv("STUDIO_OCIO_VIEW"));
-	set_name(&ov.look, getenv("STUDIO_OCIO_LOOK"));
+	ov.enabled      = env != NULL ? strcmp(env, "0") != 0 : studio_prefs_bool(PREF_VIEWPORT, true);
+	bool from_env   = getenv("STUDIO_OCIO_DISPLAY") != NULL || getenv("STUDIO_OCIO_VIEW") != NULL || getenv("STUDIO_OCIO_LOOK") != NULL;
+	set_name(&ov.display, from_env ? getenv("STUDIO_OCIO_DISPLAY") : studio_prefs_string(PREF_DISPLAY, ""));
+	set_name(&ov.view, from_env ? getenv("STUDIO_OCIO_VIEW") : studio_prefs_string(PREF_VIEW, ""));
+	set_name(&ov.look, from_env ? getenv("STUDIO_OCIO_LOOK") : studio_prefs_string(PREF_LOOK, ""));
 	if (ov.display[0] == '\0' && studio_ocio_ready()) {
 		set_name(&ov.display, studio_ocio_display_default());
 	}

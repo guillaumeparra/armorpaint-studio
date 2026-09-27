@@ -7,7 +7,10 @@
 #include "studio_exr.h"
 #include "studio_ocio.h"
 #include "studio_ocio_import.h"
+#include "studio_ocio_prefs.h"
 #include "studio_ocio_view.h"
+#include "studio_prefs.h"
+#include "studio_project.h"
 #include "studio_shotgrid.h"
 #include "studio_workfiles.h"
 
@@ -16,7 +19,10 @@
 // des lots (exr, export, ocio, shotgrid).
 void external_init(void) {
 	iron_log("studio: external %s loaded", STUDIO_VERSION);
+	studio_prefs_init();
+	studio_project_init();
 	studio_exr_init();
+	studio_ocio_prefs_init(); // préférences couleur prises avant le chargement de la configuration
 	studio_ocio_init();
 	studio_ocio_view_init();
 	studio_ocio_import_init();

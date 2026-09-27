@@ -15,6 +15,7 @@
 #include "studio_json.h"
 #include "studio_ocio.h"
 #include "studio_ocio_lut.h"
+#include "studio_project.h"
 #include <ctype.h>
 #include <math.h>
 #include <stdarg.h>
@@ -381,12 +382,7 @@ static void load_project_records(void) {
 		free(cs);
 		free(source);
 	}
-	char *config = studio_json_text(studio_json_find(json, "/config"));
-	if (config != NULL && studio_ocio_ready() && strcmp(config, studio_ocio_config_name()) != 0) {
-		report(false, "studio: textures of this project were decoded with the OCIO config \"%s\", current is \"%s\"", config, studio_ocio_config_name());
-	}
-	free(config);
-	free(base);
+	free(base); // une autre configuration que celle du projet : signalé par studio_ocio_prefs.c
 	free(json);
 }
 
@@ -394,6 +390,7 @@ static void sync_project(void) {
 	if (g_project == NULL || g_project->_ == NULL) {
 		return;
 	}
+	studio_project_check(); // un projet qu'on ouvre : ses modules (espace de travail, A5) avant ses textures
 	bool changed     = g_project != oi.project || (void *)g_project->_->assets != oi.assets || g_project->_->next_asset_id < oi.next_asset_id;
 	oi.next_asset_id = g_project->_->next_asset_id;
 	if (!changed) {
@@ -815,18 +812,17 @@ bool studio_texture_is_linear(char *file) {
 }
 
 typedef struct {
-	char *file;
-	bool  envmap;
+	char *envmap; // texture rechargée qui était l'environnement, NULL sinon
 } reloaded_t;
 
-// Frame suivante : environnement, matériaux, calques de remplissage et aperçus refaits avec la nouvelle texture.
+// Frame suivante : environnement, matériaux, calques de remplissage et aperçus refaits avec les nouvelles textures.
 static void after_reload(void *data) {
 	reloaded_t    *r     = data;
-	gpu_texture_t *image = data_cached_textures != NULL ? any_map_get(data_cached_textures, r->file) : NULL;
-	if (r->envmap && image != NULL) {
+	gpu_texture_t *image = r->envmap != NULL && data_cached_textures != NULL ? any_map_get(data_cached_textures, r->envmap) : NULL;
+	if (image != NULL) {
 		float strength = scene_world->strength;
 		bool  show     = g_context->show_envmap;
-		import_envmap_run(r->file, image);
+		import_envmap_run(r->envmap, image);
 		scene_world->strength  = strength;
 		g_context->show_envmap = show;
 	}
@@ -847,12 +843,21 @@ static void after_reload(void *data) {
 	make_material_parse_brush();
 	util_render_make_material_preview();
 	g_context->ddirty = 2;
-	free(r->file);
+	free(r->envmap);
 	free(r);
 }
 
+static void schedule_after_reload(const char *envmap) {
+	reloaded_t *r = malloc(sizeof(reloaded_t));
+	if (r != NULL) {
+		r->envmap = envmap != NULL ? dup(envmap) : NULL;
+		sys_notify_on_next_frame(after_reload, r);
+	}
+}
+
 // Décode à nouveau la texture depuis son fichier avec l'espace enregistré. L'ancienne reste en place si ça échoue.
-static bool reload(asset_t *asset) {
+// *was_envmap : elle était l'environnement ; after_reload est à programmer par l'appelant.
+static bool reload(asset_t *asset, bool *was_envmap) {
 	char          *file = asset->file;
 	gpu_texture_t *old  = data_cached_textures != NULL ? any_map_get(data_cached_textures, file) : NULL;
 	if (old == NULL) {
@@ -893,12 +898,7 @@ static bool reload(asset_t *asset) {
 			break;
 		}
 	}
-	reloaded_t *r = malloc(sizeof(reloaded_t));
-	if (r != NULL) {
-		r->file   = dup(file);
-		r->envmap = old != NULL && g_context->saved_envmap == old;
-		sys_notify_on_next_frame(after_reload, r);
-	}
+	*was_envmap = old != NULL && g_context->saved_envmap == old;
 	if (old != NULL && old != image) {
 		delete_texture_later(old);
 	}
@@ -963,8 +963,12 @@ bool studio_texture_set_color_space(const char *file, const char *color_space) {
 	else {
 		record_remove(norm);
 	}
-	bool ok = reload(asset);
-	if (!ok) {
+	bool was_envmap = false;
+	bool ok         = reload(asset, &was_envmap);
+	if (ok) {
+		schedule_after_reload(was_envmap ? asset->file : NULL);
+	}
+	else {
 		if (had) {
 			record_set(norm, saved.color_space, saved.source, saved.is_float, saved.linear);
 		}
@@ -979,9 +983,44 @@ bool studio_texture_set_color_space(const char *file, const char *color_space) {
 	return ok;
 }
 
-// Appelé par export_arm_run_project (STUDIO-PATCH(ocio-import)) avant l'encodage : texture_files est aligné sur
-// g_project->_->assets, chemins tels qu'écrits dans le .arm.
-void studio_texture_color_spaces_save(string_array_t *texture_files) {
+int studio_ocio_import_reconvert(void) {
+	if (!oi.enabled || g_project == NULL || g_project->_ == NULL || !ocio_on()) {
+		return 0;
+	}
+	sync_project();
+	asset_t_array_t *assets = g_project->_->assets;
+	int              done = 0, kept = 0;
+	const char      *envmap = NULL;
+	for (int i = 0; i < (int)assets->length; i++) {
+		asset_t  *a = assets->buffer[i];
+		record_t *r = a != NULL && a->file != NULL ? record_find(a->file) : NULL;
+		if (a == NULL || a->file == NULL || is_k(a->file) || (r != NULL && studio_ocio_is_data(r->color_space) == 1)) {
+			continue; // pas convertie : rien ne dépend de l'espace de travail
+		}
+		if (!iron_file_exists(a->file)) {
+			kept++;
+			continue;
+		}
+		bool was_envmap = false;
+		if (reload(a, &was_envmap)) {
+			done++;
+			envmap = was_envmap ? a->file : envmap;
+		}
+	}
+	if (done > 0) {
+		schedule_after_reload(envmap);
+	}
+	if (kept > 0) {
+		report(true,
+		       "studio: %d texture(s) only in the asset pack of the project keep their pixels: import their files again to convert them to the working space",
+		       kept);
+	}
+	return done;
+}
+
+// Appelé avant l'encodage du projet (studio_project_on_save) : texture_files est aligné sur g_project->_->assets,
+// chemins tels qu'écrits dans le .arm.
+static void color_spaces_save(string_array_t *texture_files) {
 	if (!oi.enabled || g_project == NULL || g_project->_ == NULL || texture_files == NULL) {
 		return;
 	}
@@ -1258,9 +1297,14 @@ static minic_val_t mn_pack_assets(minic_val_t *a, int n) {
 	return minic_val_int(was ? 1 : 0);
 }
 
+static minic_val_t mn_reconvert(minic_val_t *a, int n) {
+	return minic_val_int(studio_ocio_import_reconvert());
+}
+
 static void register_script_api(void) {
 	// Signatures au format de minic_register ; la référence est dans README.md.
 	minic_register("studio_ocio_import_enabled", "i()", mn_enabled);
+	minic_register("studio_ocio_import_reconvert", "i()", mn_reconvert);
 	minic_register("studio_texture_color_space", "p(p)", mn_color_space);
 	minic_register("studio_texture_color_space_source", "p(p)", mn_color_space_source);
 	minic_register("studio_texture_is_linear", "i(p)", mn_is_linear);
@@ -1277,6 +1321,7 @@ void studio_ocio_import_init(void) {
 	if (oi.enabled) {
 		iron_texture_decoded = on_decoded;
 		sys_notify_on_update(prune_raw, NULL);
+		studio_project_on_save(color_spaces_save);
 	}
 	iron_log("studio: texture color spaces %s", oi.enabled ? "on" : "off (STUDIO_OCIO_IMPORT=0)");
 #ifdef WITH_EVAL

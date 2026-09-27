@@ -41,3 +41,7 @@ bool studio_texture_is_linear(char *file);
 // pixels sont déjà convertis), ou si le lot est désactivé. Sans texture de ce chemin dans le projet, le choix vaut pour
 // son import. Les calques d'un PSD prennent l'espace du fichier.
 bool studio_texture_set_color_space(const char *file, const char *color_space);
+// Lot A5 : l'espace de travail ou la configuration ont changé. Recharge depuis leurs fichiers les textures converties
+// (chacune garde son espace source) ; celles qui ne sont que dans le paquet du projet gardent leurs pixels (signalé).
+// Les calques ne sont pas convertis : ce qui y est peint reste tel quel. Rend le nombre de textures rechargées.
+int studio_ocio_import_reconvert(void);

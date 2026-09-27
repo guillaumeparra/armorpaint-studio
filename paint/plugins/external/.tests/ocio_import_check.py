@@ -4,6 +4,7 @@
 #
 #   python ocio_import_check.py make <dossier>
 #   python ocio_import_check.py convert <dump> <image> <espace source>   pixels = PyOpenColorIO, puis encodage d'ArmorPaint
+#       --working=<espace> : vers cet espace de travail (défaut : Linear Rec.709 (sRGB), l'automatique)
 #   python ocio_import_check.py same <dump> <image>                       pixels intacts (donnée, espace de travail)
 #   python ocio_import_check.py differ <dump> <image>                     pixels changés (au moins un canal)
 #   python ocio_import_check.py exr <fichier.exr> <min> <max>             texels couverts d'un export dans [min, max]
@@ -209,7 +210,11 @@ def main():
         span = {k: (float(v[covered].min()), float(v[covered].max())) for k, v in ch.items()}
         print("%s (%.0f%% of the texels covered)" % (" ".join("%s=%.6f..%.6f" % (k, a, b) for k, (a, b) in sorted(span.items())), covered.mean() * 100))
         return 0 if all(lo <= a and b <= hi for a, b in span.values()) else 1
-    args = [a for a in sys.argv[2:] if a != "--opaque"]
+    global WORKING
+    for a in sys.argv[2:]:
+        if a.startswith("--working="):
+            WORKING = a[len("--working=") :]
+    args = [a for a in sys.argv[2:] if a != "--opaque" and not a.startswith("--working=")]
     got, fmt = dump(args[0])
     src = reference(args[1])
     if "--opaque" in sys.argv:

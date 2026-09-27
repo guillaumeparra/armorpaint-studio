@@ -5,9 +5,10 @@
 // et sert le reste d'ArmorPaint (export A3, viewport A2, import A4). Sans la bibliothèque ou sans configuration valide, OCIO est
 // indisponible et studio_ocio_status() dit pourquoi : ArmorPaint reste utilisable, rien n'échoue en silence.
 //
-// Configuration, dans l'ordre : chemin explicite (préférences, lot A5), sinon $OCIO, sinon la configuration studio
-// intégrée à OCIO (ocio://studio-config-latest, ACES). Un $OCIO invalide est une erreur, pas un repli : le repli
-// cacherait au studio que sa configuration n'est pas celle qu'il croit.
+// Configuration, dans l'ordre : chemin explicite (studio_ocio_reload, scripts), $OCIO, la préférence (lot A5), sinon la
+// configuration studio intégrée à OCIO (ocio://studio-config-latest, ACES). $OCIO passe avant la préférence : c'est
+// le pipeline qui la choisit (lanceur du show). Un $OCIO ou une préférence invalides sont une erreur, pas un repli :
+// le repli cacherait au studio que sa configuration n'est pas celle qu'il croit.
 //
 // Threads : studio_ocio_init() et studio_ocio_shutdown() depuis le thread principal, hors de tout export. Tout le
 // reste peut être appelé de n'importe quel thread ; studio_ocio_transform() est sûr en parallèle (bandes disjointes).
@@ -21,6 +22,10 @@
 void studio_ocio_init(void); // external_init() : charge la bibliothèque et la configuration par défaut, journalise
 // Recharge la configuration : config_path NULL ou "" pour l'ordre par défaut. Rend studio_ocio_ready().
 bool        studio_ocio_reload(const char *config_path);
+void        studio_ocio_set_config_preference(const char *path); // "" : aucune ; prise au prochain rechargement
+const char *studio_ocio_config_preference(void);
+// "explicit", "$OCIO", "preferences" ou "built-in default" : d'où vient la dernière configuration, chargée ou refusée.
+const char *studio_ocio_config_origin(void);
 void        studio_ocio_shutdown(void);
 // Incrémenté à chaque rechargement : les noms rendus avant (displays, views…) ne sont plus valides, les caches des
 // appelants (LUT du viewport) sont à refaire.
@@ -51,11 +56,31 @@ int studio_ocio_view_is_hdr(const char *display, const char *view);
 
 // Espace de travail : celui des couleurs d'ArmorPaint une fois décodées. Le sélecteur de couleur, les calques et le
 // viewport upstream travaillent en primaires Rec.709 encodées gamma 2.2 : décodées, c'est « Linear Rec.709 (sRGB) »,
-// retrouvé dans la configuration par studio_ocio_lib_identify_builtin(STUDIO_OCIO_WORKING_BUILTIN). Réglable par
-// $STUDIO_OCIO_WORKING_SPACE (nom, alias ou rôle), relu à chaque rechargement ; le projet le portera au lot A5.
+// retrouvé dans la configuration par studio_ocio_lib_identify_builtin(STUDIO_OCIO_WORKING_BUILTIN) : l'automatique.
+//
+// Le projet le porte (lot A5). Mode du projet, dans l'ordre de recherche :
+//   STUDIO_OCIO_WS_NAMED     : le nom enregistré, sans repli ;
+//   STUDIO_OCIO_WS_AUTOMATIC : l'automatique ; si la configuration ne le trouve pas (pas de rôles d'échange),
+//                              $STUDIO_OCIO_WORKING_SPACE, puis le nom enregistré. Un projet sans choix enregistré
+//                              (fait avant le lot A5, ou par ArmorPaint sans studio) est dans ce mode : ses couleurs
+//                              sont celles d'ArmorPaint ;
+//   STUDIO_OCIO_WS_DEFAULT   : nouveau projet : $STUDIO_OCIO_WORKING_SPACE, puis la préférence, puis l'automatique.
+// Un nom (projet, variable, préférence) inconnu de la configuration est une erreur, sans repli. Noms, alias ou rôles ;
+// cherché à nouveau à chaque rechargement. La génération ne change que si l'espace trouvé change.
 #define STUDIO_OCIO_WORKING_BUILTIN "lin_rec709_srgb"
-const char *studio_ocio_working_space(void);       // nom canonique ; NULL si la configuration n'en a pas
-const char *studio_ocio_working_space_error(void); // pourquoi il est NULL ; "" sinon
+#define STUDIO_OCIO_WS_DEFAULT      0
+#define STUDIO_OCIO_WS_AUTOMATIC    1
+#define STUDIO_OCIO_WS_NAMED        2
+const char *studio_ocio_working_space(void);                            // nom canonique ; NULL si la configuration n'en a pas
+const char *studio_ocio_working_space_error(void);                      // pourquoi il est NULL ; "" sinon
+const char *studio_ocio_working_space_origin(void);                     // "project", "project, automatic", "$STUDIO_OCIO_WORKING_SPACE",
+                                                                        // "preferences", "automatic" ; "" sans espace de travail
+bool        studio_ocio_working_space_auto(void);                       // trouvé par l'automatique
+void        studio_ocio_set_working_space_preference(const char *name); // "" : automatique
+const char *studio_ocio_working_space_preference(void);
+void        studio_ocio_set_project_working_space(int mode, const char *name);
+int         studio_ocio_project_working_space_mode(void);
+const char *studio_ocio_project_working_space_name(void);
 
 const char *studio_ocio_resolve(const char *name);          // nom canonique d'un espace, alias ou rôle ; NULL sinon
 int         studio_ocio_is_data(const char *colorspace);     // 1 donnée, 0 couleur, -1 inconnu

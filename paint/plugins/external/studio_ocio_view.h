@@ -6,9 +6,11 @@
 // (studio_ocio_lut.h). La LUT .cube d'upstream s'applique ensuite, sur les valeurs d'affichage. Les autres modes
 // (couleur de base, normales…) sont inchangés : ils montrent des données, pas une image.
 //
-// Menu Color de la barre de menus (STUDIO-PATCH(menubar-hook)) ; au démarrage : STUDIO_OCIO_VIEWPORT=0 revient au
-// tonemap d'ArmorPaint, STUDIO_OCIO_DISPLAY, STUDIO_OCIO_VIEW et STUDIO_OCIO_LOOK choisissent la transformation
-// (défauts de la configuration sinon). La LUT est refaite quand le choix change ou que la configuration est rechargée.
+// Menu Color de la barre de menus (STUDIO-PATCH(menubar-hook)). Le choix est gardé dans les préférences (lot A5,
+// studio_prefs.h) et repris au démarrage ; les variables d'environnement l'emportent : STUDIO_OCIO_VIEWPORT=0 revient
+// au tonemap d'ArmorPaint, STUDIO_OCIO_DISPLAY, STUDIO_OCIO_VIEW et STUDIO_OCIO_LOOK choisissent la transformation
+// (défauts de la configuration sinon). Un choix inconnu de la configuration revient à ses défauts, sans toucher aux
+// préférences. La LUT est refaite quand le choix change ou que la configuration est rechargée.
 // Thread principal uniquement.
 
 #include <stdbool.h>
@@ -17,9 +19,9 @@ void studio_ocio_view_init(void); // external_init(), après studio_ocio_init()
 
 bool studio_ocio_view_enabled(void);         // choix de l'utilisateur
 bool studio_ocio_view_active(void);          // la LUT est prête : le viewport passe par OCIO
-bool studio_ocio_view_set_enabled(bool on);  // rend studio_ocio_view_active()
-// NULL ou "" : display par défaut, view par défaut du display, aucun look. Refait la LUT tout de suite (~0,1 s).
-// Rend false, sans rien changer, si la combinaison est inconnue de la configuration.
+bool studio_ocio_view_set_enabled(bool on);  // rend studio_ocio_view_active() ; gardé dans les préférences
+// NULL ou "" : display par défaut, view par défaut du display, aucun look. Refait la LUT tout de suite (~0,1 s) et
+// garde le choix dans les préférences. Rend false, sans rien changer, si la combinaison est inconnue de la configuration.
 bool        studio_ocio_view_set(const char *display, const char *view, const char *look);
 const char *studio_ocio_view_display(void); // "" sans OCIO
 const char *studio_ocio_view_view(void);

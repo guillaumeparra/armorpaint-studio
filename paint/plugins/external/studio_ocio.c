@@ -71,9 +71,18 @@ static studio_ocio_lib_config_t *config;
 static cache_entry_t             cache[CACHE_MAX];
 static int                       cache_len;
 static char                      source[4096];
-static char                      status[1024] = "OCIO not initialized";
-static const char               *working; // appartient à config
-static char                      working_error[512];
+static char                      status[2048] = "OCIO not initialized";
+static char                      status_head[1024];  // statut d'une configuration chargée, sans l'espace de travail
+static char                      config_pref[4096];  // préférence (lot A5) ; "" : aucune
+static const char               *config_origin = ""; // de la dernière configuration chargée ou refusée
+static const char               *working;            // appartient à config
+static const char               *working_origin = "";
+static bool                      working_auto;
+static char                      working_error[1024];
+// Choix de l'espace de travail (lot A5) : mode et nom du projet, préférence ("" : automatique).
+static int  ws_mode = STUDIO_OCIO_WS_DEFAULT;
+static char ws_project[256];
+static char ws_pref[256];
 #ifndef WITH_STUDIO_OCIO_STATIC
 static bool lib_tried;
 #endif
@@ -163,23 +172,77 @@ static void unload_config(void) {
 	}
 	source[0]        = '\0';
 	working          = NULL;
+	working_origin   = "";
+	working_auto     = false;
 	working_error[0] = '\0';
 }
 
-// Appelant : mutex tenu, config chargée.
+// Appelant : mutex tenu, config chargée. Ordre : l'espace nommé par le projet ; sans choix du projet,
+// $STUDIO_OCIO_WORKING_SPACE puis la préférence ; sinon l'équivalent de lin_rec709_srgb, dont une configuration sans
+// rôles d'échange a besoin qu'on lui donne le nom ($STUDIO_OCIO_WORKING_SPACE, ou celui qu'a enregistré le projet).
 static void find_working_space(void) {
-	const char *env = getenv("STUDIO_OCIO_WORKING_SPACE");
-	if (env != NULL && env[0] != '\0') {
-		working = lib.resolve(config, env);
+	working             = NULL;
+	working_origin      = "";
+	working_auto        = false;
+	working_error[0]    = '\0';
+	const char *env     = getenv("STUDIO_OCIO_WORKING_SPACE");
+	bool        has_env = env != NULL && env[0] != '\0';
+	if (ws_mode == STUDIO_OCIO_WS_NAMED) {
+		working        = lib.resolve(config, ws_project);
+		working_origin = "project";
+		if (working == NULL) {
+			snprintf(working_error, sizeof(working_error), "working space \"%s\" of the project: %s (choose another one in the Color menu, Working Space)",
+			         ws_project, lib.error());
+		}
+		return;
+	}
+	if (ws_mode == STUDIO_OCIO_WS_DEFAULT && (has_env || ws_pref[0] != '\0')) {
+		working        = lib.resolve(config, has_env ? env : ws_pref);
+		working_origin = has_env ? "$STUDIO_OCIO_WORKING_SPACE" : "preferences";
+		if (working == NULL && has_env) {
+			snprintf(working_error, sizeof(working_error), "STUDIO_OCIO_WORKING_SPACE: %s", lib.error());
+		}
+		else if (working == NULL) {
+			snprintf(working_error, sizeof(working_error), "working space \"%s\" of the preferences: %s (choose another one in Preferences > Color)", ws_pref,
+			         lib.error());
+		}
+		return;
+	}
+	working = lib.identify_builtin(config, STUDIO_OCIO_WORKING_BUILTIN);
+	if (working != NULL) {
+		working_auto   = true;
+		working_origin = ws_mode == STUDIO_OCIO_WS_AUTOMATIC ? "project, automatic" : "automatic";
+		return;
+	}
+	char why[400];
+	snprintf(why, sizeof(why), "%s", lib.error());
+	if (has_env) {
+		working        = lib.resolve(config, env);
+		working_origin = "$STUDIO_OCIO_WORKING_SPACE";
 		if (working == NULL) {
 			snprintf(working_error, sizeof(working_error), "STUDIO_OCIO_WORKING_SPACE: %s", lib.error());
 		}
 		return;
 	}
-	working = lib.identify_builtin(config, STUDIO_OCIO_WORKING_BUILTIN);
-	if (working == NULL) {
-		snprintf(working_error, sizeof(working_error),
-		         "no linear Rec.709 colorspace found in the config (%s): set STUDIO_OCIO_WORKING_SPACE", lib.error());
+	if (ws_mode == STUDIO_OCIO_WS_AUTOMATIC && ws_project[0] != '\0') {
+		working        = lib.resolve(config, ws_project);
+		working_origin = "project";
+		if (working != NULL) {
+			return;
+		}
+	}
+	snprintf(working_error, sizeof(working_error),
+	         "no linear Rec.709 colorspace found in the config (%s): choose a working space in %s, or set STUDIO_OCIO_WORKING_SPACE", why,
+	         ws_mode == STUDIO_OCIO_WS_AUTOMATIC ? "the Color menu (Working Space)" : "Preferences > Color");
+}
+
+// Appelant : mutex tenu, config chargée.
+static void update_status(void) {
+	if (working != NULL) {
+		snprintf(status, sizeof(status), "%s, working space \"%s\" (%s)", status_head, working, working_origin);
+	}
+	else {
+		snprintf(status, sizeof(status), "%s, working space unknown: %s", status_head, working_error);
 	}
 }
 
@@ -198,34 +261,88 @@ bool studio_ocio_reload(const char *config_path) {
 		if (path == NULL || path[0] == '\0') {
 			origin = "$OCIO";
 			path   = getenv("OCIO");
-			if (path == NULL || path[0] == '\0') {
-				origin = "built-in default";
-				path   = STUDIO_OCIO_DEFAULT_CONFIG;
-			}
 		}
-		config = lib.config_load(path);
+		if (path == NULL || path[0] == '\0') {
+			origin = "preferences";
+			path   = config_pref;
+		}
+		if (path[0] == '\0') {
+			origin = "built-in default";
+			path   = STUDIO_OCIO_DEFAULT_CONFIG;
+		}
+		config_origin = origin;
+		config        = lib.config_load(path);
 		if (config == NULL) {
 			snprintf(status, sizeof(status), "OCIO unavailable: config %s (%s) rejected: %s", path, origin, lib.error());
 		}
 		else {
 			snprintf(source, sizeof(source), "%s", path);
 			find_working_space();
-			char ws[600];
-			if (working != NULL) {
-				snprintf(ws, sizeof(ws), "working space \"%s\"", working);
-			}
-			else {
-				snprintf(ws, sizeof(ws), "working space unknown: %s", working_error);
-			}
-			snprintf(status, sizeof(status),
-			         "OCIO %s, config \"%s\" from %s (%s), %d colorspaces, display \"%s\", %s", lib.ocio_version(),
-			         lib.config_name(config), path, origin, lib.count(config, STUDIO_OCIO_LIB_COLORSPACES),
-			         lib.default_display(config), ws);
+			snprintf(status_head, sizeof(status_head), "OCIO %s, config \"%s\" from %s (%s), %d colorspaces, display \"%s\"", lib.ocio_version(),
+			         lib.config_name(config), path, origin, lib.count(config, STUDIO_OCIO_LIB_COLORSPACES), lib.default_display(config));
+			update_status();
 			ok = true;
 		}
 	}
 	pthread_mutex_unlock(&mutex);
 	return ok;
+}
+
+// Appelant : mutex tenu. L'espace de travail est cherché à nouveau ; la génération ne change que s'il change.
+static void rework_working_space(void) {
+	if (config == NULL) {
+		return;
+	}
+	const char *before = working;
+	char        before_error[sizeof(working_error)];
+	memcpy(before_error, working_error, sizeof(before_error));
+	find_working_space();
+	bool same = before != NULL && working != NULL ? strcmp(before, working) == 0 : before == working && strcmp(before_error, working_error) == 0;
+	if (!same) {
+		generation++;
+	}
+	update_status();
+}
+
+void studio_ocio_set_config_preference(const char *path) {
+	pthread_mutex_lock(&mutex);
+	snprintf(config_pref, sizeof(config_pref), "%s", path != NULL ? path : "");
+	pthread_mutex_unlock(&mutex);
+}
+
+const char *studio_ocio_config_preference(void) {
+	return config_pref;
+}
+
+const char *studio_ocio_config_origin(void) {
+	return config_origin;
+}
+
+void studio_ocio_set_working_space_preference(const char *name) {
+	pthread_mutex_lock(&mutex);
+	snprintf(ws_pref, sizeof(ws_pref), "%s", name != NULL ? name : "");
+	rework_working_space();
+	pthread_mutex_unlock(&mutex);
+}
+
+const char *studio_ocio_working_space_preference(void) {
+	return ws_pref;
+}
+
+void studio_ocio_set_project_working_space(int mode, const char *name) {
+	pthread_mutex_lock(&mutex);
+	ws_mode = mode == STUDIO_OCIO_WS_AUTOMATIC || mode == STUDIO_OCIO_WS_NAMED ? mode : STUDIO_OCIO_WS_DEFAULT;
+	snprintf(ws_project, sizeof(ws_project), "%s", name != NULL ? name : "");
+	rework_working_space();
+	pthread_mutex_unlock(&mutex);
+}
+
+int studio_ocio_project_working_space_mode(void) {
+	return ws_mode;
+}
+
+const char *studio_ocio_project_working_space_name(void) {
+	return ws_project;
 }
 
 void studio_ocio_shutdown(void) {
@@ -333,6 +450,14 @@ int studio_ocio_view_is_hdr(const char *display, const char *view) {
 
 const char *studio_ocio_working_space(void) {
 	return config != NULL ? working : NULL;
+}
+
+const char *studio_ocio_working_space_origin(void) {
+	return config != NULL && working != NULL ? working_origin : "";
+}
+
+bool studio_ocio_working_space_auto(void) {
+	return config != NULL && working != NULL && working_auto;
 }
 
 const char *studio_ocio_working_space_error(void) {
