@@ -32,19 +32,29 @@ void project_import_mesh_box_draw() {
 	void (*done)(void)     = _project_import_mesh_box_done;
 
 	if (ends_with(to_lower_case(path), ".obj") || ends_with(to_lower_case(path), ".fbx")) {
+		// STUDIO-PATCH(udim-import): udim tiles are a check next to the object or material split (lot D1), material and
+		// udim together give "<material>.<tile>" objects
 		string_array_t *split_by_combo = any_array_create_from_raw_tmp(
 		    (void *[]){
 		        tr("Object"),
 		        tr("Material"),
-		        tr("UDIM Tile"),
 		    },
-		    3);
+		    2);
+		split_type_t split = g_context->split_by;
+		i32          by    = split == SPLIT_TYPE_MATERIAL || split == SPLIT_TYPE_MATERIAL_UDIM ? SPLIT_TYPE_MATERIAL : SPLIT_TYPE_OBJECT;
+		bool         udim  = split == SPLIT_TYPE_UDIM || split == SPLIT_TYPE_MATERIAL_UDIM;
 		ui_text(tr("Split By"), UI_ALIGN_LEFT, 0);
-		ui_inline_radio((int *)&g_context->split_by, split_by_combo, UI_ALIGN_LEFT);
-		plugins_split_by = g_context->split_by;
+		ui_row2();
+		ui_inline_radio(&by, split_by_combo, UI_ALIGN_LEFT);
 		if (g_ui->is_hovered) {
 			ui_tooltip(tr("Split mesh into objects"));
 		}
+		ui_check(&udim, tr("UDIM Tiles"), "");
+		if (g_ui->is_hovered) {
+			ui_tooltip(tr("Split each object by UDIM tile too"));
+		}
+		g_context->split_by = udim ? (by == SPLIT_TYPE_MATERIAL ? SPLIT_TYPE_MATERIAL_UDIM : SPLIT_TYPE_UDIM) : by;
+		plugins_split_by    = g_context->split_by;
 	}
 
 	if (ends_with(to_lower_case(path), ".blend")) {

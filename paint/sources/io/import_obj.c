@@ -16,7 +16,8 @@ void import_obj_run(char *path, bool replace_existing) {
 // STUDIO-PATCH(udim-import): udim split, see paint/plugins/external/PATCHES.md. Upstream read the file as a single
 // object and gave each tile a copy of all the vertices. Now each object is split in its tiles, with the vertices of the
 // tile only, and obj_parse cuts the triangles over several tiles. A uv out of the tiles 1001-1990, or more tiles than
-// the layer atlas holds, refuses the file with a message and imports nothing.
+// the layer atlas holds, refuses the file with a message and imports nothing. By material and tile (lot D1), each
+// material gives one object per tile, gathered from all its parts.
 static void _import_obj_udim_free(raw_mesh_t *part) {
 	if (part->udims != NULL) {
 		for (i32 i = 0; i < part->udims->length; ++i) {
@@ -38,24 +39,58 @@ static void _import_obj_udim_free(raw_mesh_t *part) {
 	free(part);
 }
 
-// The triangles of one tile, with their own vertices (obj_parse never shares the corners of its triangles)
-static raw_mesh_t *_import_obj_udim_tile(raw_mesh_t *part, u32_array_t *inda, char *name) {
-	raw_mesh_t *mesh = calloc(1, sizeof(raw_mesh_t));
-	mesh->name       = name;
-	mesh->scale_pos  = part->scale_pos;
-	mesh->scale_tex  = part->scale_tex;
-	mesh->posa       = i16_array_create(inda->length * 4);
-	mesh->nora       = i16_array_create(inda->length * 2);
-	mesh->texa       = i16_array_create(inda->length * 2);
-	mesh->inda       = u32_array_create(inda->length);
-	for (i32 i = 0; i < inda->length; ++i) {
-		u32 k = inda->buffer[i];
-		memcpy(&mesh->posa->buffer[i * 4], &part->posa->buffer[k * 4], sizeof(i16) * 4);
-		memcpy(&mesh->nora->buffer[i * 2], &part->nora->buffer[k * 2], sizeof(i16) * 2);
-		memcpy(&mesh->texa->buffer[i * 2], &part->texa->buffer[k * 2], sizeof(i16) * 2);
-		mesh->inda->buffer[i] = i;
+// The indices of a tile (u + 10 v) in the grid of a part, NULL out of it
+static u32_array_t *_import_obj_udim_indices(raw_mesh_t *part, i32 tile) {
+	i32 u = tile % UDIM_TILES_U;
+	i32 v = tile / UDIM_TILES_U;
+	return u < part->udims_u && v < part->udims_v ? part->udims->buffer[u + v * part->udims_u] : NULL;
+}
+
+// The triangles of one tile, with their own vertices (obj_parse never shares the corners of its triangles), from every
+// part of the group, named after the first. The positions go to the largest scale of the parts. The indices taken are
+// emptied: a later part of the group gives them no more. NULL if no part has the tile.
+static raw_mesh_t *_import_obj_udim_tile(raw_mesh_t_array_t *group, i32 tile) {
+	i32 length    = 0;
+	f32 scale_pos = 0.0;
+	for (i32 i = 0; i < group->length; ++i) {
+		u32_array_t *a = _import_obj_udim_indices(group->buffer[i], tile);
+		if (a != NULL && a->length > 0) {
+			length += a->length;
+			scale_pos = math_max(scale_pos, group->buffer[i]->scale_pos);
+		}
 	}
-	mesh->vertex_count = mesh->index_count = inda->length;
+	if (length == 0) {
+		return NULL;
+	}
+	raw_mesh_t *mesh = calloc(1, sizeof(raw_mesh_t));
+	mesh->name       = string("%s.%d", group->buffer[0]->name, udim_tile_id(tile % UDIM_TILES_U, tile / UDIM_TILES_U));
+	mesh->scale_pos  = scale_pos;
+	mesh->scale_tex  = group->buffer[0]->scale_tex;
+	mesh->posa       = i16_array_create(length * 4);
+	mesh->nora       = i16_array_create(length * 2);
+	mesh->texa       = i16_array_create(length * 2);
+	mesh->inda       = u32_array_create(length);
+	i32 n            = 0;
+	for (i32 i = 0; i < group->length; ++i) {
+		raw_mesh_t  *part  = group->buffer[i];
+		u32_array_t *a     = _import_obj_udim_indices(part, tile);
+		f32          scale = part->scale_pos / scale_pos;
+		for (i32 j = 0; a != NULL && j < a->length; ++j, ++n) {
+			u32 k = a->buffer[j];
+			for (i32 c = 0; c < 3; ++c) {
+				i16 p                         = part->posa->buffer[k * 4 + c];
+				mesh->posa->buffer[n * 4 + c] = scale == 1.0 ? p : (i16)roundf(p * scale);
+			}
+			mesh->posa->buffer[n * 4 + 3] = part->posa->buffer[k * 4 + 3]; // Normal z
+			memcpy(&mesh->nora->buffer[n * 2], &part->nora->buffer[k * 2], sizeof(i16) * 2);
+			memcpy(&mesh->texa->buffer[n * 2], &part->texa->buffer[k * 2], sizeof(i16) * 2);
+			mesh->inda->buffer[n] = n;
+		}
+		if (a != NULL) {
+			a->length = 0;
+		}
+	}
+	mesh->vertex_count = mesh->index_count = length;
 	return mesh;
 }
 
@@ -70,7 +105,7 @@ static void _import_obj_udim_add(raw_mesh_t *mesh, bool *first, bool replace_exi
 	free(mesh); // The arrays and the name now belong to the mesh object
 }
 
-static void _import_obj_udim(buffer_t *b, bool replace_existing) {
+static void _import_obj_udim(buffer_t *b, bool replace_existing, bool by_material) {
 	bool used[UDIM_TILES_U * UDIM_TILES_V] = {0}; // Tile u + 10 v
 
 	raw_mesh_t_array_t *parts         = any_array_create_from_raw((void *[]){}, 0);
@@ -84,7 +119,7 @@ static void _import_obj_udim(buffer_t *b, bool replace_existing) {
 	u64                 pos           = 0;
 	bool                has_next      = true;
 	while (has_next) {
-		raw_mesh_t *part = obj_parse(b, 'o', pos, true);
+		raw_mesh_t *part = obj_parse(b, by_material ? 'u' : 'o', pos, true); // usemtl or o
 		pos              = part->pos;
 		has_next         = part->has_next;
 		if (string_equals(part->name, "")) {
@@ -146,14 +181,24 @@ static void _import_obj_udim(buffer_t *b, bool replace_existing) {
 				objects++;
 			}
 			else {
-				for (i32 j = 0; j < part->udims->length; ++j) {
-					u32_array_t *a = part->udims->buffer[j];
-					if (a->length > 0) {
-						char *name = string("%s.%d", part->name, udim_tile_id(j % part->udims_u, j / part->udims_u));
-						_import_obj_udim_add(_import_obj_udim_tile(part, a, name), &first, replace_existing);
+				// By material, the later parts of the material bring their triangles too: an obj splits a material at each
+				// object and at each "v" after faces (Maya repeats usemtl in each object)
+				raw_mesh_t_array_t *group = any_array_create_from_raw((void *[]){part}, 1);
+				for (i32 j = i + 1; by_material && j < parts->length; ++j) {
+					raw_mesh_t *p = parts->buffer[j];
+					if (p != NULL && p->udims != NULL && string_equals(p->name, part->name)) {
+						any_array_push(group, p);
+					}
+				}
+				for (i32 tile = 0; tile < UDIM_TILES_U * UDIM_TILES_V; ++tile) {
+					raw_mesh_t *mesh = _import_obj_udim_tile(group, tile);
+					if (mesh != NULL) {
+						_import_obj_udim_add(mesh, &first, replace_existing);
 						objects++;
 					}
 				}
+				array_free(group);
+				free(group);
 				_import_obj_udim_free(part);
 			}
 		}
@@ -176,11 +221,11 @@ static void _import_obj_udim(buffer_t *b, bool replace_existing) {
 
 void import_obj_parse(buffer_t *b, bool replace_existing) {
 	split_type_t i          = g_context->split_by;
-	bool         is_udim    = i == SPLIT_TYPE_UDIM;
+	bool         is_udim    = i == SPLIT_TYPE_UDIM || i == SPLIT_TYPE_MATERIAL_UDIM; // STUDIO-PATCH(udim-import)
 	i32          split_code = (i == SPLIT_TYPE_OBJECT || is_udim) ? 'o' : 'u'; // usemtl
 
 	if (is_udim) { // STUDIO-PATCH(udim-import)
-		_import_obj_udim(b, replace_existing);
+		_import_obj_udim(b, replace_existing, i == SPLIT_TYPE_MATERIAL_UDIM);
 	}
 	else {
 		raw_mesh_t_array_t *parts     = any_array_create_from_raw((void *[]){}, 0);

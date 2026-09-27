@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 // Cœur ArmorPaint (paint/sources/globals.h, functions.h)
 extern context_t *g_context;
@@ -307,9 +308,11 @@ bool studio_atlas_limit_layer(int atlas) {
 	return true;
 }
 
-// ---- Conseil de résolution après un import UDIM ----------------------------------------------------------------------
+// ---- Fin d'un import UDIM : jeux de textures par matériau, conseil de résolution -------------------------------------
 
-void studio_udim_import_hint(void) {
+// Pixels de chaque tuile et projet conseillé (studio_udim_hint). Dans la barre d'état si elle est libre, dans la
+// console seule sinon.
+static void udim_import_hint(void) {
 	if (!util_mesh_udim_active()) {
 		return;
 	}
@@ -338,6 +341,68 @@ void studio_udim_import_hint(void) {
 	free(hint);
 }
 
+// Un jeu de textures par matériau, nommé comme lui, avec ses objets <matériau>.<tuile> (et le matériau sans uv, sans
+// tuile). Refusé par studio_atlas_set (nom de plus de 64 caractères, plus de 256 matériaux) : les jeux restent ceux
+// d'avant, la console dit pourquoi.
+static void udim_material_sets(void) {
+	int    n       = object_count();
+	char **names   = calloc((size_t)(n > 0 ? n : 1), sizeof(char *));
+	int   *objects = malloc(sizeof(int) * (size_t)(n > 0 ? n : 1));
+	int    count   = 0;
+	for (int i = 0; names != NULL && objects != NULL && i < n; ++i) {
+		char  *name = g_project->_->paint_objects->buffer[i]->base->name;
+		size_t len  = strlen(name) - (util_mesh_udim_tile(name) > 0 ? 5 : 0); // ".1001"
+		int    k    = 0;
+		while (k < count && (strlen(names[k]) != len || strncmp(names[k], name, len) != 0)) {
+			k++;
+		}
+		if (k == count) {
+			names[count] = calloc(len + 1, 1);
+			if (names[count] == NULL) {
+				break;
+			}
+			memcpy(names[count++], name, len);
+		}
+		objects[i] = k;
+	}
+	text_t b = {0};
+	put(&b, "{\"names\":[");
+	for (int k = 0; k < count; ++k) {
+		put(&b, k > 0 ? "," : "");
+		put_quoted(&b, names[k]);
+	}
+	put(&b, "],\"objects\":[");
+	for (int i = 0; objects != NULL && i < n; ++i) {
+		put(&b, i > 0 ? ",%d" : "%d", objects[i]);
+	}
+	put(&b, "]}");
+	char err[512] = "out of memory";
+	if (b.data == NULL || names == NULL || objects == NULL || !studio_atlas_set(b.data, err, sizeof(err))) {
+		console_log(string_tmp("UDIM import: no texture set per material, %s.", err));
+	}
+	for (int k = 0; k < count; ++k) {
+		free(names[k]);
+	}
+	free(names);
+	free(objects);
+	free(b.data);
+}
+
+static bool split_file(const char *path) {
+	size_t len = path != NULL ? strlen(path) : 0;
+	return len > 4 && (strcasecmp(path + len - 4, ".obj") == 0 || strcasecmp(path + len - 4, ".fbx") == 0);
+}
+
+void studio_udim_import_done(bool append) {
+	string_array_t *assets = g_project->mesh_assets;
+	// Le découpage n'est lu que par les importeurs OBJ et FBX : il peut rester sur « matériau et tuile » d'un import
+	// précédent quand on importe un .blend ou un .gltf
+	if (!append && g_context->split_by == SPLIT_TYPE_MATERIAL_UDIM && assets != NULL && assets->length > 0 && split_file(assets->buffer[0])) {
+		udim_material_sets();
+	}
+	udim_import_hint();
+}
+
 // ---- Scripting (minic) -----------------------------------------------------------------------------------------------
 
 #ifdef WITH_EVAL
@@ -360,11 +425,12 @@ static minic_val_t mn_studio_set_atlases(minic_val_t *a, int n) {
 }
 
 // Importe un maillage à la place de celui du projet (calques vidés), découpé comme le « Split By » de la boîte
-// d'import : 0 par objet, 1 par matériau, 2 par tuile UDIM. Pour les scripts batch et les bancs.
+// d'import : 0 par objet, 1 par matériau, 2 par tuile UDIM, 3 par matériau et par tuile UDIM (un jeu de textures par
+// matériau). Pour les scripts batch et les bancs.
 static minic_val_t mn_studio_import_mesh(minic_val_t *a, int n) {
 	char *path  = minic_arg_p(a, n, 0);
 	int   split = (int)minic_arg_i(a, n, 1);
-	if (path == NULL || split < SPLIT_TYPE_OBJECT || split > SPLIT_TYPE_UDIM) {
+	if (path == NULL || split < SPLIT_TYPE_OBJECT || split > SPLIT_TYPE_MATERIAL_UDIM) {
 		return minic_val_int(0);
 	}
 	g_context->split_by = (split_type_t)split;

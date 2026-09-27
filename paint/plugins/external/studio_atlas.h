@@ -31,6 +31,7 @@ bool studio_atlas_limit_layer(int atlas);
 // Export découpé par jeu (au moins deux jeux utilisés), comme export_texture_run.
 bool studio_atlas_active(void);
 
-// Après un import de maillage (import_mesh_finish_import, STUDIO-PATCH(udim-import)) : en UDIM, pixels de chaque
-// tuile et projet conseillé (studio_udim_hint). Dans la barre d'état si elle est libre, dans la console seule sinon.
-void studio_udim_import_hint(void);
+// Après un import de maillage (import_mesh_finish_import, STUDIO-PATCH(udim-import)). Découpé par matériau et par tuile
+// UDIM (OBJ, FBX), hors ajout à un maillage : un jeu de textures par matériau. En UDIM : pixels de chaque tuile et
+// projet conseillé (studio_udim_hint), dans la barre d'état si elle est libre, dans la console seule sinon.
+void studio_udim_import_done(bool append);

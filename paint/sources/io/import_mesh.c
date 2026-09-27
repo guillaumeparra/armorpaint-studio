@@ -162,8 +162,10 @@ void import_mesh_finish_import(void *_) {
 	base_update_workflow();
 
 #ifdef WITH_EXTERNAL
-	void studio_udim_import_hint(void); // STUDIO-PATCH(udim-import): pixels per udim tile and project resolution advised, in external/
-	studio_udim_import_hint();
+	// STUDIO-PATCH(udim-import): in external/, a texture set per material after a split by material and udim tile, pixels
+	// per udim tile and project resolution advised
+	void studio_udim_import_done(bool append);
+	studio_udim_import_done(import_mesh_append);
 #endif
 
 	if (import_mesh_needs_unwrap) {

@@ -37,6 +37,8 @@ typedef enum {
 	SPLIT_TYPE_OBJECT   = 0,
 	SPLIT_TYPE_MATERIAL = 1,
 	SPLIT_TYPE_UDIM     = 2,
+	// STUDIO-PATCH(udim-import): by material and by udim tile together, "<material>.<tile>" objects (lot D1)
+	SPLIT_TYPE_MATERIAL_UDIM = 3,
 } split_type_t;
 
 typedef enum {
