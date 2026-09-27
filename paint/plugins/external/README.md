@@ -939,13 +939,16 @@ int   studio_append_mesh(char *path, int split);     // ajoute un maillage à ce
 char *studio_layer_masks(void);                      // masques d'objet des calques : "Layer 1=0 Layer 2=5 filter=0" (bancs)
 int   studio_layer_new_mask(int white);              // masque blanc (1) ou noir (0) sur le calque courant, devenu courant
 int   studio_layer_select(int i);                    // calque courant : le i-ième de la pile (0 en bas)
-int   studio_layer_op(char *op);                     // "duplicate", "delete", "clear", "invert" (masque), "undo", "redo", "sync" (bancs)
+int   studio_layer_op(char *op);                     // "duplicate", "delete", "clear", "invert" (masque), "merge_down", "merge_group", "apply_mask" (masque courant), "undo", "redo", "sync" (bancs)
+int   studio_layer_set_parent(int i, int group);     // met le calque i dans le groupe d'indice group (-1 : hors groupe), comme un glisser-déposer
+int   studio_mesh_override(int object, int material); // onglet Meshes : matériau glissé sur le maillage (-1 : aucun), que le flatten dessine par-dessus les calques
+int   studio_colorid_mask(char *path, int rgb);      // outil ColorID, To Mask : carte d'id path, couleur piquée 0xRRGGBB ; indice du masque créé sur le calque courant
 int   studio_project_res(int px);                    // résolution Custom px × px, calques redimensionnés tout de suite
 char *studio_world_screen(float x, float y, float z); // position à l'écran (0..1) d'un point du monde, « x y » ; « - » derrière la caméra
 char *studio_rt_pixel(char *target, float x, float y, float z); // pixel « r g b a » d'une cible de rendu (gbuffer1...) là où le point se projette
 char *studio_udim_stats(void);                       // tuiles UDIM (lot D2) : « tile=1001 table=... stores=N partial=N contents=N » (bancs)
 char *studio_udim_layer(int i);                      // textures du calque i par tuile, « base=[...] nor=[...] pack=[...] » ; i < 0 : emplacement d'undo -1-i
-char *studio_udim_pixel(int i, int channel, int tile, int x, int y); // texel « r g b a » (0 à 1) d'une tuile du calque i ; channel 0 base, 1 nor, 2 pack ; 3, 4, 5 cartes UV, des triangles et de dilatation du calque courant ; 6 texture du nœud Bake Texture d'id i ; 7 i-ème aperçu de nœud du matériau ; 8 base de l'emplacement d'undo i ; « - » si la tuile n'est pas tenue
+char *studio_udim_pixel(int i, int channel, int tile, int x, int y); // texel « r g b a » (0 à 1) d'une tuile du calque i ; channel 0 base, 1 nor, 2 pack ; 3, 4, 5 cartes UV, des triangles et de dilatation du calque courant ; 6 texture du nœud Bake Texture d'id i ; 7 i-ème aperçu de nœud du matériau ; 8 base de l'emplacement d'undo i ; 9, 10, 11 base, nor, pack du flatten de la tuile ; « - » si la tuile n'est pas tenue
 int   studio_paint_option(char *name, int on);       // "camera_align", "ortho", "xray", "sym_x", "sym_y", "sym_z" ; "fill_type" prend la valeur (0 objet, 1 face, 2 angle, 3 îlot UV) ; 1 si fait (la symétrie est peinte par la frame, pas par script_paint_world)
 char *studio_udim_pick(char *what, float x, float y, float z); // pipettes UDIM au point du monde : "cursor" tuile sous le pinceau, "islands" carte des îlots UV, "picked" tuile, couleur et uv de la dernière pipette
 int   studio_clone_source(float xs, float ys, float zs, float xd, float yd, float zd); // source du clone vue depuis la destination, comme le Alt-clic ; 1 si les deux points sont devant la caméra
@@ -1425,7 +1428,7 @@ int   studio_ocio_import_reconvert(void);        // recharge et reconvertit les 
 .tests/obj.sh [dossier de travail]     # import OBJ (patches obj-global-indices, obj-float-exponent, udim-import) ; FUZZ=<n> pour le nombre de mutations
 .tests/fbx.sh [dossier de travail]     # import FBX (patch fbx-split) : splits = upstream, UDIM, matériaux, fuzz ; FUZZ=<n>
 .tests/udim_app.sh [dossier]           # UDIM dans l'app (lot D0) : import OBJ/FBX, refus, ajout, 70 tuiles (atlas, peinture, export), conseil de résolution, layer() par tuile
-.tests/udim_tiles_app.sh [dossier]     # jeu de textures par tuile (lot D2, patch udim-tiles) : opérations de calque, undo, table qui change (D2a) ; peinture à la couture, undo par pas, ortho, xray, symétrie, cartes, pipettes, remplissages, clone, bakes par tuile et high poly (D2b, patch bake-derivative)
+.tests/udim_tiles_app.sh [dossier]     # jeu de textures par tuile (lot D2, patch udim-tiles) : opérations de calque, undo, table qui change (D2a) ; peinture à la couture, undo par pas, ortho, xray, symétrie, cartes, pipettes, remplissages, clone, bakes par tuile et high poly (D2b, patch bake-derivative) ; flatten, fusions, masques, groupes, surcharges de matériau, ColorID → masque par tuile (D2c)
 .tests/sg.sh [dossier de travail]     # ShotGrid hors app : sidecar (C2), noms des exports (B3), moteur (C3), publish (C4), mode dégradé et file d'attente (C5) ; Toolkit de .shotgrid/
 .tests/publish_app.sh [dossier]        # publish ShotGrid (C4) dans l'app, site simulé : op publish, fenêtre Publish (Qt offscreen), op publish en --background ; Versions de review ; copie publiée rouverte sans le dossier de travail ; PY=<python PySide6>
 .tests/sg_context_app.sh [dossier]     # contexte et mode dégradé ShotGrid (C5) dans l'app, site simulé : contexte gardé dans le .arm, site coupé (mode fichier, retour trouvé au repos), coupure en plein publish (file rejouée), journal d'audit, sonde en ligne et journal envoyé au site

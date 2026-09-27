@@ -2,7 +2,7 @@
 
 > **Décision 2026-09-26 : option B retenue** (un jeu de textures par tuile, « contexte de tuile », §6). Les options C et D sont écartées ; C reste une évolution possible de B si le nombre de draws devenait un problème (100+ tuiles).
 > **2026-09-27 : lots D0 et D1 faits** (§3, §7). D1 garde un objet de peinture par tuile : la tuile-donnée, le maillage à plages et la migration passent au lot D2 (§7, « Lot D1 »).
-> **2026-09-27 : lot D2 lancé** (go sans la recette C6), plan au §7 « Lot D2 ». Le maillage à plages et la tuile-donnée passent en D3. Sous-lots D2a et D2b faits (§7, « Lot D2a », « Lot D2b »).
+> **2026-09-27 : lot D2 lancé** (go sans la recette C6), plan au §7 « Lot D2 ». Le maillage à plages et la tuile-donnée passent en D3. Sous-lots D2a à D2c faits (§7, « Lot D2a » à « Lot D2c »).
 > Document de réflexion à l'origine ; le §7 sert désormais de plan (chantier D de `ARMORPAINT_LOTS.md`). Il fait l'état des UDIM après le commit upstream `99156dfc` (« paint: paint across udims », 2026-09-15), liste les limites, compare quatre architectures et propose une feuille de route.
 > Base : branche `studio` au commit `fbde517a`. Estimations en **jours-homme**, avec les mêmes hypothèses que `ARMORPAINT_LOTS.md`.
 > ⚠️ **§5.2 de `ARMORPAINT_ANALYSE.md` est en partie périmé.** Depuis `99156dfc`, on peut peindre à travers les tuiles et les calques partagés ne sont plus dupliqués par tuile. Ce document le remplace pour tout ce qui touche aux UDIM.
@@ -595,7 +595,7 @@ Patch `udim-tiles` (points d'appel) et `util_udim.c` (patch `udim-core`). Banc `
 ### Lot D2b (2026-09-27) : fait
 
 Patch `udim-tiles` (points d'appel D2b) et `util_udim.c` (patch `udim-core`). Un bug upstream a été corrigé en route
-(patch `bake-derivative`). Banc `.tests/udim_tiles_app.sh`, sections 7 à 10 : 48 contrôles en tout.
+(patch `bake-derivative`). Banc `.tests/udim_tiles_app.sh`, sections 7 à 10 : 49 contrôles en tout.
 - **Peinture.** `render_path_paint_commands_paint` peint un calque à tuiles tuile par tuile. `util_udim_paint_tiles`
   retient les tuiles touchées par le trait :
   - pinceau, gomme, clone et flou : boîtes des objets projetées à l'écran, comparées au segment du trait élargi du
@@ -649,6 +649,35 @@ Patch `udim-tiles` (points d'appel D2b) et `util_udim.c` (patch `udim-core`). Un
     normales qui varient (lissées).
 
   Non testés : sculpt, particules, décalques et texte sur un calque à tuiles (même chemin que le pinceau).
+
+### Lot D2c (2026-09-27) : fait
+
+Patch `udim-tiles` (points d'appel D2c) et `util_udim.c` (patch `udim-core`). Banc `.tests/udim_tiles_app.sh`,
+section 11 : 59 contrôles en tout.
+- **Deux opérations feuilles.** Toutes les opérations de calque passent par `layers_merge_layer` (fusion d'un calque
+  dans un autre) ou `layers_apply_mask` (masque appliqué). Sur un calque à tuiles, chacune se rappelle pour chaque
+  tuile (`util_udim_merge_layer`, `util_udim_apply_mask`). Merge Down, Merge Group, Apply Mask et les masques de
+  groupe sont donc faits tuile par tuile ; l'undo passe par la copie sur écriture de D2b (vérifié pour Merge Down et
+  Apply Mask).
+- **Flatten.** `layers_flatten` compose la tuile du contexte, où chaque calque à tuiles est lu tel quel ; il n'est
+  plus recopié dans une case d'atlas. Ses appelants bouclent sur les tuiles dont ils ont besoin (export en D2d).
+  Scripts : `studio_udim_pixel`, canaux 9 à 11 (base, nor, pack du flatten d'une tuile).
+- **Boucles imbriquées.** Une boucle sur les tuiles lancée dans une autre (Merge Group → fusion de chaque enfant) ne
+  refait pas le tour : `util_udim_loop_begin` rend 1 dès qu'un niveau parcourt les tuiles.
+- **Surcharges de matériau des maillages** (onglet Meshes, un matériau glissé sur un maillage). Le flatten d'un
+  projet UDIM les dessine par-dessus les calques. Elles le sont désormais sur la tuile de leur objet, dans ses uv,
+  plus dans sa case d'atlas.
+- **ColorID → To Mask.** Le masque est écrit sur toutes les tuiles, la carte d'id lue dans les uv de chaque tuile,
+  comme le fait le pinceau ColorID.
+- **Scripts pour les bancs** (`studio_atlas.c`) : `studio_layer_op` `merge_down`, `merge_group`, `apply_mask` ;
+  `studio_layer_set_parent` ; `studio_mesh_override` ; `studio_colorid_mask`.
+- **Limites** :
+  - une fusion d'un calque à tuiles dans un calque qui n'en a pas (limité à un objet sans tuile) ne lit que la tuile
+    du contexte ;
+  - upstream, non corrigé : des masques empilés sur un calque sont fusionnés en MIX dans le flatten (donc l'export) :
+    le dernier créé, le plus haut, remplace les autres, alors que la vue 3D les multiplie. Le banc le vérifie, pour
+    voir si l'upstream le change ;
+  - upstream, non corrigé : l'Undo d'un Merge Group ne rend pas le calque de base (même sans UDIM).
 
 ---
 

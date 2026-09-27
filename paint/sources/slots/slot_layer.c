@@ -292,6 +292,9 @@ void slot_layer_invert_mask(slot_layer_t *raw) {
 }
 
 void layers_apply_mask(slot_layer_t *l, slot_layer_t *m) {
+	if (util_udim_apply_mask(l, m)) { // STUDIO-PATCH(udim-tiles): tiled layer, mask applied tile by tile (calls back here)
+		return;
+	}
 	if (!slot_layer_is_layer(l) || !slot_layer_is_mask(m)) {
 		return;
 	}

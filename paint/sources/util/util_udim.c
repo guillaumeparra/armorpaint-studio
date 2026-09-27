@@ -878,14 +878,26 @@ bool util_udim_paint_undo(slot_layer_t *layer, i32 to_id, bool is_mask) {
 	return true;
 }
 
+// Inside a loop over the tiles, at any depth: the code called paints and dilates the tile of the context only, a nested
+// loop stays on it
+static bool udim_in_tile_loop() {
+	for (i32 d = 0; d < udim_loop_depth && d < 8; ++d) {
+		if (udim_loop_tiled[d]) {
+			return true;
+		}
+	}
+	return false;
+}
+
 i32 util_udim_loop_begin(bool tiled) {
 	if (!gpu_in_use) {
 		udim_update_table();
 	}
-	i32 d = udim_loop_depth < 8 ? udim_loop_depth : 7;
+	i32  d      = udim_loop_depth < 8 ? udim_loop_depth : 7;
+	bool nested = udim_in_tile_loop();
 	udim_loop_depth++;
 	udim_loop_saved[d] = udim_cur;
-	udim_loop_tiled[d] = tiled && udim_table_count > 1 && !gpu_in_use;
+	udim_loop_tiled[d] = tiled && udim_table_count > 1 && !gpu_in_use && !nested;
 	return udim_loop_tiled[d] ? udim_table_count : 1;
 }
 
@@ -894,11 +906,6 @@ void util_udim_loop_tile(i32 k) {
 	if (d >= 0 && udim_loop_tiled[d]) {
 		util_udim_set_tile(udim_table[k]);
 	}
-}
-
-// Inside a loop over the tiles: the code called paints and dilates the tile of the context only
-static bool udim_in_tile_loop() {
-	return udim_loop_depth > 0 && udim_loop_tiled[udim_loop_depth <= 8 ? udim_loop_depth - 1 : 7];
 }
 
 void util_udim_loop_end() {
@@ -910,6 +917,54 @@ void util_udim_loop_end() {
 	if (udim_loop_tiled[d]) {
 		util_udim_set_tile(udim_loop_saved[d]);
 	}
+}
+
+// Layer operations (lot D2c): layers_merge_layer() and layers_apply_mask() called back on each tile of the layer drawn to
+bool util_udim_merge_layer(slot_layer_t *l0, slot_layer_t *l1, bool use_mask) {
+	if (gpu_in_use || udim_in_tile_loop() || !util_udim_layer_tiled(l0)) {
+		return false;
+	}
+	i32 n = util_udim_loop_begin(true);
+	for (i32 k = 0; k < n; ++k) {
+		util_udim_loop_tile(k);
+		layers_merge_layer(l0, l1, use_mask);
+	}
+	util_udim_loop_end();
+	return true;
+}
+
+bool util_udim_apply_mask(slot_layer_t *l, slot_layer_t *m) {
+	if (gpu_in_use || udim_in_tile_loop() || !util_udim_layer_tiled(l)) {
+		return false;
+	}
+	i32 n = util_udim_loop_begin(true);
+	for (i32 k = 0; k < n; ++k) {
+		util_udim_loop_tile(k);
+		layers_apply_mask(l, m);
+	}
+	util_udim_loop_end();
+	return true;
+}
+
+// layers_draw_mesh_materials(): the flatten of a tiled project is the one of the tile of the context. The override
+// materials are drawn there by the objects of that tile, in their uvs (the atlas transform set to the identity, as for
+// the raytrace override pass).
+bool util_udim_draw_mesh_materials(char *context) {
+	if (udim_store_count == 0 || udim_table_count < 2) {
+		return false;
+	}
+	bool saved                         = render_path_raytrace_override_pass;
+	render_path_raytrace_override_pass = true;
+	_mesh_object_last_pipeline         = NULL;
+	for (i32 i = 0; i < scene_meshes->length; ++i) {
+		mesh_object_t *mesh = scene_meshes->buffer[i];
+		if (udim_cur >= 0 && util_mesh_udim_tile(mesh->base->name) == udim_cur) {
+			mesh_object_render(mesh, context, _render_path_bind_params);
+		}
+	}
+	render_path_raytrace_override_pass = saved;
+	render_path_end();
+	return true;
 }
 
 void util_udim_draw_meshes(char *context) {

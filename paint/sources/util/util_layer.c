@@ -926,6 +926,9 @@ void layers_merge_layer(slot_layer_t *l0, slot_layer_t *l1, bool use_mask) {
 	if (!l1->visible || slot_layer_is_group(l1)) {
 		return;
 	}
+	if (util_udim_merge_layer(l0, l1, use_mask)) { // STUDIO-PATCH(udim-tiles): tiled layer, merged tile by tile (calls back here)
+		return;
+	}
 
 	layers_make_temp_img();
 
@@ -1061,7 +1064,9 @@ void layers_draw_mesh_materials() {
 	render_path_set_target("expa", additional, NULL, GPU_CLEAR_NONE, 0, 0.0);
 	render_path_bind_target("main", "gbufferD");
 	render_path_bind_target("texpaint_blend1", "paintmask");
-	render_path_draw_meshes("atlas");
+	if (!util_udim_draw_mesh_materials("atlas")) { // STUDIO-PATCH(udim-tiles): tiled layers, the objects of the tile of the context
+		render_path_draw_meshes("atlas");
+	}
 }
 
 static gpu_texture_t *layers_udim_a    = NULL;
@@ -1166,7 +1171,8 @@ slot_layer_t *layers_flatten(bool height_to_normal, slot_layer_t_array_t *layers
 		}
 
 		// Flattened layers are in shared atlas space
-		i32 tile_slot = layers_udim_tile_slot(l1);
+		// STUDIO-PATCH(udim-tiles): a tiled layer is flattened on the tile of the context, not remapped to a cell
+		i32 tile_slot = util_udim_layer_tiled(l1) ? -1 : layers_udim_tile_slot(l1);
 		if (tile_slot == -2) { // STUDIO-PATCH(udim-tile-limit): the layer of a tile without a slot has no cell in the atlas
 			continue;
 		}

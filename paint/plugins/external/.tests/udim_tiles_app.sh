@@ -23,7 +23,10 @@
 #      de face et d'îlot UV sur la tuile touchée seule, undo ; clone : source sur une autre tuile, rien de peint ;
 #   9. bakes par tuile : Texcoord, Position, Object ID ; high poly (hauteur, dérivée, normales) avec le high confondu
 #      ou incliné ; Curvature : un aperçu par tuile ;
-#  10. 70 tuiles : le pinceau au-delà des 64 tenues ne peint rien.
+#  10. 70 tuiles : le pinceau au-delà des 64 tenues ne peint rien ;
+#  11. opérations de calques (lot D2c) : flatten par tuile ; Merge Down, undo, redo ; masques (et leur empilement
+#      upstream), Apply Mask, undo ; groupe à masque de groupe, Merge Group ; surcharge de matériau d'un maillage dans
+#      le flatten de sa tuile ; ColorID → masque sur toutes les tuiles.
 #
 #   sh .tests/udim_tiles_app.sh [dossier de travail]
 #   APP=<binaire ArmorPaint> pour un autre build (défaut : build Release de paint/).
@@ -116,6 +119,14 @@ def cubes(path, center):
 
 cubes("center1063.obj", 1063)
 cubes("center1065.obj", 1065)
+
+
+# Carte d'id 64 x 64 : moitié gauche rouge, moitié droite bleue
+import struct, zlib
+rows = b"".join(b"\x00" + b"".join(b"\xff\x00\x00" if x < 32 else b"\x00\x00\xff" for x in range(64)) for y in range(64))
+chunk = lambda t, d: struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF)
+ihdr = struct.pack(">IIBBBBB", 64, 64, 8, 2, 0, 0, 0)
+open("cid.png", "wb").write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
 EOF
 
 # Lance un script dans ArmorPaint sans interface ; ses lignes « t: » dans $W/$1.out. $2 : code de retour attendu (0).
@@ -642,6 +653,125 @@ EOF
 done
 check "cube 1063 au centre : peint dans sa tuile seule, l'undo ne tient qu'elle" '[ "$(line cubes1063 reds)" = "[ 1063]" ] && line cubes1063 slot | grep -q "^base=\[cur=-1 partial=1 tiles=1063 1x1\]"'
 check "cube 1065 (hors des 64) au centre : rien de peint, rien de tenu" '[ "$(line cubes1065 reds)" = "[]" ] && line cubes1065 slot | grep -q "^base=\[cur=-*[01] partial=1 tiles=0 "'
+
+echo "== 11. opérations de calques : flatten, fusion, masques, groupes, surcharge de matériau, ColorID"
+# Couleurs d'un calque (canal 0) ou du flatten (canal 9) sur les 5 tuiles du ruban, au texel x
+LAYERS='
+void c5(char *what, int l, int ch, int x) {
+	console_log(string("t: %s %s | %s | %s | %s | %s", what, studio_udim_pixel(l, ch, 1001, x, 10), studio_udim_pixel(l, ch, 1002, x, 10),
+		studio_udim_pixel(l, ch, 1003, x, 10), studio_udim_pixel(l, ch, 1004, x, 10), studio_udim_pixel(l, ch, 1011, x, 10)));
+}
+void names() {
+	console_log(string("t: names %s", studio_layer_masks()));
+}
+// Calque 1 : 1001 rouge, 1002 vert, 1011 bleu ; calque 2 : 1001 bleu, 1003 magenta
+void two_layers() {
+	studio_project_res(128);
+	studio_import_mesh("'"$W"'/strip.obj", 2);
+	studio_layer_new();
+	studio_udim_fill(1, 0, 1001, 1.0, 0.0, 0.0, 1.0);
+	studio_udim_fill(1, 0, 1002, 0.0, 1.0, 0.0, 1.0);
+	studio_udim_fill(1, 0, 1011, 0.0, 0.0, 1.0, 1.0);
+	studio_layer_new();
+	studio_udim_fill(2, 0, 1001, 0.0, 0.0, 1.0, 1.0);
+	studio_udim_fill(2, 0, 1003, 1.0, 0.0, 1.0, 1.0);
+}
+'
+script merge <<EOF
+$LAYERS
+int main() {
+	two_layers();
+	c5("flat0", 0, 9, 10);
+	studio_layer_select(2);
+	console_log(string("t: merge %d", studio_layer_op("merge_down")));
+	names();
+	c5("merged", 1, 0, 10);
+	c5("flat1", 0, 9, 10);
+	studio_layer_op("undo");
+	names();
+	c5("undo1", 1, 0, 10);
+	c5("undo2", 2, 0, 10);
+	studio_layer_op("redo");
+	c5("redo", 1, 0, 10);
+	// Masques du calque fusionné : le premier noir sur la 1002 ; le second, blanc, par-dessus
+	studio_layer_select(1);
+	console_log(string("t: mask %d", studio_layer_new_mask(1)));
+	studio_udim_fill(1, 0, 1002, 0.0, 0.0, 0.0, 1.0);
+	c5("flatmask", 0, 9, 10);
+	studio_layer_new_mask(1);
+	studio_udim_fill(1, 0, 1011, 0.0, 0.0, 0.0, 1.0);
+	names();
+	c5("flatmask2", 0, 9, 10);
+	studio_layer_select(1);
+	console_log(string("t: apply %d", studio_layer_op("apply_mask")));
+	names();
+	c5("flatapply", 0, 9, 10);
+	c5("applied", 2, 0, 10);
+	studio_layer_op("undo");
+	names();
+	c5("unapplied", 3, 0, 10);
+	return 0;
+}
+EOF
+script group <<EOF
+$LAYERS
+int main() {
+	two_layers();
+	console_log(string("t: group %d %d %d", studio_layer_new_group(), studio_layer_set_parent(1, 3), studio_layer_set_parent(2, 3)));
+	studio_layer_new_mask(1);
+	studio_udim_fill(3, 0, 1011, 0.0, 0.0, 0.0, 1.0);
+	names();
+	c5("flatg", 0, 9, 10);
+	studio_layer_select(4);
+	console_log(string("t: mergeg %d", studio_layer_op("merge_group")));
+	names();
+	c5("merged", 1, 0, 10);
+	c5("flatm", 0, 9, 10);
+	return 0;
+}
+EOF
+script override <<EOF
+$LAYERS
+int main() {
+	studio_project_res(128);
+	studio_import_mesh("$W/strip.obj", 2);
+	studio_layer_new();
+	studio_udim_fill(1, 0, 1001, 1.0, 0.0, 0.0, 1.0);
+	studio_udim_fill(1, 0, 1002, 0.0, 1.0, 0.0, 1.0);
+	studio_udim_fill(1, 0, 1011, 0.0, 0.0, 1.0, 1.0);
+	c5("flat0", 0, 9, 10);
+	script_material_create("ov");
+	int o = -1;
+	for (int i = 0; i < 8; i++) {
+		if (string_equals(studio_object_rename(i, ""), "strip.1002")) {
+			o = i;
+		}
+	}
+	console_log(string("t: override %d", studio_mesh_override(o, 1)));
+	c5("flatov", 0, 9, 10);
+	studio_mesh_override(o, -1);
+	c5("flatnoov", 0, 9, 10);
+	studio_layer_select(1);
+	int m = studio_colorid_mask("$W/cid.png", 0xff0000);
+	console_log(string("t: cid %d", m));
+	c5("cidleft", m, 0, 10);
+	c5("cidright", m, 0, 100);
+	return 0;
+}
+EOF
+M="1.000 0.000 1.000 1.000"
+FLAT="$B | $G | $M | $Y | $B"
+MERGED="$B | $G | $M | $Z | $B"
+check "flatten par tuile : le composite de chaque tuile (le gris du calque de base sur la 1004)" '[ "$(line merge flat0)" = "$FLAT" ]'
+check "Merge Down : un calque de moins, chaque tuile fusionnée, flatten inchangé" '[ "$(line merge merge)" = 1 ] && [ "$(line merge merged)" = "$MERGED" ] && [ "$(line merge flat1)" = "$FLAT" ] && [ "$(line merge names | sed -n 1p)" = "Layer 1=0 Layer 2=0 filter=0" ]'
+check "Merge Down, Undo : les deux calques et chacune de leurs tuiles rendus ; Redo : fusionnés" '[ "$(line merge names | sed -n 2p)" = "Layer 1=0 Layer 2=0 Layer 3=0 filter=0" ] && [ "$(line merge undo1)" = "$R | $G | $Z | $Z | $B" ] && [ "$(line merge undo2)" = "$B | $Z | $M | $Z | $Z" ] && [ "$(line merge redo)" = "$MERGED" ]'
+check "masque noir sur la 1002 : le flatten n y montre que la base, les autres tuiles intactes" '[ "$(line merge mask)" = 1 ] && [ "$(line merge flatmask)" = "$B | $Y | $M | $Y | $B" ]'
+check "deux masques : upstream, le dernier remplace les autres (fusion des masques en MIX)" '[ "$(line merge names | sed -n 3p)" = "Layer 1=0 Mask 3=0 Mask 4=0 Layer 2=0 filter=0" ] && [ "$(line merge flatmask2)" = "$FLAT" ]'
+check "Apply Mask : le masque (noir sur 1002 et 1011) appliqué à chaque tuile du calque (alpha 0), puis retiré ; Undo le rend" '[ "$(line merge apply)" = 1 ] && [ "$(line merge names | sed -n 4p)" = "Layer 1=0 Mask 4=0 Layer 2=0 filter=0" ] && [ "$(line merge flatapply)" = "$B | $Y | $M | $Y | $Y" ] && [ "$(line merge applied)" = "$B | 0.000 1.000 0.000 0.000 | $M | $Z | 0.000 0.000 1.000 0.000" ] && [ "$(line merge names | sed -n 5p)" = "Layer 1=0 Mask 5=0 Mask 4=0 Layer 2=0 filter=0" ] && [ "$(line merge unapplied)" = "$MERGED" ]'
+check "groupe à masque de groupe (noir sur la 1011) : flatten par tuile" '[ "$(line group group)" = "1 1 1" ] && [ "$(line group names | sed -n 1p)" = "Layer 1=0 Layer 2=0 Layer 3=0 Mask 5=0 Group 4=0 filter=0" ] && [ "$(line group flatg)" = "$B | $G | $M | $Y | $Y" ]'
+check "Merge Group : un calque, chaque tuile fusionnée, le masque de groupe appliqué (1011 transparente), flatten inchangé" '[ "$(line group mergeg)" = 1 ] && [ "$(line group names | sed -n 2p)" = "Layer 1=0 Group 4=0 filter=0" ] && [ "$(line group merged)" = "$B | $G | $M | $Z | 0.000 0.000 1.000 0.000" ] && [ "$(line group flatm)" = "$(line group flatg)" ]'
+check "surcharge de matériau du maillage de la 1002 : son flatten prend le matériau, les autres tuiles non ; retirée, le calque revient" '[ "$(line override override)" = 1 ] && [ "$(line override flatov)" = "$R | 0.800 0.800 0.800 1.000 | $Y | $Y | $B" ] && [ "$(line override flatnoov)" = "$(line override flat0)" ] && [ "$(line override flat0)" = "$R | $G | $Y | $Y | $B" ]'
+check "ColorID → masque : la carte lue dans les uv de chaque tuile, blanc à gauche (rouge piqué), rien à droite, sur les 5 tuiles" '[ "$(line override cid)" = 1 ] && [ "$(line override cidleft)" = "$H | $H | $H | $H | $H" ] && [ "$(line override cidright)" = "$Z | $Z | $Z | $Z | $Z" ]'
 
 [ $FAIL -eq 0 ] && echo "== OK" || echo "== FAIL"
 exit $FAIL

@@ -977,7 +977,10 @@ peindre dessus peignait la 1001.
 - Export par tuile : pas de fichier pour une tuile sans case, avec un message ; muet pendant la passe à blanc du
   préflight studio (`studio_export_planning()`, qui signale déjà ces tuiles et bloque l'export).
 
-Pour régénérer : `git diff a34a70d5^ a34a70d5`.
+Pour régénérer : `git diff a34a70d5^ a34a70d5`, sauf la section `util_layer.c` : depuis le lot D2c,
+[udim-tiles](#udim-tiles) change la ligne `tile_slot` de `layers_flatten()`, juste au-dessus du saut du -2. Cette
+section est un diff contre une copie du fichier courant où les hunks de ce patch sont défaits (`patch -R -F3`), pour
+que chacun des deux patches se défasse seul.
 
 **Test.** `.tests/udim_app.sh`, section « 70 tuiles » (import par objet de `p.1001` … `p.1070`) : message ; les 64
 premières dans l'atlas, chacune dans sa case, `p.1065` à `p.1070` hors de l'atlas ; peindre `p.1065` ne touche aucune
@@ -1337,7 +1340,8 @@ sur les tuiles des opérations de calque, dessin du gbuffer objet par objet (D2a
 touchées par le trait, d'après les boîtes des objets à l'écran), undo par copie sur écriture, blend et dilatation par
 tuile peinte, cartes UV par tuile, tuile sous le pinceau pour les pipettes et les remplissages, menu de tuile de la vue
 2D, bakes par tuile : objets de la tuile, high poly choisi par nom (même nom au suffixe de tuile près), aperçus de nœud
-(D2b).
+(D2b). Fusion et masque appliqués tuile par tuile, boucles imbriquées, surcharges de matériau du flatten par tuile
+(D2c).
 
 Le commentaire d'en-tête d'`util_udim.h` pose la règle du lot D1 : un maillage UDIM garde un objet de peinture par
 tuile, nommé `<objet>.<tuile>` comme dans le format upstream, pour que le `.arm` reste lisible par ArmorPaint et par
@@ -1767,8 +1771,8 @@ réécrit (variable gardée, ou suite choisie avant la réécriture). Rejouer le
 
 | | |
 |---|---|
-| Fichiers | `base/sources/iron.h` (`gpu_delete_texture`), `base/sources/iron_gpu.c` et `.h` (`gpu_begin`, nouveau `gpu_target_beginning`), `paint/sources/history.c` (`history_copy_to_undo`, `history_paint`), `paint/sources/slots/slot_layer.c` (`slot_layer_swap`, `_clear`, `_invert_mask`, `_duplicate`, `_resize_and_set_bits`), `paint/sources/render/make_mesh.c` (`make_mesh_run`), `paint/sources/render/make_paint.c` (`make_paint_run_context`), `paint/sources/render/make_texcoord.c` (`make_texcoord_run`), `paint/sources/render/make_clone.c` (`make_clone_run`), `paint/sources/render/make_material.c` (`make_material_bake_node_preview`), `paint/sources/render/render_path_base.c` (`render_path_base_commands`, `_draw_gbuffer`), `paint/sources/render/render_path_paint.c` (`render_path_paint_bind_layers`, `_unbind_layers`, `_commands_paint`, `_commands_live_brush`, `_draw`, `_dilate`), `paint/sources/uniforms.c` (`uniforms_ext_f32_link`), `paint/sources/util/util_uv.c` (`util_uv_cache_uv_map`, `_triangle_map`, `_dilate_map`, `_uv_island_map`), `paint/sources/ui/ui_view2d.c` (`ui_view2d_update`), `paint/sources/nodes_material/bake_texture_node.c` (`bake_texture_node_clear`, `_check_result`, nouveau `bake_texture_node_bake`), `paint/sources/util/util_mesh.c` (nouveau `util_mesh_udim_tile_table`) |
-| Commit studio | branche `d2` (lot D2, sous-lots D2a et D2b), fusionnée dans `studio` à la fin du lot |
+| Fichiers | `base/sources/iron.h` (`gpu_delete_texture`), `base/sources/iron_gpu.c` et `.h` (`gpu_begin`, nouveau `gpu_target_beginning`), `paint/sources/history.c` (`history_copy_to_undo`, `history_paint`), `paint/sources/slots/slot_layer.c` (`slot_layer_swap`, `_clear`, `_invert_mask`, `_duplicate`, `_resize_and_set_bits`, `layers_apply_mask`), `paint/sources/util/util_layer.c` (`layers_merge_layer`, `layers_flatten`, `layers_draw_mesh_materials`), `paint/sources/ui/ui_header.c` (`ui_header_draw_tool_properties_to_mask`), `paint/sources/render/make_mesh.c` (`make_mesh_run`), `paint/sources/render/make_paint.c` (`make_paint_run_context`), `paint/sources/render/make_texcoord.c` (`make_texcoord_run`), `paint/sources/render/make_clone.c` (`make_clone_run`), `paint/sources/render/make_material.c` (`make_material_bake_node_preview`), `paint/sources/render/render_path_base.c` (`render_path_base_commands`, `_draw_gbuffer`), `paint/sources/render/render_path_paint.c` (`render_path_paint_bind_layers`, `_unbind_layers`, `_commands_paint`, `_commands_live_brush`, `_draw`, `_dilate`), `paint/sources/uniforms.c` (`uniforms_ext_f32_link`), `paint/sources/util/util_uv.c` (`util_uv_cache_uv_map`, `_triangle_map`, `_dilate_map`, `_uv_island_map`), `paint/sources/ui/ui_view2d.c` (`ui_view2d_update`), `paint/sources/nodes_material/bake_texture_node.c` (`bake_texture_node_clear`, `_check_result`, nouveau `bake_texture_node_bake`), `paint/sources/util/util_mesh.c` (nouveau `util_mesh_udim_tile_table`) |
+| Commit studio | branche `d2` (lot D2, sous-lots D2a à D2c), fusionnée dans `studio` à la fin du lot |
 | Validé contre | upstream `85f6cf1c` (2026-09-27) |
 | Injection | points d'appel et boucles sur les tuiles ; la logique dans `util_udim.c` ([udim-core](#udim-core)) |
 
@@ -1823,16 +1827,29 @@ sans tuile). Le code upstream travaille sans changement sur la tuile du contexte
   (`studio_bake`).
 - `make_material.c` : l'aperçu Curvature d'un calque à tuiles est baké tuile par tuile (`util_udim_tile_preview`).
 
+**Points d'appel (D2c).**
+- `util_layer.c` : `layers_merge_layer` sur un calque à tuiles passe par `util_udim_merge_layer`, qui la rappelle pour
+  chaque tuile ; Merge Down, Merge Group et le composite des groupes en passent par là. `layers_flatten` compose la
+  tuile du contexte : un calque à tuiles n'y est plus recopié dans une case d'atlas (`layers_udim_remap`) ; ses
+  appelants bouclent sur les tuiles dont ils ont besoin. Les surcharges de matériau des maillages (onglet Meshes) y
+  sont dessinées par les objets de la tuile, dans leurs uv (`util_udim_draw_mesh_materials`).
+- `slot_layer.c` : `layers_apply_mask` sur un calque à tuiles passe par `util_udim_apply_mask` (rappel par tuile) :
+  Apply Mask, masques de groupe et fusions avec masque.
+- `ui_header.c` : ColorID → To Mask écrit chaque tuile du masque, la carte d'id lue dans les uv de chaque tuile
+  (comme le pinceau ColorID).
+- Une boucle sur les tuiles lancée dans une autre n'en refait pas le tour (`util_udim_loop_begin` rend 1).
+
 **Règle.** Calques et masques à tuiles quand la table a au moins deux tuiles et `uv_map != 1`, sauf un calque limité
 à un objet sans tuile ; un masque suit son calque. Une tuile qui apparaît reçoit le fond de chaque calque (son texel
 (0, 0)) ; une qui disparaît est libérée ; un calque qui passe aux tuiles garde sa texture sur la tuile du contexte.
 Un emplacement d'undo ne tient que les tuiles qu'il a sauvées ; s'il avait sauvé tout le calque, il reçoit à
 l'échange les tuiles apparues depuis. UDIM coupé : chaque calque revient à une texture.
 
-Pour régénérer : `git diff 06655d76 -- <les dix-sept fichiers>` (`06655d76` : `studio` avant le lot D2), sauf le hunk
+Pour régénérer : `git diff 06655d76 -- <les dix-neuf fichiers>` (`06655d76` : `studio` avant le lot D2), sauf le hunk
 [bake-derivative](#bake-derivative) de `render_path_paint.c` (diff contre une copie du fichier où il est défait) ;
 `iron.h` porte aussi ocio-import, `util_mesh.c` udim-material-uv et udim-tile-limit, `render_path_paint.c`,
-`make_texcoord.c` et `uniforms.c` udim-material-uv, `uniforms.c` aussi ocio-viewport et udim-tile-limit.
+`make_texcoord.c` et `uniforms.c` udim-material-uv, `uniforms.c` aussi ocio-viewport et udim-tile-limit, `util_layer.c`
+udim-tile-limit.
 
 **Test.** `.tests/udim_tiles_app.sh` : passage aux tuiles, Clear / Undo / Redo, Duplicate, Delete et Undo (sans
 fuite), résolution du projet, masque et Invert, vue 3D (gbuffer au centre de chaque tuile), maillage ajouté dans une
@@ -1840,16 +1857,24 @@ nouvelle tuile (L17 : les tuiles gardent leur peinture), UDIM coupé (D2a) ; pei
 tuiles, undo et redo pas à pas (chaque pas ne tient que ses tuiles), pinceau aligné sur la caméra, caméra ortho, xray,
 symétrie ; cartes UV, de triangles et de dilatation par tuile ; pipette ; remplissages de face et d'îlot UV ; clone ;
 bakes Texcoord, Position, Object ID, high poly (hauteur, dérivée, normales) et Curvature par tuile ; 70 tuiles, le
-pinceau au-delà des 64 ne peint rien (D2b). Au 2026-09-27 : 48 contrôles passent.
+pinceau au-delà des 64 ne peint rien (D2b) ; flatten par tuile, Merge Down, undo et redo, masques, Apply Mask et
+undo, groupe à masque de groupe et Merge Group, surcharge de matériau d'un maillage, ColorID → masque (D2c). Au
+2026-09-27 : 59 contrôles passent.
 
 **Signes que l'upstream l'a changé.** `gpu_delete_texture`, `gpu_begin`, `history_copy_to_undo`, `history_paint` ou
 `slot_layer_swap` réécrits ; le bloc `tex_coord_atlas` de `make_mesh_run` ou le bloc `atlas_uv` de
 `make_paint_run_context` modifiés (l'upstream retravaille ses UDIM) ; `render_path_draw_meshes` remplacé dans
 `render_path_base_draw_gbuffer` ; `gbuffer2.r` utilisé par l'upstream ; les branches pipette ou peinture de
-`render_path_paint_commands_paint` réorganisées ; les caches de `util_uv.c` renommés.
+`render_path_paint_commands_paint` réorganisées ; les caches de `util_uv.c` renommés ; `layers_merge_layer`,
+`layers_apply_mask` ou `layers_draw_mesh_materials` réécrits, `layers_flatten` qui ne passe plus par
+`layers_udim_tile_slot`.
 
-**Non couvert.** Flatten, fusion et masques en pile (D2c) ; export (D2d) ; `.arm` et migration des projets atlas
+**Non couvert.** Export (D2d) ; `.arm` et migration des projets atlas
 (D2e) ; raytrace (D2f). Voulu, décrit dans `ARMORPAINT_UDIM.md` (lot D2b) : pas d'aperçu de pinceau live sur un
 calque à tuiles ; pas de clone d'une tuile à l'autre ; ColorID, flou et smudge ne lisent que la tuile peinte. Non
-testés : sculpt, particules, décalques et texte sur un calque à tuiles (même chemin que le pinceau). Sur la branche
+testés : sculpt, particules, décalques et texte sur un calque à tuiles (même chemin que le pinceau). Une fusion d'un
+calque à tuiles dans un calque qui n'en a pas (limité à un objet sans tuile) ne lit que la tuile du contexte. Upstream,
+non corrigés : des masques empilés sont fusionnés en MIX dans le flatten (le dernier remplace les autres, la vue 3D les
+multiplie) ; l'Undo d'un Merge Group
+perd le calque de base (même sans UDIM). Sur la branche
 `d2` tant que le lot n'est pas fini : l'export et les projets atlas d'avant D2 y sont cassés.

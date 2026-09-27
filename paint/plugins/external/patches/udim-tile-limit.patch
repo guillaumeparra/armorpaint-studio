@@ -43,10 +43,10 @@ index ac01b16a..e9dd5b1a 100644
  	}
  	else if (string_equals(link, "_decal_layer_loc")) {
 diff --git a/paint/sources/util/util_layer.c b/paint/sources/util/util_layer.c
-index f2919622..215a18b9 100644
+index b35c0e5..1f23b01 100644
 --- a/paint/sources/util/util_layer.c
 +++ b/paint/sources/util/util_layer.c
-@@ -1112,13 +1112,14 @@ slot_layer_t *layers_udim_remap(slot_layer_t *l, gpu_texture_t **mask, i32 slot,
+@@ -1117,13 +1117,14 @@ slot_layer_t *layers_udim_remap(slot_layer_t *l, gpu_texture_t **mask, i32 slot,
  }
  
  // Atlas slot of a layer assigned to a single udim tile object, -1 otherwise
@@ -62,10 +62,10 @@ index f2919622..215a18b9 100644
  }
  
  slot_layer_t *layers_flatten(bool height_to_normal, slot_layer_t_array_t *layers) {
-@@ -1166,6 +1167,9 @@ slot_layer_t *layers_flatten(bool height_to_normal, slot_layer_t_array_t *layers
- 
+@@ -1172,6 +1173,9 @@ slot_layer_t *layers_flatten(bool height_to_normal, slot_layer_t_array_t *layers
  		// Flattened layers are in shared atlas space
- 		i32 tile_slot = layers_udim_tile_slot(l1);
+ 		// STUDIO-PATCH(udim-tiles): a tiled layer is flattened on the tile of the context, not remapped to a cell
+ 		i32 tile_slot = util_udim_layer_tiled(l1) ? -1 : layers_udim_tile_slot(l1);
 +		if (tile_slot == -2) { // STUDIO-PATCH(udim-tile-limit): the layer of a tile without a slot has no cell in the atlas
 +			continue;
 +		}

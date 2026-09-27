@@ -54,7 +54,8 @@ char *util_udim_stats();                                     // Stores and their
 char *util_udim_view_stats(gpu_texture_t *view);
 
 // Loop over the tiles of a layer operation: n = util_udim_loop_begin(tiled) gives the tiles to go through (1 when not
-// tiled), util_udim_loop_tile(k) sets the k-th, util_udim_loop_end() puts back the tile of the context.
+// tiled, or inside another loop over the tiles), util_udim_loop_tile(k) sets the k-th, util_udim_loop_end() puts back
+// the tile of the context.
 i32  util_udim_loop_begin(bool tiled);
 void util_udim_loop_tile(i32 k);
 void util_udim_loop_end();
@@ -80,6 +81,13 @@ i32  util_udim_cursor_tile();               // Tile under the brush, -1 on an ob
 i32  util_udim_pick_begin(bool show);       // Before a picker pass: tile under the brush picked, shown when show; tile to put back
 i32  util_udim_picked_tile();               // Tile of the last pick
 i32  util_udim_island_begin();              // util_uv_cache_uv_island_map(): the tile under the brush shown; tile to put back
+
+// Layer operations (lot D2c). Merge down, masks applied and group merge go through layers_merge_layer() and
+// layers_apply_mask(): on a tiled layer, each called back on every tile. layers_flatten() flattens the tile of the
+// context, the tiled layers read there; its callers go through the tiles they need.
+bool util_udim_merge_layer(slot_layer_t *l0, slot_layer_t *l1, bool use_mask); // layers_merge_layer() into a tiled l0
+bool util_udim_apply_mask(slot_layer_t *l, slot_layer_t *m);                    // layers_apply_mask() on a tiled l
+bool util_udim_draw_mesh_materials(char *context);                               // Flatten: mesh material overrides of the tile
 
 // 2d view (lot D2b): a tiled layer shows and paints the tile of the context, the 2d plane with the material uvs of that
 // tile. util_udim_view2d_tile() draws the combo choosing it, false when the layer is not tiled.

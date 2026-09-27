@@ -88,9 +88,21 @@ extern any_array_t *history_undo_layers;
 i32               color_from_floats(f32 r, f32 g, f32 b, f32 a);
 void              _gpu_begin(gpu_texture_t *render_target, any_array_t *additional, gpu_texture_t *depth_buffer, gpu_clear_t flags, unsigned color, float depth);
 void              bake_texture_node_bake(ui_node_t *node, i32 bake_type);
+void              history_merge_layers(void);
+void              history_apply_mask(void);
+void              layers_merge_down(void);
+slot_layer_t     *layers_merge_group(slot_layer_t *l);
+slot_layer_t     *layers_flatten(bool height_to_normal, slot_layer_t_array_t *layers);
+void              slot_layer_apply_mask(slot_layer_t *raw);
+void              slot_layer_to_paint_layer(slot_layer_t *raw);
+bool              slot_layer_is_group(slot_layer_t *raw);
+void              make_material_parse_mesh_material(void);
 extern bool       bake_texture_node_baking;
 extern bool       render_path_paint_baking;
 extern any_map_t *render_path_render_targets;
+void              tab_meshes_set_linked_override(mesh_object_t *o, i32 mat_index);
+void              ui_header_draw_tool_properties_import(char *path);
+void              ui_header_draw_tool_properties_to_mask(slot_layer_t *m);
 
 #define DEFAULT_NAME "Atlas 1"
 #define MAX_NAME     64
@@ -925,7 +937,8 @@ static char *pixel_text(gpu_texture_t *t, float *c) {
 // Pixel (x, y) de la texture channel (0 base, 1 nor, 2 pack) du calque i sur la tuile tile (-1 : tuile du contexte),
 // « r g b a » de 0 à 1 ; « - » hors bornes. Channel 3, 4, 5 : cartes UV, des triangles et de dilatation du calque
 // courant, construites au besoin (i ignoré). Channel 6 : texture du nœud Bake Texture d'id i. Channel 7 : i-ème aperçu
-// de nœud du matériau (Curvature Texture...). Channel 8 : base de l'emplacement d'undo i.
+// de nœud du matériau (Curvature Texture...). Channel 8 : base de l'emplacement d'undo i. Channel 9, 10, 11 : base,
+// nor et pack de la pile aplatie (layers_flatten, i ignoré).
 static minic_val_t mn_studio_udim_pixel(minic_val_t *a, int n) {
 	int                   i       = (int)minic_arg_i(a, n, 0);
 	int                   channel = (int)minic_arg_i(a, n, 1);
@@ -933,7 +946,7 @@ static minic_val_t mn_studio_udim_pixel(minic_val_t *a, int n) {
 	int                   x       = (int)minic_arg_i(a, n, 3);
 	int                   y       = (int)minic_arg_i(a, n, 4);
 	slot_layer_t_array_t *layers  = g_project->_->layers;
-	if ((channel <= 2 && (i < 0 || i >= (int)layers->length)) || channel < 0 || channel > 8) {
+	if ((channel <= 2 && (i < 0 || i >= (int)layers->length)) || channel < 0 || channel > 11) {
 		return minic_val_ptr(string_copy("-"));
 	}
 	gpu_texture_t *current = _draw_current;
@@ -964,6 +977,11 @@ static minic_val_t mn_studio_udim_pixel(minic_val_t *a, int n) {
 	}
 	else if (channel == 8) {
 		t = i >= 0 && i < (int)history_undo_layers->length ? ((slot_layer_t *)history_undo_layers->buffer[i])->texpaint : NULL;
+	}
+	else if (channel >= 9) {
+		slot_layer_t *f = layers_flatten(false, NULL);
+		t               = channel == 9 ? f->texpaint : channel == 10 ? f->texpaint_nor : f->texpaint_pack;
+		free(f);
 	}
 	else if (channel == 7) {
 		string_array_t *keys = g_context->node_previews != NULL ? (string_array_t *)map_keys(g_context->node_previews) : NULL;
@@ -1072,6 +1090,60 @@ static minic_val_t mn_studio_rt_pixel(minic_val_t *a, int n) {
 	return minic_val_ptr(out);
 }
 
+// Met le calque i dans le groupe g (-1 : hors groupe), comme un glisser-déposer sur le groupe de l'onglet Layers ; les
+// enfants d'un groupe sont juste en dessous de lui dans la pile. 1 si fait.
+static minic_val_t mn_studio_layer_set_parent(minic_val_t *a, int n) {
+	int                   i      = (int)minic_arg_i(a, n, 0);
+	int                   g      = (int)minic_arg_i(a, n, 1);
+	slot_layer_t_array_t *layers = g_project->_->layers;
+	if (i < 0 || i >= (int)layers->length || g >= (int)layers->length || (g >= 0 && !slot_layer_is_group(layers->buffer[g]))) {
+		return minic_val_int(0);
+	}
+	layers->buffer[i]->parent = g >= 0 ? layers->buffer[g] : NULL;
+	g_context->layers_preview_dirty = true;
+	return minic_val_int(1);
+}
+
+// Onglet Meshes, un matériau glissé sur le maillage i : ce maillage (et ceux qui partagent ses données) montre le
+// matériau m, que le flatten dessine par-dessus les calques ; -1 : plus de surcharge. 1 si fait.
+static minic_val_t mn_studio_mesh_override(minic_val_t *a, int n) {
+	int                    i       = (int)minic_arg_i(a, n, 0);
+	int                    m       = (int)minic_arg_i(a, n, 1);
+	mesh_object_t_array_t *objects = g_project->_->paint_objects;
+	if (i < 0 || i >= (int)objects->length || m < -1 || m >= (int)g_project->_->materials->length) {
+		return minic_val_int(0);
+	}
+	tab_meshes_set_linked_override(objects->buffer[i], m);
+	g_context->ddirty         = 2;
+	g_project->mesh_materials = i32_array_create(0);
+	return minic_val_int(1);
+}
+
+// Outil ColorID, bouton To Mask : la carte d'id path (importée au besoin), la couleur piquée rgb (0xRRGGBB). Un masque
+// sur le calque courant, blanc là où la carte a cette couleur ; son indice, -1 si rien.
+static minic_val_t mn_studio_colorid_mask(minic_val_t *a, int n) {
+	char *path = minic_arg_p(a, n, 0);
+	int   rgb  = (int)minic_arg_i(a, n, 1);
+	if (path == NULL || !iron_file_exists(path)) {
+		return minic_val_int(-1);
+	}
+	ui_header_draw_tool_properties_import(path);
+	render_target_t *rt = any_map_get(render_path_render_targets, "texpaint_colorid");
+	draw_begin(rt->_image, true, 0xff000000 | (unsigned)rgb);
+	draw_end();
+	g_context->colorid_picked = true;
+	if (slot_layer_is_mask(g_context->layer)) {
+		context_set_layer(g_context->layer->parent);
+	}
+	slot_layer_t *m = layers_new_mask(false, g_context->layer, -1);
+	if (m == NULL) {
+		return minic_val_int(-1);
+	}
+	history_new_white_mask();
+	ui_header_draw_tool_properties_to_mask(m);
+	return minic_val_int(array_index_of((any_array_t *)g_project->_->layers, m));
+}
+
 // Calque courant = calque i. 1 si fait.
 static minic_val_t mn_studio_layer_select(minic_val_t *a, int n) {
 	int                   i      = (int)minic_arg_i(a, n, 0);
@@ -1084,8 +1156,8 @@ static minic_val_t mn_studio_layer_select(minic_val_t *a, int n) {
 }
 
 // Opération sur le calque courant, comme les menus, avec son pas d'historique, finie tout de suite : "duplicate",
-// "delete", "clear", "invert" (masque), "undo", "redo", "sync" (util_udim_sync, fait par le viewport à chaque image).
-// 1 si fait.
+// "delete", "clear", "invert" (masque), "merge_down" (Merge Down), "merge_group" (Merge Group d'un groupe), "apply_mask"
+// (Apply Mask d'un masque), "undo", "redo", "sync" (util_udim_sync, fait par le viewport à chaque image). 1 si fait.
 static minic_val_t mn_studio_layer_op(minic_val_t *a, int n) {
 	char         *op = minic_arg_p(a, n, 0);
 	slot_layer_t *l  = g_context->layer;
@@ -1113,6 +1185,23 @@ static minic_val_t mn_studio_layer_op(minic_val_t *a, int n) {
 	else if (strcmp(op, "invert") == 0 && slot_layer_is_mask(l)) {
 		history_invert_mask();
 		slot_layer_invert_mask(l);
+	}
+	else if (strcmp(op, "merge_down") == 0 && array_index_of((any_array_t *)g_project->_->layers, l) > 0) { // tab_layers.c, menu du calque
+		history_merge_layers();
+		layers_merge_down();
+		if (g_context->layer->fill_material != NULL) {
+			slot_layer_to_paint_layer(g_context->layer);
+		}
+	}
+	else if (strcmp(op, "merge_group") == 0 && slot_layer_is_group(l)) {
+		layers_merge_group(l);
+	}
+	else if (strcmp(op, "apply_mask") == 0 && slot_layer_is_mask(l)) {
+		history_apply_mask();
+		slot_layer_apply_mask(l);
+		context_set_layer(l->parent);
+		make_material_parse_mesh_material();
+		g_context->layers_preview_dirty = true;
 	}
 	else if (strcmp(op, "undo") == 0) {
 		history_undo();
@@ -1166,8 +1255,11 @@ void studio_atlas_init(void) {
 	minic_register("studio_udim_layer", "p(i)", mn_studio_udim_layer);
 	minic_register("studio_udim_pixel", "p(i,i,i,i,i)", mn_studio_udim_pixel);
 	minic_register("studio_layer_select", "i(i)", mn_studio_layer_select);
+	minic_register("studio_layer_set_parent", "i(i,i)", mn_studio_layer_set_parent);
 	minic_register("studio_udim_fill", "i(i,i,i,f,f,f,f)", mn_studio_udim_fill);
 	minic_register("studio_rt_pixel", "p(p,f,f,f)", mn_studio_rt_pixel);
 	minic_register("studio_layer_op", "i(p)", mn_studio_layer_op);
+	minic_register("studio_mesh_override", "i(i,i)", mn_studio_mesh_override);
+	minic_register("studio_colorid_mask", "i(p,i)", mn_studio_colorid_mask);
 #endif
 }
