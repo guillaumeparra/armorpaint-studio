@@ -10,6 +10,9 @@
 #      enregistré, les textures vont dans la file ; au retour du site, la file est rejouée d'elle-même ;
 #   4. fenêtre d'export (lot B6) : template des textures choisi pour le projet (sidecar d'export), Version Up, export
 #      dans la version suivante au nom du template choisi, repris par une autre session ;
+#   5. sonde du site en ligne (STUDIO_SG_PROBE_INTERVAL) : coupure trouvée sans autre appel, ArmorPaint au repos ; le
+#      journal d'audit envoyé au site par les essais (EventLogEntry), ce que les sessions précédentes n'ont pas envoyé ;
+#      une session qui ne se sert pas de ShotGrid ne lance pas le sidecar pour la sonde ;
 #   journal d'audit : évènements d'ArmorPaint et du sidecar dans un seul fichier, à chaque étape.
 #
 #   sh .tests/sg_context_app.sh [dossier de travail]
@@ -31,8 +34,8 @@ ok() { echo "ok   $1"; }
 ko() { echo "FAIL $1"; FAIL=1; }
 
 # storage/ et le cache de chemins de Toolkit qui le décrit (shotgun_home/) repartent ensemble de zéro.
-rm -rf "$W/storage" "$W/shotgun_home" "$W/queue" "$W/out" "$W"/*.log "$W"/*.c "$W"/*.arm "$W/audit.jsonl" \
-	"$W/offline.flag"
+rm -rf "$W/storage" "$W/shotgun_home" "$W/queue" "$W/out" "$W"/*.log "$W"/*.c "$W"/*.arm "$W"/audit.jsonl* \
+	"$W/offline.flag" "$W/sent.before"
 # Hook du sidecar : op find, pour relever ce qui est enregistré sur le site simulé.
 cat > "$W/find_hook.py" <<'EOF'
 def setup(session):
@@ -261,6 +264,10 @@ check "audit : sg_offline (raison) puis sg_online (rien en file)" <<'EOF'
 net = [(e["event"], e.get("reason", e.get("pending"))) for e in ev if e["event"].startswith("sg_")]
 assert [n[0] for n in net] == ["sg_offline", "sg_online"] and "Connection refused" in net[0][1] and net[1][1] == 0, net
 EOF
+check "l'essai qui retrouve le site lui envoie le journal d'audit (sessions précédentes comprises)" <<'EOF'
+sent = [int(n) for n in re.findall(r"studio: audit: (\d+) events? sent to ShotGrid", text("offline"))]
+assert sent and sent[0] >= 3, sent
+EOF
 
 echo "== 3. ShotGrid perdu en plein publish : file d'attente, rejouée au retour du site"
 FROM=$(audit_lines)
@@ -415,6 +422,89 @@ EOF
 unset STUDIO_SG_NAMING
 check "session suivante (--background) : le template choisi nomme encore les textures" <<'EOF'
 assert t("later", "publish_v003") and int(t("later", "publish_v003")[0]) > 0, t("later", "publish_v003")
+EOF
+
+echo "== 5. sonde du site en ligne, journal d'audit envoyé au site"
+FROM=$(audit_lines)
+# Où l'envoi en était : les essais des sections 2 et 3 ont envoyé une partie du journal (à leur site simulé).
+cp "$W/audit.jsonl.sent" "$W/sent.before"
+# Une sonde par seconde ; la deuxième requête info du site (la deuxième sonde) le trouve coupé.
+export STUDIO_SG_PROBE_INTERVAL=1 STUDIO_TEST_OFFLINE_AT=info::2
+RC_WANT=1
+run probe "$V1" <<EOF
+int phase = 0;
+double mark = 0;
+void update() {
+	if (phase == 0 && studio_sg_offline() == 1) {
+		console_log("t: probe offline");
+		iron_delete_file("$W/offline.flag");
+		phase = 1;
+	}
+	else if (phase == 1 && studio_sg_offline() == 0) {
+		phase = 2;
+		mark  = sys_time();
+	}
+	else if (phase == 2 && sys_time() > mark + 3) { // les sondes suivantes envoient sg_online
+		int f = studio_sg_run("find", "{\"entity_type\":\"EventLogEntry\",\"filters\":[[\"event_type\",\"starts_with\",\"ArmorPaint_\"]],\"fields\":[\"event_type\",\"project\",\"entity\",\"meta\"]}", 0);
+		for (int i = 0; i < studio_sg_length(f, "/data"); i++) { // une par ligne : console_log coupe les longues
+			console_log(string("t: entry %s", studio_sg_get(f, string("/data/%d", i))));
+		}
+		studio_sg_release(f);
+		script_quit();
+	}
+}
+int main() {
+	int j = studio_sg_run("list_projects", "{}", 0); // ShotGrid sert : en ligne, la sonde part
+	console_log(string("t: online %d %d", studio_sg_ok(j), studio_sg_offline()));
+	studio_sg_release(j);
+	script_notify_on_update(update);
+	return 0;
+}
+EOF
+RC_WANT=0
+unset STUDIO_TEST_OFFLINE_AT
+run idle <<EOF
+double start = 0;
+void update() {
+	if (sys_time() > start + 3) {
+		script_quit();
+	}
+}
+int main() {
+	start = sys_time();
+	script_notify_on_update(update);
+	return 0;
+}
+EOF
+unset STUDIO_SG_PROBE_INTERVAL
+check "sonde : coupure trouvée sans autre appel (ArmorPaint au repos), dite une fois, puis retour du site" <<'EOF'
+log = text("probe")
+assert t("probe", "online") == ["1 0"] and t("probe", "probe") == ["offline"], (t("probe", "online"), t("probe", "probe"))
+assert log.count("ShotGrid unreachable (") == 1 and re.search(r"(^|\s)ShotGrid is back$", log, re.M), log[-2000:]
+assert "probed every 1 s when online" in log
+net = [e["event"] for e in ev if e["event"].startswith("sg_")]
+assert net == ["sg_offline", "sg_online"], net
+EOF
+check "journal envoyé : une EventLogEntry par ligne pas encore envoyée, dans l'ordre, projet et publish liés" <<'EOF'
+import hashlib
+before = json.load(open(os.path.join(W, "sent.before")))
+with open(os.path.join(W, "audit.jsonl"), "rb") as f:
+    data = f.read()
+assert hashlib.sha1(data.split(b"\n")[0] + b"\n").hexdigest() == before["head"] and 0 < before["offset"] < len(data), before
+lines = [json.loads(l) for l in data[before["offset"]:].decode().splitlines()]
+entries = [json.loads(e) for e in t("probe", "entry")]
+assert [e["meta"] for e in entries] == lines, ([e["event_type"] for e in entries], [l["event"] for l in lines])
+assert all(e["event_type"] == "ArmorPaint_" + e["meta"]["event"] for e in entries)
+linked = [e for e in entries if (e["meta"].get("sg") or {}).get("project_id") or e["meta"].get("project_id")]
+assert linked and all(e["project"]["type"] == "Project" and e["project"]["id"] == 1 for e in linked), linked
+assert all(e["project"] is None for e in entries if e not in linked), [e for e in entries if e not in linked]
+published = [e for e in entries if e["meta"]["event"] in ("publish", "publish_replayed") and e["meta"]["id"] > 0]
+assert all(e["entity"]["type"] == "PublishedFile" and e["entity"]["id"] == e["meta"]["id"] for e in published), published
+assert {"sg_offline", "sg_online", "publish_replayed", "project_save"} <= {e["meta"]["event"] for e in entries}, [e["meta"]["event"] for e in entries]
+assert re.search(r"studio: audit: \d+ events? sent to ShotGrid", text("probe"))
+EOF
+check "session sans ShotGrid : la sonde ne lance pas le sidecar" <<'EOF'
+assert "sidecar starting" not in text("idle") and "probed every 1 s when online" in text("idle"), text("idle")[-1500:]
 EOF
 
 [ $FAIL -eq 0 ] && echo "sg_context_app: tout passe" || echo "sg_context_app: ÉCHECS (journaux dans $W)"

@@ -20,7 +20,10 @@ void ui_menu_label(char *text, char *shortcut);
 #define QUEUE_DIR         "studio_publish_queue"
 #define COUNT_EVERY_S     2.0
 #define CHECK_DEFAULT_S   120
+#define PROBE_DEFAULT_S   300
 #define CHECK_TIMEOUT_MS  60000
+#define CHECK_ARGS        "{\"audit\":true}" // l'essai envoie aussi le journal d'audit au site
+#define AUDIT_MORE_S      1 // journal pas tout envoyé (le sidecar rend la main) : la suite sans attendre la sonde
 #define REPLAY_TIMEOUT_MS 900000 // vignettes à envoyer ; interrompu, le rejeu suivant reprend où il en était
 #define WAVE_MAX          64     // projets rejoués par vague
 #define OL_ICON_NONE      -1     // ICON_NONE (paint/sources/enums.h)
@@ -29,6 +32,8 @@ static struct {
 	bool   queue_known;
 	char  *queue;       // NULL : pas de file d'attente
 	int    interval;    // secondes entre deux essais hors ligne, 0 : jamais
+	int    probe;       // secondes entre deux sondes en ligne, 0 : jamais
+	char  *audit_error; // refus du site à l'envoi du journal, dit une fois au log tant qu'il dure
 	int    serial;      // studio_sg_network_serial() déjà traité
 	int    state;       // l'état réseau correspondant
 	char  *reason;      // raison du passage hors ligne
@@ -184,10 +189,28 @@ static void on_replay_done(void) {
 
 // ---- Connexion ----------------------------------------------------------------------------------------------------------
 // Hors ligne, le site est essayé toutes les ol.interval secondes par un job différé du superviseur : il part à l'heure
-// même quand ArmorPaint est au repos (sans entrée, iron ne fait plus de frames), et sa réponse le réveille.
+// même quand ArmorPaint est au repos (sans entrée, iron ne fait plus de frames), et sa réponse le réveille. En ligne,
+// il est sondé de même toutes les ol.probe secondes, pour découvrir une coupure sans attendre qu'un appel échoue ; la
+// sonde ne lance pas le sidecar (studio_sg_start_if_running) : une session qui ne se sert pas de ShotGrid ne le sonde
+// pas. Chaque essai envoie aussi au site le journal d'audit (check_online avec "audit").
 
-static void check_start(int delay_s) {
-	ol.job_check = studio_sg_start_after("check_online", NULL, CHECK_TIMEOUT_MS, delay_s * 1000);
+static void check_start(int delay_s, bool probe) {
+	ol.job_check = probe ? studio_sg_start_if_running("check_online", CHECK_ARGS, CHECK_TIMEOUT_MS, delay_s * 1000)
+	                     : studio_sg_start_after("check_online", CHECK_ARGS, CHECK_TIMEOUT_MS, delay_s * 1000);
+}
+
+// Programme l'essai suivant s'il n'y en a pas : hors ligne, pour retrouver le site ; en ligne, la sonde (soon_s > 0 :
+// plus tôt que son heure).
+static void check_schedule(int soon_s) {
+	if (ol.job_check != 0) {
+		return;
+	}
+	if (ol.state == STUDIO_SG_NET_OFFLINE && ol.interval > 0) {
+		check_start(ol.interval, false);
+	}
+	else if (ol.state == STUDIO_SG_NET_ONLINE && ol.probe > 0) {
+		check_start(soon_s > 0 && soon_s < ol.probe ? soon_s : ol.probe, true);
+	}
 }
 
 // Retire l'essai programmé qui n'est pas encore parti (pas celui qu'a demandé l'artiste).
@@ -206,13 +229,33 @@ static bool checking(void) {
 void studio_sg_check_connection(void) {
 	check_unschedule(); // remplacé par un essai tout de suite
 	if (ol.job_check == 0) {
-		check_start(0);
+		check_start(0, false);
 	}
 	ol.check_asked = true;
 }
 
+// Envoi du journal d'audit (réponse de check_online) : au log ; un refus du site, une fois tant qu'il dure.
+static void on_audit(int job) {
+	if (studio_sg_length(job, "/data/audit") < 0) {
+		return;
+	}
+	int sent = (int)studio_sg_int(job, "/data/audit/sent", 0);
+	if (sent > 0) {
+		iron_log("studio: audit: %d event%s sent to ShotGrid", sent, sent > 1 ? "s" : "");
+	}
+	bool        text  = studio_json_find(studio_sg_result(job), "/data/audit/error").type == STUDIO_JSON_STRING; // sinon null
+	const char *error = text ? studio_sg_get(job, "/data/audit/error") : "";
+	if (error[0] != 0 && (ol.audit_error == NULL || strcmp(error, ol.audit_error) != 0)) {
+		iron_log("studio: audit: not sent to ShotGrid, kept for the next try: %s", shorten(error, 300));
+	}
+	free(ol.audit_error);
+	ol.audit_error = error[0] != 0 ? strdup(error) : NULL;
+}
+
 static void on_check_done(void) {
 	int job = ol.job_check;
+	on_audit(job);
+	int soon = studio_json_truthy(studio_json_find(studio_sg_result(job), "/data/audit/more")) ? AUDIT_MORE_S : 0;
 	if (ol.check_asked) {
 		const char *code = studio_sg_get(job, "/error/code");
 		if (studio_sg_ok(job)) {
@@ -230,9 +273,7 @@ static void on_check_done(void) {
 	ol.check_asked = false;
 	studio_sg_release(job);
 	ol.job_check = 0;
-	if (ol.state == STUDIO_SG_NET_OFFLINE && ol.interval > 0) {
-		check_start(ol.interval); // toujours hors ligne (on_network est passé avant) : essai suivant
-	}
+	check_schedule(soon); // selon l'état que la réponse a donné (on_network est passé avant)
 }
 
 // Changement d'état relevé par le superviseur (studio_sg.h) : console, journal, et au retour du site, rejeu.
@@ -255,12 +296,12 @@ static void on_network(void) {
 		char *q = studio_json_quote(ol.reason);
 		studio_audit("sg_offline", string_tmp("\"reason\":%s", q));
 		free(q);
-		if (ol.job_check == 0 && ol.interval > 0) {
-			check_start(ol.interval);
-		}
+		check_unschedule(); // la sonde programmée : remplacée par l'essai hors ligne
+		check_schedule(0);
 	}
 	else if (ol.state == STUDIO_SG_NET_ONLINE) {
 		check_unschedule(); // le site a répondu à autre chose
+		check_schedule(0);
 		count_pending(true);
 		if (was == STUDIO_SG_NET_OFFLINE) {
 			console_info(ol.pending > 0 ? string_tmp("ShotGrid is back: registering %d queued publish%s", ol.pending, ol.pending > 1 ? "es" : "")
@@ -366,18 +407,21 @@ static void offline_register_script_api(void) {
 
 #endif
 
+static int seconds_env(const char *name, int fallback) {
+	const char *env = getenv(name);
+	int         s   = env != NULL && env[0] != 0 ? atoi(env) : fallback;
+	return s > 0 ? s : 0;
+}
+
 void studio_sg_offline_init(void) {
-	const char *env = getenv("STUDIO_SG_CHECK_INTERVAL");
-	ol.interval     = env != NULL && env[0] != 0 ? atoi(env) : CHECK_DEFAULT_S;
-	if (ol.interval < 0) {
-		ol.interval = 0;
-	}
-	ol.serial = studio_sg_network_serial();
-	ol.state  = studio_sg_network(NULL);
+	ol.interval = seconds_env("STUDIO_SG_CHECK_INTERVAL", CHECK_DEFAULT_S);
+	ol.probe    = seconds_env("STUDIO_SG_PROBE_INTERVAL", PROBE_DEFAULT_S);
+	ol.serial   = studio_sg_network_serial();
+	ol.state    = studio_sg_network(NULL);
 	count_pending(true);
 	const char *queue = studio_sg_queue_dir();
-	iron_log("studio: shotgrid publish queue: %s (%d waiting), connection retried every %d s when offline", queue != NULL ? queue : "none", ol.pending,
-	         ol.interval);
+	iron_log("studio: shotgrid publish queue: %s (%d waiting), connection retried every %d s when offline, probed every %d s when online",
+	         queue != NULL ? queue : "none", ol.pending, ol.interval, ol.probe);
 	sys_notify_on_update(offline_update, NULL);
 #ifdef WITH_EVAL
 	offline_register_script_api();

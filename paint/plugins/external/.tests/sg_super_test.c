@@ -407,6 +407,35 @@ static void test_delayed(void) {
 	printf("  ok   delayed jobs: passed by later jobs, run on time and wake, ordered by time, cancel, release\n");
 }
 
+// Jobs seulement si le sidecar tourne (studio_sg_start_if_running) : la sonde du site en ligne, qui ne doit pas lancer
+// le sidecar d'une session qui ne se sert pas de ShotGrid.
+static void test_if_running(void) {
+	use_fake("ok", 0, 0);
+	log_clear();
+	int stopped = studio_sg_start_if_running("echo", NULL, 0, 0);
+	CHECK(wait_done(stopped, 5) == STUDIO_SG_DONE && strcmp(studio_sg_get(stopped, "/error/code"), "sidecar_stopped") == 0,
+	      "sidecar not running: sidecar_stopped, %s", studio_sg_result(stopped));
+	CHECK(!log_has("sidecar starting") && studio_sg_hello() == NULL, "sidecar not started");
+	studio_sg_release(stopped);
+	long long pid   = pid_of_sidecar();
+	int       later = studio_sg_start_if_running("echo", "{\"x\":3}", 0, 200);
+	CHECK(wait_done(later, 5) == STUDIO_SG_DONE && studio_sg_int(later, "/data/x", 0) == 3 && pid_of_sidecar() == pid,
+	      "sidecar running: sent to it, %s", studio_sg_result(later));
+	studio_sg_release(later);
+	// Parti de lui-même : constaté, pas relancé.
+	kill((pid_t)pid, SIGKILL);
+	sleep_ms(300);
+	log_clear();
+	int gone = studio_sg_start_if_running("echo", NULL, 0, 0);
+	CHECK(wait_done(gone, 5) == STUDIO_SG_DONE && strcmp(studio_sg_get(gone, "/error/code"), "sidecar_stopped") == 0 &&
+	          log_has("sidecar exited on its own") && !log_has("sidecar starting"),
+	      "sidecar gone: sidecar_stopped, not restarted, %s", studio_sg_result(gone));
+	studio_sg_release(gone);
+	CHECK(pid_of_sidecar() != pid, "the next call starts it again");
+	studio_sg_stop();
+	printf("  ok   if running: stopped or gone sidecar not started, running one used\n");
+}
+
 static void test_no_leak(void) {
 	use_fake("ok", 0, 0);
 	free(expect("echo", NULL, 0, NULL, "warm up"));
@@ -626,6 +655,7 @@ int main(int argc, char **argv) {
 	test_startup();
 	test_jobs();
 	test_delayed();
+	test_if_running();
 	test_host();
 	test_network();
 	test_no_leak();

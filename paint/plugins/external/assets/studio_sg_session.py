@@ -17,7 +17,8 @@
 # "sg" des réponses), et les connexions ont un délai (STUDIO_SG_NET_TIMEOUT, 30 s) : ShotGrid injoignable ne bloque
 # jamais longtemps. Un publish que ShotGrid injoignable fait échouer une fois ses fichiers écrits est mis en file
 # d'attente (studio_sg_queue.py, dossier STUDIO_SG_QUEUE) et rejoué plus tard (op replay_publishes). Les publishes
-# enregistrés, mis en file, rejoués ou écartés vont au journal d'audit (studio_audit.py, fichier STUDIO_AUDIT_LOG).
+# enregistrés, mis en file, rejoués ou écartés vont au journal d'audit (studio_audit.py, fichier STUDIO_AUDIT_LOG),
+# envoyé au site en EventLogEntry par la sonde d'ArmorPaint (check_online avec "audit").
 
 import datetime
 import errno
@@ -599,10 +600,25 @@ class Session(object):
         }
 
     def op_check_online(self, args):
-        """Le site répond-il ? Une requête légère (info), sans amorçage ni authentification : pour sortir du mode
-        hors ligne (lot C5). Erreur sg_unreachable sinon."""
+        """Le site répond-il ? Une requête légère (info), sans amorçage Toolkit : pour sortir du mode hors ligne, et
+        sonder le site en ligne (lot C5). Erreur sg_unreachable sinon. Avec "audit": true, envoie ensuite le journal
+        d'audit (op send_audit, sa réponse dans "audit") ; une erreur autre que le site perdu y est rendue."""
         info = self._connect().info() or {}
-        return {"online": True, "site": self._site(), "version": info.get("version")}
+        data = {"online": True, "site": self._site(), "version": info.get("version")}
+        if args.get("audit"):
+            try:
+                data["audit"] = self.op_send_audit({})
+            except Exception as e:
+                if unreachable(e):
+                    raise
+                log.warning("audit not sent to ShotGrid", exc_info=True)
+                data["audit"] = {"sent": 0, "skipped": 0, "more": False, "error": "%s: %s" % (type(e).__name__, e)}
+        return data
+
+    def op_send_audit(self, args):
+        """Envoie au site les lignes du journal d'audit pas encore envoyées, en EventLogEntry (studio_audit.send) :
+        {"sent", "skipped", "more", "error"}. Site perdu en route : sg_unreachable, ce qui est parti est noté."""
+        return studio_audit.send(self._connect(), self._site(), unreachable)
 
     def op_context(self, args):
         """Contexte de lancement transmis par ShotGrid Desktop (SHOTGUN_ENTITY_TYPE/ID), ou null."""

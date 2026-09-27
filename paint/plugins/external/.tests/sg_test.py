@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ASSETS = os.path.join(os.path.dirname(HERE), "assets")
@@ -1116,6 +1117,37 @@ class TestQueue(PublishBase):
         self.assertEqual((result["queued"], len(self.published(s))), ([], 3))
 
 
+class FakeEventLog(object):
+    """Connexion ShotGrid réduite aux EventLogEntry, pour studio_audit.send : batch (tout ou rien, comme le site) et
+    create ; fail(data) rend l'exception d'une entrée refusée, ou None."""
+
+    def __init__(self):
+        self.entries = []
+        self.batches = 0
+        self.fail = None
+
+    def _check(self, data):
+        error = self.fail(data) if self.fail is not None else None
+        if error is not None:
+            raise error
+
+    def create(self, entity_type, data):
+        assert entity_type == "EventLogEntry", entity_type
+        self._check(data)
+        self.entries.append(data)
+        return dict(data, type=entity_type, id=len(self.entries))
+
+    def batch(self, requests):
+        self.batches += 1
+        for r in requests:
+            self._check(r["data"])
+        return [self.create(r["entity_type"], r["data"]) for r in requests]
+
+
+class Fault(Exception):
+    """Refus du site (shotgun_api3.Fault) : pas une erreur réseau."""
+
+
 class TestOffline(Base):
     """Mode dégradé (lot C5) sans Toolkit ni apps : l'état réseau des réponses, le délai des connexions, et les
     briques du sidecar (classement des erreurs, surveillance de shotgun_api3, file d'attente, journal d'audit)."""
@@ -1275,6 +1307,166 @@ class TestOffline(Base):
         self.assertNotIn("error", events[0])
         self.assertEqual(set(events[1]), {"time", "source", "pid", "host", "user", "event", "key"})
         self.assertRegex(events[1]["time"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$")
+
+
+    def audit_sender(self):
+        """Journal d'audit du test (studio_audit lit l'environnement), faux site, et de quoi y écrire comme ArmorPaint."""
+        import studio_audit
+        from studio_sg_session import unreachable
+
+        target = os.path.join(self.workdir, "audit.jsonl")
+        sg = FakeEventLog()
+        patch = mock.patch.dict(os.environ, {"STUDIO_AUDIT_LOG": target})
+        patch.start()
+        self.addCleanup(patch.stop)
+        os.environ.pop("STUDIO_AUDIT_SEND", None)
+
+        def armorpaint(event, **fields):  # une ligne d'ArmorPaint (studio_audit.c)
+            record = {"time": "2026-09-27T10:00:00.000Z", "source": "armorpaint", "pid": 1, "host": "mac",
+                      "user": "ana", "event": event}
+            record.update(fields)
+            with open(target, "a") as f:
+                f.write(json.dumps(record) + "\n")
+
+        def send(**kwargs):
+            return studio_audit.send(sg, SITE + "/", unreachable, **kwargs)
+
+        return target, sg, armorpaint, send
+
+    def test_audit_send(self):
+        # Le journal envoyé au site en EventLogEntry : dans l'ordre, une fois, filtré, par lots dans le temps imparti.
+        import studio_audit
+
+        target, sg, armorpaint, send = self.audit_sender()
+        nothing = {"sent": 0, "skipped": 0, "more": False, "error": None}
+        self.assertEqual(send(), nothing)  # pas encore de journal
+        context = {"site": SITE, "project_id": 7, "task_id": 3, "label": "Demo / robot"}
+        armorpaint("project_open", path="/w/robot.v001.arm", sg=context)
+        studio_audit.write("publish", site=SITE, project_id=7, task_id=3, path="/p/robot.v001.arm", id=41)
+        studio_audit.write("publish_queued", site=SITE, project_id=7, key="k1", id=-1)
+        armorpaint("sg_offline", reason="Connection refused")
+        studio_audit.write("publish", site="https://other.shotgunstudio.com", project_id=2, id=5)  # autre site
+        with open(target, "a") as f:
+            f.write("not json\n")
+            f.write('{"event":"publish","site":"%s"' % SITE)  # pas finie d'écrire
+        self.assertEqual(send(), dict(nothing, sent=4, skipped=2))
+        self.assertEqual(sg.batches, 1)
+        self.assertEqual([e["event_type"] for e in sg.entries], ["ArmorPaint_project_open", "ArmorPaint_publish",
+                                                                 "ArmorPaint_publish_queued", "ArmorPaint_sg_offline"])
+        opened, published, queued, offline = sg.entries
+        self.assertEqual((opened["project"], opened["meta"]["sg"]), ({"type": "Project", "id": 7}, context))
+        self.assertEqual(opened["description"],
+                         "ArmorPaint project_open: /w/robot.v001.arm (ana@mac, 2026-09-27T10:00:00.000Z)")
+        self.assertNotIn("entity", opened)
+        self.assertEqual((published["entity"], published["project"], published["meta"]["source"]),
+                         ({"type": "PublishedFile", "id": 41}, {"type": "Project", "id": 7}, "sidecar"))
+        self.assertNotIn("entity", queued)  # id négatif : le publish n'a pas été créé
+        self.assertEqual((offline["meta"]["reason"], "project" in offline), ("Connection refused", False))
+        # Rien de nouveau : rien ne part. La ligne finie part avec la suivante.
+        self.assertEqual(send(), nothing)
+        with open(target, "a") as f:
+            f.write(',"project_id":7,"id":43}\n')
+        armorpaint("project_save", path="/w/robot.v001.arm", size=12, sg=context)
+        self.assertEqual(send(), dict(nothing, sent=2))
+        self.assertEqual([e["event_type"] for e in sg.entries[4:]], ["ArmorPaint_publish", "ArmorPaint_project_save"])
+        with open(target + ".sent") as f:
+            self.assertEqual(json.load(f)["offset"], os.path.getsize(target))
+        # Filtre : STUDIO_AUDIT_SEND.
+        os.environ["STUDIO_AUDIT_SEND"] = "publish*, sg_*"
+        armorpaint("project_save", path="/w/robot.v002.arm", sg=context)
+        studio_audit.write("publish_replayed", site=SITE, key="k1", id=42)
+        armorpaint("sg_online", pending=0)
+        self.assertEqual(send(), dict(nothing, sent=2, skipped=1))
+        self.assertEqual(sg.entries[-2]["entity"], {"type": "PublishedFile", "id": 42})
+        os.environ["STUDIO_AUDIT_SEND"] = "none"
+        armorpaint("sg_offline", reason="later")
+        self.assertEqual(send(), dict(nothing, disabled=True))
+        del os.environ["STUDIO_AUDIT_SEND"]
+        # Par lots de chunk lignes, tant que le temps imparti (budget_s) le permet : la suite à l'appel suivant.
+        for i in range(5):
+            armorpaint("project_save", path="/w/%d.arm" % i)
+        self.assertEqual(send(chunk=2, budget_s=0), dict(nothing, sent=2, more=True))
+        self.assertEqual(send(chunk=4), dict(nothing, sent=4))
+        self.assertEqual([e["meta"].get("path", e["meta"].get("reason")) for e in sg.entries[8:]],
+                         ["later", "/w/0.arm", "/w/1.arm", "/w/2.arm", "/w/3.arm", "/w/4.arm"])
+
+    def test_audit_send_failures(self):
+        # Site perdu en route, entrée refusée à cause d'un lien, refus du site, rotation du journal, autre envoi en cours.
+        import fcntl
+
+        target, sg, armorpaint, send = self.audit_sender()
+        nothing = {"sent": 0, "skipped": 0, "more": False, "error": None}
+        paths = lambda: [e["meta"]["path"] for e in sg.entries]  # noqa: E731
+        for i in range(6):
+            armorpaint("project_save", path="/w/%d.arm" % i)
+        sg.fail = lambda d: ConnectionRefusedError(61, "refused") if d["meta"]["path"] == "/w/3.arm" else None
+        self.assertRaises(ConnectionRefusedError, send, chunk=2)
+        self.assertEqual(paths(), ["/w/0.arm", "/w/1.arm"])  # le lot suivant, tout ou rien, repart en entier
+        sg.fail = None
+        self.assertEqual(send(), dict(nothing, sent=4))
+        self.assertEqual(paths(), ["/w/%d.arm" % i for i in range(6)])
+
+        # Lien refusé (projet effacé depuis) : le lot repart une entrée à la fois, celle-là sans ses liens.
+        for name, project in (("a", 7), ("b", 99), ("c", 7)):
+            armorpaint("project_save", path="/w/%s.arm" % name, sg={"site": SITE, "project_id": project})
+        sg.fail = lambda d: Fault("Project 99 not found") if d.get("project", {}).get("id") == 99 else None
+        self.assertEqual(send(), dict(nothing, sent=3))
+        self.assertEqual(paths()[6:], ["/w/a.arm", "/w/b.arm", "/w/c.arm"])
+        self.assertEqual((sg.entries[7].get("project"), sg.entries[7]["meta"]["sg"]["project_id"]), (None, 99))
+
+        # Refus du site pour toutes (droits) : rien ne part, les lignes attendent.
+        armorpaint("project_save", path="/w/d.arm")
+        armorpaint("project_save", path="/w/e.arm")
+        sg.fail = lambda d: Fault("API create() CRUD ERROR: permission denied")
+        self.assertEqual(send(), dict(nothing, error="Fault: API create() CRUD ERROR: permission denied"))
+        sg.fail = None
+        self.assertEqual(send(), dict(nothing, sent=2))
+
+        # Rotation (ArmorPaint, au démarrage) : la fin du .1 part avant le nouveau journal.
+        armorpaint("project_save", path="/w/f.arm")
+        os.replace(target, target + ".1")
+        armorpaint("project_save", path="/w/g.arm")
+        self.assertEqual(send(), dict(nothing, sent=2))
+        self.assertEqual(paths()[-3:], ["/w/e.arm", "/w/f.arm", "/w/g.arm"])
+        self.assertEqual(send(), nothing)
+        # Journal remplacé (inconnu) : depuis son début.
+        os.remove(target)
+        os.remove(target + ".1")
+        armorpaint("project_save", path="/w/h.arm")
+        self.assertEqual(send(), dict(nothing, sent=1))
+
+        # Un autre sidecar envoie : rien, sans attendre.
+        armorpaint("project_save", path="/w/i.arm")
+        fd = os.open(target + ".sent.lock", os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            self.assertEqual(send(), dict(nothing, busy=True))
+        finally:
+            os.close(fd)
+        self.assertEqual(send(), dict(nothing, sent=1))
+        self.assertEqual(len(sg.entries), 15)
+
+    def test_check_online_sends_audit(self):
+        # La sonde d'ArmorPaint (check_online avec "audit") envoie le journal au site simulé.
+        audit = os.path.join(self.workdir, "audit.jsonl")
+        flag = os.path.join(self.workdir, "offline")
+        hook = os.path.join(self.workdir, "find_hook.py")
+        write(hook, FIND_HOOK)
+        s = self.start(STUDIO_AUDIT_LOG=audit, STUDIO_SG_HOOK=hook, STUDIO_TEST_OFFLINE_FLAG=flag)
+        write(audit, json.dumps({"time": "2026-09-27T10:00:00.000Z", "source": "armorpaint", "event": "project_save",
+                                 "path": "/w/a.arm", "sg": {"site": SITE, "project_id": 1}}) + "\n")
+        self.assertNotIn("audit", s.data("check_online"))
+        write(flag)
+        self.assertEqual(s.error("check_online", {"audit": True})[0], "sg_unreachable")
+        self.assertFalse(os.path.exists(audit + ".sent"))
+        os.remove(flag)
+        self.assertEqual(s.data("check_online", {"audit": True})["audit"],
+                         {"sent": 1, "skipped": 0, "more": False, "error": None})
+        entries = s.data("find", {"entity_type": "EventLogEntry", "filters": [["event_type", "starts_with", "ArmorPaint_"]],
+                                  "fields": ["event_type", "project", "meta"]})
+        self.assertEqual([(e["event_type"], e["project"]["id"], e["meta"]["path"]) for e in entries],
+                         [("ArmorPaint_project_save", 1, "/w/a.arm")])
+        self.assertEqual(s.data("send_audit"), {"sent": 0, "skipped": 0, "more": False, "error": None})
 
 
 class TestCoreDiscovery(Base):

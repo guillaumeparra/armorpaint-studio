@@ -350,6 +350,15 @@ static bool sidecar_exited(void) {
 	return studio_proc_wait(sidecar, 0); // sans attendre (et même si l'annulation est demandée : l'état est lu d'abord)
 }
 
+// Sous call : le sidecar tourne (parti de lui-même, il est libéré ; le prochain appel le relancera).
+static bool sidecar_running(void) {
+	if (sidecar != NULL && sidecar_exited()) {
+		sg_log("sidecar exited on its own");
+		release_sidecar();
+	}
+	return sidecar != NULL && !closed;
+}
+
 // Lance le sidecar s'il ne tourne pas, jusqu'à la poignée de main. NULL si prêt, sinon la réponse d'erreur pour `id`.
 static char *ensure_sidecar(int id, volatile int *cancel) {
 	if (closed) {
@@ -752,6 +761,7 @@ typedef struct sg_job {
 	int          state;      // sous state
 	int64_t      not_before; // en file : pas avant (now_ms), 0 : dès que possible
 	bool         released; // idem : libéré pendant qu'il tournait, le thread le libérera
+	bool         if_running; // studio_sg_start_if_running
 	char        *result;
 	char       **texts; // rendus par studio_sg_get, vivent jusqu'au release
 	int          text_count;
@@ -796,7 +806,12 @@ static void job_execute(sg_job_t *j) {
 	}
 	else {
 		call_lock();
-		reply = call_locked(j->op, j->op_json, j->args_line, j->timeout_ms, &j->cancel);
+		if (j->if_running && !sidecar_running()) {
+			reply = synth(-1, "sidecar_stopped", "the ShotGrid sidecar is not running: %s not sent", j->op);
+		}
+		else {
+			reply = call_locked(j->op, j->op_json, j->args_line, j->timeout_ms, &j->cancel);
+		}
 		call_unlock();
 	}
 	state_lock();
@@ -813,7 +828,7 @@ static void job_execute(sg_job_t *j) {
 }
 
 // Crée et inscrit un job dans l'état donné ; en file, il ne part pas avant delay_ms. 0 si la table est pleine.
-static int job_create(const char *op, const char *args_json, int timeout_ms, int state, int delay_ms, sg_job_t **out) {
+static int job_create(const char *op, const char *args_json, int timeout_ms, int state, int delay_ms, bool if_running, sg_job_t **out) {
 	sg_job_t *j = calloc(1, sizeof(sg_job_t));
 	if (j == NULL) {
 		return 0;
@@ -822,6 +837,7 @@ static int job_create(const char *op, const char *args_json, int timeout_ms, int
 	j->timeout_ms = timeout_ms;
 	j->state      = state;
 	j->not_before = delay_ms > 0 ? now_ms() + delay_ms : 0;
+	j->if_running = if_running;
 	j->result     = prepare(op, args_json, &j->op_json, &j->args_line); // erreur : le job la rendra telle quelle
 	if (j->op == NULL) {
 		job_free(j);
@@ -911,9 +927,9 @@ int studio_sg_start(const char *op, const char *args_json, int timeout_ms) {
 	return studio_sg_start_after(op, args_json, timeout_ms, 0);
 }
 
-int studio_sg_start_after(const char *op, const char *args_json, int timeout_ms, int delay_ms) {
+static int start_queued(const char *op, const char *args_json, int timeout_ms, int delay_ms, bool if_running) {
 	sg_job_t *j;
-	int       id = job_create(op, args_json, timeout_ms, STUDIO_SG_QUEUED, delay_ms, &j);
+	int       id = job_create(op, args_json, timeout_ms, STUDIO_SG_QUEUED, delay_ms, if_running, &j);
 	if (id == 0) {
 		return 0;
 	}
@@ -946,9 +962,17 @@ int studio_sg_start_after(const char *op, const char *args_json, int timeout_ms,
 	return id;
 }
 
+int studio_sg_start_after(const char *op, const char *args_json, int timeout_ms, int delay_ms) {
+	return start_queued(op, args_json, timeout_ms, delay_ms, false);
+}
+
+int studio_sg_start_if_running(const char *op, const char *args_json, int timeout_ms, int delay_ms) {
+	return start_queued(op, args_json, timeout_ms, delay_ms, true);
+}
+
 int studio_sg_run(const char *op, const char *args_json, int timeout_ms) {
 	sg_job_t *j;
-	int       id = job_create(op, args_json, timeout_ms, STUDIO_SG_RUNNING, 0, &j);
+	int       id = job_create(op, args_json, timeout_ms, STUDIO_SG_RUNNING, 0, false, &j);
 	if (id != 0) {
 		job_execute(j);
 	}

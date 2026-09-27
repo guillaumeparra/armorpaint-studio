@@ -19,6 +19,8 @@
 //               publish_failed     error (replay : pendant un rejeu)
 //               publish_discarded  key
 // Au démarrage, un journal de plus de 10 Mo passe en .1 (l'ancien .1 est remplacé). Thread principal.
+// Le sidecar l'envoie au site ShotGrid en EventLogEntry à chaque essai du site (studio_sg_offline.c, op check_online
+// avec "audit") ; où il en est : <journal>.sent (assets/studio_audit.py).
 
 void        studio_audit_init(void); // external_init(), après studio_prefs_init() et studio_project_init()
 const char *studio_audit_path(void); // fichier du journal, NULL s'il est désactivé

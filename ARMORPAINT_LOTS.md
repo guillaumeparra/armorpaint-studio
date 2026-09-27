@@ -553,15 +553,17 @@ Sans nouveau patch upstream : le contexte va dans une entrée du `.arm` par `pro
 - ✅ **File d'attente des publishes** : si ShotGrid est perdu en plein publish (fichiers déjà écrits), les enregistrements restants vont dans `studio_publish_queue/` (un JSON par publish, avec sa vignette et ses dépendances) et le publish aboutit. Au retour du site, rejeu automatique projet par projet, le parent avant ses enfants ; un publish créé avant l'échec (réponse perdue) est complété, pas dupliqué. Menu : Replay Pending Publishes ; op `discard_publishes`.
 - ✅ **Journal d'audit** : `studio_audit.jsonl` (JSON Lines ; ArmorPaint et le sidecar écrivent dans le même fichier, en ajout). Il trace l'ouverture, l'enregistrement, la copie publiée, les publishes (enregistrés, en file, rejoués, en échec, écartés) et les passages hors ligne et en ligne ; rotation à 10 Mo.
 - ✅ **Défaut trouvé en route** : l'évènement `project_copy` réutilisait le nom du champ commun `source` (champ renommé `from`).
-- Non fait : sonde du site en ligne (une coupure est découverte au prochain appel) ; envoi du journal au site.
-- ⚠️ À valider en C6 sur le vrai site : coupures réelles (DNS, proxy, site lent, session expirée pendant la coupure).
+- ✅ **Sonde du site en ligne** (reprise du 2026-09-27) : toutes les 300 s (`STUDIO_SG_PROBE_INTERVAL`, `0` : jamais), job différé du superviseur comme l'essai hors ligne, ArmorPaint au repos compris : une coupure est découverte sans attendre qu'un appel échoue. La sonde ne lance pas le sidecar (`studio_sg_start_if_running`, erreur `sidecar_stopped`) : une session qui ne se sert pas de ShotGrid n'est pas sondée.
+- ✅ **Journal envoyé au site** (reprise du 2026-09-27) : à chaque essai du site (sonde, retour du site, Check Connection), les lignes pas encore envoyées deviennent des `EventLogEntry` (`ArmorPaint_<évènement>`, la ligne dans `meta`, projet et PublishedFile liés), par lots, 2 s au plus par essai. Curseur `studio_audit.jsonl.sent` qui suit la rotation ; site perdu en route : la suite au prochain essai ; lien refusé : l'entrée repart sans ; refus du site (droits) : dit une fois au log, les lignes attendent ; filtre `STUDIO_AUDIT_SEND` ; op `send_audit`. Au moins une fois (réponse perdue : renvoyé) ; les lignes d'un autre site sont écartées.
+- ⚠️ À valider en C6 sur le vrai site : coupures réelles (DNS, proxy, site lent, session expirée pendant la coupure) ; droits de création des `EventLogEntry` pour les artistes.
 
 **Tests** :
 - `sg.sh` : 11 tests du sidecar en plus, 46 en tout.
   - File d'attente : coupure en plein publish puis rejeu, réponse perdue sans doublon, rejeu interrompu et publish écarté, publish sans file, site perdu avant le publish.
   - Réseau : délai, champ `sg`, site injoignable, suivi de l'état, stockage de la file, audit.
   - Superviseur : 269 contrôles, jobs différés compris.
-- `sg_context_app.sh`, dans ArmorPaint sur le site simulé : 13 contrôles (contexte gardé et relu ; mode fichier, puis retour du site trouvé au repos ; coupure en plein publish, file rejouée ; audit des deux processus).
+  - Reprise : envoi du journal (ordre, filtre, lots et temps imparti, site perdu en route, lien refusé, refus du site, rotation, autre envoi en cours), sonde par `check_online` ; 50 tests du sidecar en tout ; jobs `studio_sg_start_if_running` au superviseur (280 contrôles).
+- `sg_context_app.sh`, dans ArmorPaint sur le site simulé : 13 contrôles (contexte gardé et relu ; mode fichier, puis retour du site trouvé au repos ; coupure en plein publish, file rejouée ; audit des deux processus). Reprise, section 5 : coupure trouvée par la sonde sans autre appel ; journal envoyé par les essais, ce que les sessions précédentes n'avaient pas envoyé, dans l'ordre et lié ; session sans ShotGrid : pas de sidecar lancé ; 22 contrôles en tout avec ceux de B6.
 - `export.sh` : journal en ajout et comptage de la file.
 
 ### C6 — Intégration & recette · **5 j** — 🟡 **préparé le 2026-09-27** ; la recette elle-même attend le vrai site

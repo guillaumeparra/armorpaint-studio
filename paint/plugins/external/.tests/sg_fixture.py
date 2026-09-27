@@ -15,8 +15,9 @@
 # STUDIO_TEST_TK_CORE : dossier racine de tk-core. STUDIO_TEST_SCENARIO : variante du site (voir setup()).
 #
 # Réseau coupé (lot C5, mode dégradé) : STUDIO_TEST_OFFLINE_FLAG=<fichier>, le site est injoignable tant que ce
-# fichier existe ; STUDIO_TEST_OFFLINE_AT=<méthode>:<type>:<n> (create:PublishedFile:2), le n-ième de ces appels
-# échoue et crée le fichier ; STUDIO_TEST_LOST_AT, pareil, mais l'appel a eu lieu avant d'échouer (réponse perdue).
+# fichier existe ; STUDIO_TEST_OFFLINE_AT=<méthode>:<type>:<n> (create:PublishedFile:2, info::2 pour une méthode sans
+# type), le n-ième de ces appels échoue et crée le fichier ; STUDIO_TEST_LOST_AT, pareil, mais l'appel a eu lieu avant
+# d'échouer (réponse perdue).
 
 import errno
 import json
@@ -214,7 +215,7 @@ def _observe(db):
         def call(*args, **kwargs):
             if flag and os.path.exists(flag):
                 raise unreachable()
-            trigger = triggers.get((method, args[0] if args and isinstance(args[0], str) else None))
+            trigger = triggers.get((method, args[0] if args and isinstance(args[0], str) else ""))
             if trigger is not None:
                 trigger[0] -= 1
                 if trigger[0] == 0:

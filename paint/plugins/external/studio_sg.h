@@ -16,6 +16,7 @@
 //   timeout         pas de réponse dans le délai (le sidecar est tué)
 //   cancelled       annulé (idem)
 //   bad_request     op vide, args qui n'est pas un objet JSON
+//   sidecar_stopped job studio_sg_start_if_running : le sidecar ne tournait pas, rien n'a été envoyé
 // Un appel qui échoue en sidecar_died, timeout ou cancelled n'est jamais rejoué : l'opération (un publish) peut avoir
 // eu lieu.
 
@@ -60,6 +61,9 @@ int  studio_sg_run(const char *op, const char *args_json, int timeout_ms); // sy
 // Job différé : en file (STUDIO_SG_QUEUED) jusqu'à delay_ms, les jobs suivants passent devant lui d'ici là. Sa réponse
 // réveille l'app comme les autres (config.wake), même au repos : de quoi faire quelque chose à heure fixe sans frames.
 int  studio_sg_start_after(const char *op, const char *args_json, int timeout_ms, int delay_ms);
+// Idem, mais seulement si le sidecar tourne quand le job part : sinon, il échoue en sidecar_stopped sans le lancer.
+// Pour ce qui n'a de sens que si ShotGrid sert déjà (la sonde du site, lot C5).
+int  studio_sg_start_if_running(const char *op, const char *args_json, int timeout_ms, int delay_ms);
 int  studio_sg_state(int job);
 void studio_sg_cancel(int job);  // en file : ne partira pas ; en cours : sidecar tué ; réponse "cancelled"
 void studio_sg_release(int job); // en cours : annulé, libéré à la fin
