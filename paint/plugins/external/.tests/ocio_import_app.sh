@@ -4,7 +4,7 @@
 # PSD (à plat, calques) en 8 bits, EXR float et half par la file_rule, .hdr déjà dans l'espace de travail, donnée
 # reconnue à son nom. Puis le choix par texture (reconversion, retour à l'automatique, espace inconnu, choix fait avant
 # l'import), la vignette du navigateur de fichiers, le .arm (rouvert, paquet d'assets sans les fichiers),
-# STUDIO_OCIO_IMPORT=0.
+# STUDIO_OCIO_IMPORT=0, et le nœud Image Texture (STUDIO-PATCH(image-texture-color-space)).
 #
 #   sh .tests/ocio_import_app.sh [dossier de travail]
 #   APP=<binaire ArmorPaint> pour un autre build (défaut : build Release de paint/).
@@ -43,7 +43,7 @@ dmp() { printf '\tconsole_log(string("t: dump %s=%%d", studio_texture_dump("%s",
 set_cs() { printf '\tconsole_log(string("t: %s=%%d", studio_texture_set_color_space("%s", "%s")));\n' "$1" "$2" "$3"; }
 unset OCIO STUDIO_OCIO_WORKING_SPACE STUDIO_OCIO_LIB STUDIO_OCIO_IMPORT
 
-rm -rf "$W"/*.stx "$W"/*.arm "$W/packed" "$W/moved"
+rm -rf "$W"/*.stx "$W"/*.arm "$W/packed" "$W/moved" "$W/out_"* "$W/presets"
 "$PY" "$T/ocio_import_check.py" make "$W"
 SRGB="sRGB Encoded Rec.709 (sRGB)"
 LIN="Linear Rec.709 (sRGB)"
@@ -157,5 +157,51 @@ check "STUDIO_OCIO_IMPORT=0 : choix refusé, pas d entrée dans le .arm" 'has "$
 printf 'int main() {\n\tproject_filepath_set("%s");\n\tproject_save(0);\n\treturn 0;\n}\n' "$W/keep.arm" > "$W/s5.c"
 (STUDIO_OCIO_IMPORT=0 app "$W/p.arm" --background --script "$W/s5.c" > "$W/s5.log" 2>&1 || true)
 check "STUDIO_OCIO_IMPORT=0 : entrée d un projet ouvert gardée" '[ -f "$W/keep.arm" ] && grep -aqF "{\"file\": \"ramp.png\", \"color_space\": \"ACEScg\", \"source\": \"user\", \"float\": false, \"linear\": false}" "$W/keep.arm"'
+
+# 5. Nœud Image Texture : un gris linéaire 0,5 (.hdr) en couleur de base et en rugosité, calque de remplissage 8 bits,
+# export des valeurs d'ArmorPaint telles quelles. La couleur de base est gardée encodée gamma 2.2 : Linear doit donner
+# 0,5^(1/2,2) = 186/255 ; sRGB en rugosité, 0,5^2,2 = 55 ou 56/255 ; Auto sur une texture linéaire, comme Linear.
+mkdir -p "$W/presets"
+cat > "$W/presets/node.json" << 'EOF'
+{
+	"version": 1,
+	"defaults": { "format": "exr", "bits": 32, "color_space": "raw" },
+	"textures": [
+		{ "name": "base", "channels": ["base_r", "base_g", "base_b"] },
+		{ "name": "rough", "channels": ["rough"] }
+	]
+}
+EOF
+export STUDIO_EXPORT_PRESETS="$W/presets"
+# node <mode de la couleur de base> <sortie> : 0 Auto, 1 Linear (bouton 1 du nœud) ; la rugosité en sRGB.
+node() {
+	cat > "$W/node$1.c" << EOF
+int main() {
+	script_project_new();
+	script_import_asset("$W/grey.hdr", 0);
+	slot_material_t *m = script_material_create("mat");
+	ui_node_t *a = script_material_create_node_at("TEX_IMAGE", -400.0, 0.0);
+	ui_node_t *b = script_material_create_node_at("TEX_IMAGE", -400.0, 300.0);
+	script_material_set_button(a, 0, 0.0);
+	script_material_set_button(a, 1, $1.0);
+	script_material_set_button(b, 0, 0.0);
+	script_material_set_button(b, 1, 2.0);
+	ui_node_t *out = script_material_get_node("OUTPUT_MATERIAL_PBR");
+	script_material_connect(a, 0, out, 0);
+	script_material_connect(b, 0, out, 3);
+	script_material_update();
+	script_material_set(m);
+	script_fill_layer();
+	console_log(string("t: export=%d", studio_export_run("$W/$2", "node", 0)));
+	return 0;
+}
+EOF
+	app --background --script "$W/node$1.c" > "$W/node$1.log" 2>&1 || true
+}
+node 1 out_linear
+node 0 out_auto
+check "nœud : Linear en couleur de base, encodé gamma 2.2" 'has "$W/node1.log" "t: export=1" && px exr "$W/out_linear/untitled_base.exr" 0.7254 0.7334'
+check "nœud : sRGB en rugosité, décodé" 'px exr "$W/out_linear/untitled_rough.exr" 0.2156 0.2197'
+check "nœud : Auto sur une texture linéaire, comme Linear" 'has "$W/node0.log" "t: export=1" && px exr "$W/out_auto/untitled_base.exr" 0.7254 0.7334'
 
 [ $FAIL -eq 0 ] && echo "ocio import app: OK ($W)" || { echo "ocio import app: FAILED ($W)"; exit 1; }

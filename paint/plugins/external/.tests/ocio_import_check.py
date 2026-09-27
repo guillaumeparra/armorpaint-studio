@@ -6,6 +6,7 @@
 #   python ocio_import_check.py convert <dump> <image> <espace source>   pixels = PyOpenColorIO, puis encodage d'ArmorPaint
 #   python ocio_import_check.py same <dump> <image>                       pixels intacts (donnée, espace de travail)
 #   python ocio_import_check.py differ <dump> <image>                     pixels changés (au moins un canal)
+#   python ocio_import_check.py exr <fichier.exr> <min> <max>             texels couverts d'un export dans [min, max]
 # --opaque (convert, same) : seulement les pixels opaques de la source (le paquet d'assets du .arm les redessine en
 # RGBA 8 bits avec mélange alpha).
 #
@@ -144,6 +145,8 @@ def make(d):
     sky[..., 1] = 0.25
     sky[..., 2] = np.linspace(0.05, 5.0, 32).reshape(4, 8)
     rgbe(os.path.join(d, "sky.hdr"), sky)
+    # Gris 0,5 linéaire pour le nœud Image Texture (STUDIO-PATCH(image-texture-color-space)).
+    rgbe(os.path.join(d, "grey.hdr"), np.full((16, 16, 3), 0.5, np.float32))
 
 
 def dump(path):
@@ -192,6 +195,20 @@ def main():
     if cmd == "make":
         make(sys.argv[2])
         return 0
+    if cmd == "exr":
+        import OpenEXR
+
+        with OpenEXR.File(sys.argv[2], separate_channels=True) as f:
+            ch = {k: np.asarray(v.pixels, np.float64) for k, v in f.channels().items() if k != "A"}
+        # Texels couverts par les UV du maillage : les autres restent à 0.
+        covered = np.any(np.stack([v != 0 for v in ch.values()]), axis=0)
+        lo, hi = float(sys.argv[3]), float(sys.argv[4])
+        if not covered.any():
+            print("no covered texel")
+            return 1
+        span = {k: (float(v[covered].min()), float(v[covered].max())) for k, v in ch.items()}
+        print("%s (%.0f%% of the texels covered)" % (" ".join("%s=%.6f..%.6f" % (k, a, b) for k, (a, b) in sorted(span.items())), covered.mean() * 100))
+        return 0 if all(lo <= a and b <= hi for a, b in span.values()) else 1
     args = [a for a in sys.argv[2:] if a != "--opaque"]
     got, fmt = dump(args[0])
     src = reference(args[1])
