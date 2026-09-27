@@ -618,9 +618,10 @@ Ce chantier remplace la feuille de route E0-E11 de l'étude pour la v1.
 **Objectif (v0)** : un outil qui ouvre un .sbs ou un .sbsar, liste ses paramètres exposés comme Painter les montre, les rend par `sbsrender` et crée ou met à jour le matériau correspondant dans ArmorPaint.
 
 **Choix d'architecture.**
-- **Moteur** : `sbsrender` et `sbscooker` de Designer, moteur `mtl` (par défaut ; c'est celui qu'affichent Designer et Painter). Un processus par rendu, toutes les sorties utiles dans le même appel. Mesuré sur le M4 : 1,40 s en 2048 pour colorful_planks, 0,6 à 0,9 s en 512.
+- **Moteur** : `sbsrender` et `sbscooker` de Designer, moteur `mtl` (par défaut ; c'est celui qu'affichent Designer et Painter). Un processus par format de fichier, toutes les sorties de ce format dans le même appel. Mesuré sur le M4 (E1) : colorful_planks, 6 sorties, 1,17 s en 2048 et 0,68 s en 512.
 - **Chemin de `sbsrender`** : préférence `subzero.sbsrender` (fichier des préférences studio, `studio_prefs_*`), réglée dans un onglet **subzero** de la boîte Préférences (`box_preferences_add_tab`, patch `preferences-tab` déjà posé, comme l'onglet Color d'OCIO).
   - Préférence vide : détection dans `/Applications/Adobe Substance 3D Designer/*.app/Contents/MacOS/`.
+  - Sur le poste de Guillaume, la préférence vise la **copie isolée** `~/Desktop/code/sbsrender/MacOS/sbsrender` (E0) : figée, elle ne bouge pas avec les mises à jour de Designer.
   - `sbscooker` est cherché dans le même dossier. S'il manque, les .sbs sont refusés avec un message ; les .sbsar marchent.
   - L'onglet affiche le chemin retenu, la version lue (`sbsrender --version`) ou l'erreur, avec un bouton « Parcourir… ».
   - ArmorPaint transmet le chemin à la fenêtre : une seule source de vérité.
@@ -640,12 +641,25 @@ Ce chantier remplace la feuille de route E0-E11 de l'étude pour la v1.
 - Désactiver les mises à jour automatiques de Designer, pour que la référence ne change pas sous nos pieds.
 - Ranger les deux scripts de l'étude dans `external/assets/`.
 - **Aucun fichier Adobe dans le dépôt** : les bancs lisent leurs échantillons hors dépôt (étagère de Painter, `~/Desktop/code/sbsar/`) et se sautent s'ils sont absents.
+- ✅ **Copie isolée de `sbsrender`** (2026-09-27, demandée par Guillaume) dans `~/Desktop/code/sbsrender/`, hors dépôt, 271 Mo. Elle est refaite depuis Designer par `copier.sh`, rangé à côté.
+  - **Contenu** :
+    - `sbsrender` et `sbscooker` ;
+    - les 58 bibliothèques liées. `sbsrender` embarque aussi le moteur de rendu 3D de Designer (Eclair), d'où Qt et USD, que dyld exige au lancement même pour un rendu 2D ;
+    - les 3 moteurs (`plugins/engines`) ;
+    - la bibliothèque `sbs://` (`Resources/packages`, 128 Mo), pour le cuiseur seul.
+  - **La disposition compte.** Le rpath est `@executable_path/..`, et le moteur est cherché en `../plugins/engines`, les paquets en `../Resources/packages`.
+  - **Vérifié** :
+    - aucune image chargée depuis `/Applications` pendant un rendu (vmmap) ;
+    - rendus `neon --cpu-count 1` identiques à l'octet à ceux de Designer ;
+    - un .sbs cuit par la copie se rend au pixel près comme celui cuit par Designer (seul l'`asmuid` diffère, tiré à chaque cuisson) ;
+    - même vitesse.
+  - `mtl` n'est pas déterministe d'un rendu à l'autre (quelques niveaux sur 0,2 % des octets). C'est sans importance pour Guillaume ; les comparaisons au pixel près se font en `neon --cpu-count 1`.
 
-### E1 — Description et rendu, en ligne de commande · **2-3 j**
+### E1 — Description et rendu, en ligne de commande · **2-3 j** · ✅ fait (2026-09-27)
 
-En Python, testable sans ArmorPaint.
+En Python, testable sans ArmorPaint. Banc : `.tests/subzero.sh` (20 matériaux de l'étagère tirés au sort ; `SUBZERO_RENDER_ALL=1` pour les 107).
 
-- `subzero_meta.py` (reprise de `sbsar_meta.py` et `sevenz.py`) :
+- `subzero_meta.py` et `subzero_7z.py` (reprises de `sbsar_meta.py` et `sevenz.py`) :
   - graphes ;
   - entrées : types, défauts, bornes, pas, widgets, libellés, descriptions, groupes, `visibleif`, usages ;
   - sorties : usage, format, `disable` ;
@@ -653,7 +667,11 @@ En Python, testable sans ArmorPaint.
 - `subzero_render.py` (chemin de `sbsrender` reçu en argument) :
   - cuisson d'un .sbs par `sbscooker` dans `~/Library/Caches/subzero/cook/`, refaite seulement si le .sbs a changé (dépendances non suivies en v0) ;
   - rendu par `--input-graph`, `--set-value` (dont `$outputsize` et `$randomseed`), `--use-preset`, `--set-entry` pour les entrées image, `--input-graph-output` pour les seules sorties liées ;
-  - formats : TGA 8 bits ; normale et hauteur en EXR half si le projet est en 16 ou 32 bits (`--set-output-format`, `--set-output-bit-depth`). Jamais de PNG : 7,5 s au lieu de 1,4 s en 2048 ;
+  - **`--memory-budget` toujours explicite.** Sans lui, `sbsrender` lance `system_profiler SPDisplaysDataType` pour lire la VRAM et l'attend 0,3 s. Avec, sur colorful_planks (M4, `mtl`), l'aperçu 512 passe de 1,00 à 0,65 s et le 2048 de 1,42 à 1,08 s, pixels inchangés. **La vitesse est la priorité de Guillaume.** Il reste un coût fixe d'environ 0,6 s par processus, dont 0,14 s de chargement des bibliothèques par dyld et environ 0,2 s de moteur ; l'écart entre 16 px et 512 px ne dépasse pas 0,05 s ;
+  - dossier de sortie créé avant l'appel : `sbsrender` ne le crée pas (code 47). Le rapport JSON qu'il écrit sur stdout (fichier de chaque sortie) sert à la vérification ;
+  - formats : TGA 8 bits ; normale et hauteur en EXR half si le projet est en 16 ou 32 bits. Jamais de PNG : 7,5 s au lieu de 1,4 s en 2048 ;
+  - **un format par appel.** Un même appel qui écrit deux formats (TGA et EXR, ou TGA et TIFF) échoue au hasard, environ 1 fois sur 8 : « Result cannot be saved », code 47. Avec un format par appel, aucun échec sur 47 essais. Les sorties EXR partent donc dans un second processus, lancé en même temps que le premier. Chacun recalcule le graphe, ce qui coûte environ 0,5 s en 2048 ; d'où l'EXR réservé aux projets en 16 ou 32 bits ;
+  - **EXR sans compression** : tout en EXR, 1,32 s au lieu de 1,73 s en zip (piz : 1,61 s). Le TGA « 16 bits » n'existe pas : `sbsrender` l'écrit en 8 bits sans rien dire ;
   - **vérification** que chaque fichier attendu existe, et lecture de stderr. `sbsrender` rend le code 0 sur une sortie introuvable ou un bitmap manquant (image noire) ;
   - annulation par kill du groupe de processus.
 
@@ -664,7 +682,15 @@ En Python, testable sans ArmorPaint.
 - colorful_planks.sbs est cuit puis rendu ;
 - un chemin de `sbsrender` faux ou vide donne un message qui dit quoi régler.
 
-### E2 — Fenêtre de réglage · **4-6 j**
+**Résultats** (M4, copie isolée, `mtl`) :
+- 977 .sbsar lus en 0,8 s, descriptions identiques à celles de l'étude ; 40 tirés au sort décrits comme par `sbsrender info` ; 1 784 conditions `visibleif` compilées et évaluées ;
+- les 107 matériaux de l'étagère rendus en 2048 avec toutes leurs sorties image : 1 004 fichiers en 110 s ;
+- wood_plain : erreur lisible, rien d'écrit à destination ;
+- colorful_planks.sbs cuit en 1,1 s puis rendu, cuisson reprise du cache à la deuxième ouverture ;
+- colorful_planks, 6 sorties : **0,68 s en 512, 1,17 s en 2048** en TGA ; 1,64 s avec la hauteur en EXR ;
+- annulation : rendu tué en moins de 0,5 s, destination intacte.
+
+### E2 — Fenêtre de réglage · **4-6 j** · ✅ fait (2026-09-27)
 
 - Ouvrir un .sbs ou un .sbsar : sélecteur de fichier, ou dépôt sur la fenêtre. S'il y a plusieurs graphes, liste et choix (par défaut : le seul graphe matériau, sinon le premier).
 - **Paramètres présentés comme dans Painter** :
@@ -680,7 +706,17 @@ En Python, testable sans ArmorPaint.
 - Boutons « Envoyer vers ArmorPaint » (nouveau matériau), « Mettre à jour » (matériau déjà envoyé), « Dupliquer » (nouveau matériau, nouveau dossier), « Recharger » (après un enregistrement dans Designer).
 - Si `sbsrender` est introuvable : message qui renvoie à l'onglet subzero des préférences.
 
-### E3 — Pont avec ArmorPaint · **3-4 j**
+**Réalisé** (`assets/subzero_window.py`, sur le socle Qt partagé `studio_window.c` et `assets/studio_qt.py`, repris de la fenêtre d'export) :
+- tout le plan ci-dessus. « Default » dans la liste des presets tient lieu de réinitialisation globale. Les entrées image prennent un fichier ou rien ;
+- **écart assumé : « Live »** (coché par défaut). Une fois le matériau envoyé, chaque réglage relâché rend directement en taille finale dans le dossier du matériau, puis ArmorPaint recharge ses textures : le viewport suit sans clic sur « Update ». Décoché, on revient au plan (aperçu 512, puis « Update »). La règle de droit tient : chaque rendu part d'un geste ;
+- aperçu : 512 px dans le cache (`~/Library/Caches/subzero/preview/`), lancé au relâchement d'un curseur ou 300 ms après un réglage au clavier ou à la molette ;
+- paramètres techniques : `normal_format` sur l'entrée « OpenGL ». Les bascules `channel_*` suivent les canaux d'ArmorPaint (couleur de base, rugosité, métal, normale, hauteur, occlusion, opacité), ce qui masque par `visibleif` les sorties spéculaire/brillance ;
+- sorties : tableau repliable (« Outputs (6 linked) »), canal modifiable par sortie, gardé dans la recette. Une sortie sans canal dit pourquoi (non représentable, déjà prise, usage inconnu) ;
+- nom du matériau : celui du graphe ou du preset, modifiable. Dossier et fichiers en un seul mot (`ColorfulPlanks/ColorfulPlanks_basecolor.tga`) : les règles de nom d'ArmorPaint ne voient que le canal, et les noms d'assets restent uniques dans le projet ;
+- **décalques** : ArmorPaint multiplie la couleur par son alpha dans le shader ([image_texture_node.c:69](paint/sources/nodes_material/image_texture_node.c:69), tout sauf le .jpg), d'où des bords sombres sous l'opacité. Une couleur de base dont l'alpha n'est pas partout opaque est donc réécrite en RGB, et son alpha va dans `<Nom>_opacity.tga`, relié à l'opacité, faute de sortie opacité propre (0,1 s en 2048, décalques seuls) ;
+- les sorties grises de `sbsrender` sont des TGA de type 3, que Qt ne lit pas : vignettes par un lecteur à nous.
+
+### E3 — Pont avec ArmorPaint · **3-4 j** · ✅ fait (2026-09-27)
 
 En C dans `external/`, sur le modèle de `studio_export_window.c` et de `studio_ocio_prefs.c`.
 
@@ -699,7 +735,17 @@ En C dans `external/`, sur le modèle de `studio_export_window.c` et de `studio_
   - hauteur avec la force de relief par défaut d'ArmorPaint : le calibrage contre Painter est reporté ;
   - émissif réduit au drapeau d'ArmorPaint ; sorties non représentables (anisotropie, sheen, coat) signalées dans la fenêtre.
 
-### E4 — Tests et recette · **1-2 j**
+**Réalisé** (`subzero.c`, `subzero.h`, **aucun patch du cœur**) :
+- fenêtre lancée par `studio_window` (socle commun avec la fenêtre d'export) ; protocole dans `subzero.h` ;
+- `state` renvoie le chemin de `sbsrender`, le fichier du projet, sa résolution, sa profondeur et ce qu'il faut ouvrir. Le matériau à rééditer n'y figure pas : « Edit Selected Material » ouvre la fenêtre sur son dossier, et la recette donne le reste ;
+- menu **subzero** : « Open... », « Edit Selected Material » (grisé si le matériau n'est pas un matériau subzero), « Show Window », « Preferences... » ;
+- importeur `sbsar`/`sbs` (et en majuscules) : Import Asset, glisser-déposer et `script_import_asset` ouvrent la fenêtre ;
+- `create` suit `import_folder_run` : un nœud Image Texture par fichier, relié à la sortie PBR, matériau choisi, pas d'historique ;
+- `update` recharge les textures en place (`studio_texture_reload`, ajouté à `studio_ocio_import.c`, qui garde l'espace OCIO de chaque texture). Il retire les nœuds des fichiers disparus et ajoute ceux des nouveaux, relie une entrée seulement si elle est libre (les liens de l'artiste restent), puis refait à la frame suivante les calques de remplissage du matériau et son aperçu. Si le matériau a été supprimé, il est recréé ;
+- matériau reconnu par le dossier de ses textures, qui contient `subzero.json` : rien de plus dans le `.arm` ;
+- API de scripting : `subzero_open`, `subzero_is_open`, `subzero_material_dir`, `subzero_materials_json` (bancs). `studio_layer_op("to_fill")` (To Fill Layer du menu du calque) a été ajouté pour les bancs.
+
+### E4 — Tests et recette · **1-2 j** · ✅ fait (2026-09-27)
 
 - `.tests/subzero_app.sh` en `--background`, sur le modèle d'`export_window_app.sh`. `SUBZERO_TEST=<choix.json>` donne le fichier, le preset, les valeurs et l'action ; la fenêtre les applique, envoie, écrit un résultat et se ferme. Le chemin de `sbsrender` passe par un fichier de préférences de test (`STUDIO_PREFS`).
 - Cas couverts :
@@ -709,13 +755,32 @@ En C dans `external/`, sur le modèle de `studio_export_window.c` et de `studio_
   - chemin de `sbsrender` vide, faux, puis corrigé dans les préférences sans relancer ArmorPaint ;
   - mise à jour d'un matériau utilisé par 2 calques ;
   - projet rouvert sans le plugin, avec un aspect identique.
-- **Critère chronométré** : colorful_planks en 2048, « Envoyer » → calque à jour en ≤ 2,5 s (rendu seul : 1,40 s).
+- **Critère chronométré** : colorful_planks en 2048, « Envoyer » → calque à jour en ≤ 2,5 s (rendu seul, 6 sorties en TGA : 1,17 s).
+
+**Réalisé** :
+- `.tests/subzero_window_ui.py` : la fenêtre contre un faux ArmorPaint, avec le vrai `sbsrender`. Il couvre :
+  - les règles pures, et l'association automatique sur les 107 matériaux de l'étagère : un canal par sortie au plus, sinon une raison ; couleur de base dès qu'une sortie en a l'usage ;
+  - l'envoi (dossier, noms, liaisons, recette, rendu final < 2,5 s), la mise à jour depuis la recette, « Duplicate », les 16 bits (normale et hauteur en EXR) et le nom du preset ;
+  - le décalque (footprints : opacité séparée, couleur en RGB), le .sbs cuit avec un projet jamais enregistré, et `sbsrender` introuvable (bandeau vers les préférences, paramètres montrés quand même) ;
+  - le chemin corrigé dans les préférences (évènement `prefs`) pendant la détection du démarrage. Ce cas a révélé une course : le résultat d'un travail remplacé juste après avoir fini était encore traité. Désormais, seul le dernier travail soumis compte.
+- `.tests/subzero_app.sh` : dans ArmorPaint lancé avec son interface (la fenêtre a besoin de la boucle d'images, donc pas en `--background`), Qt offscreen, `STUDIO_PREFS` et `SUBZERO_CACHE` à lui :
+  - un .sbsar importé par `script_import_asset` ouvre la fenêtre, qui envoie le matériau ;
+  - ce matériau est mis sur deux calques de remplissage, puis le projet est enregistré et rouvert ;
+  - le matériau est retrouvé par son dossier, et la réédition depuis ce dossier donne un `update` : 6 textures rechargées, pas de nouveau matériau, les deux calques refaits, la recette à jour.
+- **Chronométrage** (M4, `mtl`, colorful_planks, 2048, 6 sorties) : rendu 1,8 à 1,9 s dans l'app, puis 0,3 à 0,4 s côté ArmorPaint (import ou rechargement des 6 textures), soit **2,1 à 2,3 s** de « Send » au matériau à jour.
+  - Le même rendu prend 1,4 à 1,7 s en ligne de commande, qu'ArmorPaint tourne ou non : le GPU partagé ne coûte presque rien au repos.
+  - Juste après le lancement d'ArmorPaint (textures, shaders), il monte à 2,3 à 3,2 s ; le banc ouvre donc la fenêtre après 120 images.
+  - Le banc affiche la charge de la machine à côté des temps : sous une charge de 30, ils doublent.
+- Non couverts par un banc :
+  - la préférence `sbsrender` corrigée dans l'onglet sans relancer ArmorPaint. L'onglet relance la détection et envoie l'évènement `prefs` : cet envoi n'est pas couvert, la réception l'est par le faux ArmorPaint ;
+  - un projet rouvert sans le plugin. Il n'y a rien à tester : le matériau n'est fait que de nœuds Image Texture.
+- `.tests/export_window_app.sh`, `layers_undo_app.sh` et `masks_app.sh` sont toujours verts après le socle Qt partagé et `studio_layer_op("to_fill")`.
 
 | Chantier E (v0) — total | **11-16 j** |
 |---|---|
 
 **Compromis acceptés en v0.**
-- **Pas de temps réel.** Aperçu 512 en 0,6 à 0,9 s dans la fenêtre ; le viewport ne change qu'à « Envoyer » ou « Mettre à jour » (≈ 1,5 à 2 s en 2048). Tout le graphe est recalculé à chaque réglage.
+- **Pas de temps réel.** Aperçu 512 en 0,7 s environ dans la fenêtre. Avec « Live », le viewport suit chaque réglage relâché en 2,1 à 2,3 s en 2048 ; sans lui, il ne change qu'à « Envoyer » ou « Mettre à jour ». Tout le graphe est recalculé à chaque réglage.
 - **Fenêtre séparée**, pas un onglet de la barre latérale : les paramètres ne s'affichent pas à la simple sélection du calque, il faut « Rééditer ».
 - **Un matériau = un jeu de réglages.** Deux calques qui partagent le matériau partagent ses textures, comme partout dans ArmorPaint ; pour des réglages différents, « Dupliquer ».
 - **Ctrl+Z n'annule pas une mise à jour de textures**, comme « Reimport Textures » d'ArmorPaint.
@@ -736,10 +801,10 @@ En C dans `external/`, sur le modèle de `studio_export_window.c` et de `studio_
 
 | Risque | Impact | Parade |
 |---|---|---|
-| Adobe retire `sbsrender` de Designer (précédent de 2021) | 🟠 plus de nouveaux rendus | Mises à jour de Designer gelées ; les projets restent lisibles (textures sur disque) |
+| Adobe retire `sbsrender` de Designer (précédent de 2021) | 🟠 plus de nouveaux rendus | Copie isolée figée (E0) ; les projets restent lisibles (textures sur disque) |
 | Erreurs silencieuses de `sbsrender` | 🟠 image noire | Fichiers produits vérifiés, stderr lu (E1) |
 | Designer déplacé ou mis à jour : chemin périmé | 🟡 | Chemin vérifié à chaque lancement de la fenêtre, message qui renvoie aux préférences |
-| GPU partagé entre `sbsrender` (`mtl`) et ArmorPaint | 🟡 à-coups non mesurés | Mesure en E4 |
+| GPU partagé entre `sbsrender` (`mtl`) et ArmorPaint | 🟢 mesuré en E4 : négligeable au repos, +1 s juste après le lancement d'ArmorPaint | — |
 
 ---
 

@@ -45,3 +45,7 @@ bool studio_texture_set_color_space(const char *file, const char *color_space);
 // (chacune garde son espace source) ; celles qui ne sont que dans le paquet du projet gardent leurs pixels (signalé).
 // Les calques ne sont pas convertis : ce qui y est peint reste tel quel. Rend le nombre de textures rechargées.
 int studio_ocio_import_reconvert(void);
+// Chantier E (subzero) : recharge une texture du projet (chemin de l'asset) depuis son fichier réécrit, décodée comme à
+// l'import, avec son espace source enregistré. Les matériaux et calques qui l'utilisent sont à refaire par l'appelant.
+// Faux si aucun asset n'a ce chemin ou si le décodage échoue (l'ancienne texture reste).
+bool studio_texture_reload(const char *file);

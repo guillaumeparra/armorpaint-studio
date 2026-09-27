@@ -6,7 +6,8 @@
 // studio, et l'export passe par studio_export_request.
 //
 // La fenêtre est un processus à part, lancé à l'ouverture et arrêté à sa fermeture ; elle s'arrête aussi quand
-// ArmorPaint quitte (EOF sur son stdin). Protocole, une ligne JSON par message sur stdin et stdout :
+// ArmorPaint quitte (EOF sur son stdin). Hôte commun aux fenêtres Qt : studio_window.h. Protocole, une ligne JSON par
+// message sur stdin et stdout :
 //   requête de la fenêtre   {"id":1,"op":"state"}                      état pour remplir la fenêtre
 //                           {"id":2,"op":"preflight","args":{...}}     rapport sans rien écrire
 //                           {"id":3,"op":"export","args":{...}}        export, puis rapport
