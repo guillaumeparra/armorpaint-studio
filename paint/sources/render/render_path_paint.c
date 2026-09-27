@@ -171,7 +171,7 @@ void render_path_paint_commands_particle(i32 tid, char *texpaint, bool is_mask) 
 		if (g_context->colorid_picked) {
 			render_path_bind_target("texpaint_colorid", "texpaint_colorid");
 		}
-		render_path_draw_meshes("paint");
+		util_udim_draw_paint_meshes(); // STUDIO-PATCH(udim-material-uv): udim layers painted object by object
 	}
 	for (i32 _pi = 0; _pi < 32; ++_pi) {
 		if (g_context->particles[_pi].bullet != NULL) {
@@ -524,7 +524,7 @@ void render_path_paint_commands_paint(bool dilation) {
 			if (bullet != NULL) {
 				bullet->visible = false;
 			}
-			render_path_draw_meshes("paint");
+			util_udim_draw_paint_meshes(); // STUDIO-PATCH(udim-material-uv): udim layers painted object by object
 			if (bullet != NULL) {
 				bullet->visible = bullet_vis;
 			}

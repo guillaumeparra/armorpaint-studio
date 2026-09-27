@@ -194,6 +194,12 @@ vec2_t uniforms_ext_vec2_link(object_t *object, shader_data_t *mat, char *link) 
 		}
 		return (vec2_t){math_cos(-angle), math_sin(-angle)};
 	}
+	else if (string_equals(link, "_udim_offset")) { // STUDIO-PATCH(udim-material-uv): tile offsets of the object drawn
+		return util_udim_offset(object);
+	}
+	else if (string_equals(link, "_udim_tile")) {
+		return util_udim_tile_uv(object);
+	}
 	return vec2_nan();
 }
 

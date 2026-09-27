@@ -471,6 +471,11 @@ void util_mesh_merge(mesh_object_t_array_t *paint_objects) {
 	render_path_raytrace_ready = false;
 }
 
+// STUDIO-PATCH(udim-material-uv): the objects of the merged mesh, painted one by one for the udim layers
+mesh_object_t_array_t *util_mesh_merged_scope() {
+	return util_mesh_merged_objects;
+}
+
 bool util_mesh_merge_refresh() {
 	mesh_object_t_array_t *objects = util_mesh_merged_objects;
 	if (g_context->merged_object == NULL || objects == NULL || objects->length == 0) {
