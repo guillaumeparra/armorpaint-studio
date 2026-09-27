@@ -83,6 +83,10 @@ for line in sys.stdin:
                 reply = json.loads(sys.stdin.readline())
             replies.append(reply)
         send({"id": rid, "ok": True, "data": replies})
+    elif op == "net":
+        send({"id": rid, "ok": True, "data": None, "sg": args["sg"]})
+    elif op == "unreachable":
+        send({"id": rid, "ok": False, "error": {"code": "sg_unreachable", "message": args["message"]}})
     elif op == "close_stdout":
         out.close()
         os.close(1)

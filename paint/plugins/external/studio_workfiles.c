@@ -5,8 +5,11 @@
 #include "iron_ui.h"
 #include "studio.h"
 #include "studio_json.h"
+#include "studio_project.h"
 #include "studio_publish.h"
 #include "studio_sg.h"
+#include "studio_sg_context.h"
+#include "studio_sg_offline.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,13 +41,11 @@ typedef struct {
 } wf_command_t;
 
 // Une commande Toolkit à la fois : la requête show_app dure jusqu'à la fermeture de sa fenêtre (modale, dans le
-// sidecar). Le contexte de la dernière (projet, tâche) est repris par la suivante, comme le ferait un DCC resté dans
-// sa tâche.
+// sidecar). Elle s'ouvre dans le contexte du projet (studio_sg_context.h) : celui de la dernière fenêtre, comme le
+// ferait un DCC resté dans sa tâche, ou celui qu'a gardé le .arm ouvert. Sans contexte, le sidecar prend le projet de
+// lancement ou celui de la dernière tâche.
 static struct {
 	int           job;        // show_app en cours, 0 sinon
-	int           project_id; // 0 : inconnu (le sidecar prend le projet de lancement ou celui de la dernière tâche)
-	int           task_id;
-	char         *label;      // "Demo / robot / Texture / texturing", pour le titre de la fenêtre et le menu
 	char         *request;    // requête host relevée, traitée à la frame suivante
 	int           job_list;   // list_commands en cours
 	wf_command_t *commands;   // le menu ShotGrid, dans l'ordre du moteur
@@ -52,6 +53,9 @@ static struct {
 	bool          listed;     // commands est à jour (sinon relu à la prochaine ouverture du menu)
 	char         *menu_error; // échec de list_commands
 	bool          menu_drawn; // le menu ShotGrid a été dessiné depuis la dernière frame
+	int           offline_lines; // lignes de la section hors ligne du menu (studio_sg_offline_menu)
+	bool          relayout;      // le menu ouvert a changé de hauteur : remesuré à la frame suivante
+	int           net_serial;    // studio_sg_network_serial() déjà vu
 } wf;
 
 static const char *basename_of(const char *path) {
@@ -72,59 +76,47 @@ static char *json_text(const char *json, const char *pointer) {
 	return s != NULL ? s : strdup("");
 }
 
-// Contexte ShotGrid d'une réponse ou d'une requête ({"project_id","task_id","label",...} sous `pointer`).
-static void remember_context(const char *json, const char *pointer) {
-	if (studio_json_find(json, pointer).type != STUDIO_JSON_OBJECT) {
-		return;
-	}
-	wf.project_id = (int)studio_json_int(studio_json_find(json, string_tmp("%s/project_id", pointer)), 0);
-	wf.task_id    = (int)studio_json_int(studio_json_find(json, string_tmp("%s/task_id", pointer)), 0);
-	free(wf.label);
-	wf.label = json_text(json, string_tmp("%s/label", pointer));
-}
-
+// Titre comme ArmorPaint le pose à l'ouverture (import_arm_run_project : nom sans .arm) ; le contexte y est ajouté par
+// studio_sg_context.c.
 static void set_title(const char *path) {
 	const char *file = path[0] != 0 ? basename_of(path) : "untitled";
-	if (wf.label != NULL && wf.label[0] != 0) {
-		sys_title_set(string_tmp("%s - %s - %s", file, wf.label, manifest_title));
-	}
-	else {
-		sys_title_set(string_tmp("%s - %s", file, manifest_title));
-	}
+	size_t      n    = strlen(file);
+	int         len  = n > 4 && strcmp(file + n - 4, ".arm") == 0 ? (int)n - 4 : (int)n;
+	sys_title_set(string_tmp("%.*s - %s", len, file, manifest_title));
 }
 
 // ---- Commandes Toolkit ----------------------------------------------------------------------------------------------
 
-// Arguments d'une requête dans le contexte courant, avec en tête `first` (membres JSON, ou "").
-static char *context_args(const char *first) {
-	const char *sep = first[0] != 0 ? "," : "";
-	return wf.task_id > 0      ? string_tmp("{%s%s\"task_id\":%d}", first, sep, wf.task_id)
-	       : wf.project_id > 0 ? string_tmp("{%s%s\"project_id\":%d}", first, sep, wf.project_id)
-	                           : string_tmp("{%s}", first);
-}
-
-static void show(const char *command) {
+// Faux si la fenêtre n'est pas demandée : une autre est ouverte, ou ShotGrid est hors ligne.
+static bool show(const char *command) {
 	if (wf.job != 0) {
 		iron_log("studio: workfiles: a ShotGrid window is already open");
-		return;
+		return false;
+	}
+	if (studio_sg_offline()) { // mode dégradé : échoue tout de suite, sans attendre le délai du réseau
+		const char *what = strcmp(command, "open") == 0 ? "File Open" : strcmp(command, "save") == 0 ? "File Save" : command;
+		console_error(string_tmp("ShotGrid is offline: %s needs the ShotGrid site (ShotGrid menu > Check Connection)", what));
+		return false;
 	}
 	char *name = studio_json_quote(command);
-	char *args = context_args(string_tmp("\"command\":%s", name));
+	char *args = studio_sg_context_args(string_tmp("\"command\":%s", name));
 	free(name);
 	// Sans délai : la fenêtre reste ouverte tant que l'artiste travaille dedans. Un job, jamais studio_sg_run : les
 	// requêtes host de la fenêtre sont traitées par ce thread (workfiles_update).
 	wf.job = studio_sg_start("show_app", args, -1);
 	iron_log("studio: workfiles: show_app %s", args);
+	return true;
 }
 
 static void on_show_done(int job) {
 	wf.listed = false; // le contexte a pu changer, et avec lui les commandes de l'environnement
 	if (studio_sg_ok(job)) {
-		remember_context(studio_sg_result(job), "/data/context");
+		studio_sg_context_set(studio_sg_result(job), "/data/context");
 		return;
 	}
 	const char *code = studio_sg_get(job, "/error/code");
-	if (strcmp(code, "cancelled") != 0) {
+	// sg_unreachable : le passage hors ligne est dit par studio_sg_offline.c.
+	if (strcmp(code, "cancelled") != 0 && strcmp(code, "sg_unreachable") != 0) {
 		console_error(string_tmp("ShotGrid Workfiles: %s: %s", code, studio_sg_get(job, "/error/message")));
 	}
 }
@@ -140,7 +132,7 @@ static void clear_commands(void) {
 
 static void list_commands(void) {
 	if (wf.job_list == 0) {
-		wf.job_list = studio_sg_start("list_commands", context_args(""), 0);
+		wf.job_list = studio_sg_start("list_commands", studio_sg_context_args(""), 0);
 	}
 }
 
@@ -153,7 +145,7 @@ static void on_commands(int job) {
 		wf.listed     = true; // pas de nouvel essai à chaque frame : Retry dans le menu
 		return;
 	}
-	remember_context(result, "/data/context");
+	studio_sg_context_set(result, "/data/context");
 	clear_commands();
 	int count   = studio_sg_length(job, "/data/commands");
 	wf.commands = calloc(count > 0 ? count : 1, sizeof(wf_command_t));
@@ -203,11 +195,21 @@ static int menu_count(bool context_menu, bool favourite) {
 
 static void shotgrid_menu_draw(void) {
 	wf.menu_drawn = true;
-	if (!wf.listed && wf.job == 0) {
+	bool offline  = studio_sg_offline();
+	if (!wf.listed && wf.job == 0 && !offline) {
 		list_commands(); // à la première ouverture, puis après chaque commande (le contexte a pu changer)
 	}
-	ui_menu_label(wf.label != NULL && wf.label[0] != 0 ? wf.label : "ShotGrid", NULL);
+	const char *label = studio_sg_context_label();
+	ui_menu_label((char *)(label[0] != 0 ? label : "ShotGrid"), NULL);
+	int section = studio_sg_offline_menu(); // hors ligne, publishes en attente
+	if (section != wf.offline_lines) {
+		wf.offline_lines = section;
+		wf.relayout      = true;
+	}
 	if (wf.menu_error != NULL && wf.command_count == 0) {
+		if (offline) {
+			return; // la section hors ligne dit tout
+		}
 		ui_menu_label(wf.menu_error, NULL);
 		if (ui_menu_button("Retry", "", WF_ICON_NONE)) {
 			studio_sg_stop(); // relance le sidecar : la session ShotGrid a pu être ouverte entre-temps
@@ -218,11 +220,16 @@ static void shotgrid_menu_draw(void) {
 		return;
 	}
 	if (wf.command_count == 0) {
-		ui_menu_label("Loading ShotGrid...", NULL);
+		if (!offline) {
+			ui_menu_label("Loading ShotGrid...", NULL);
+		}
 		return;
 	}
+	if (section > 0) {
+		ui_menu_separator();
+	}
 	bool enabled  = g_ui->enabled;
-	g_ui->enabled = wf.job == 0; // une fenêtre Toolkit est ouverte : elle est modale
+	g_ui->enabled = wf.job == 0 && !offline; // fenêtre Toolkit ouverte (modale), ou ShotGrid injoignable
 	menu_commands(true, false);
 	if (menu_count(false, true) > 0) {
 		ui_menu_separator();
@@ -263,7 +270,7 @@ static void handle_request(void *data) {
 	int   host  = (int)studio_json_int(studio_json_find(req, "/host"), 0);
 	char *op    = json_text(req, "/op");
 	char *path  = json_text(req, "/args/path");
-	remember_context(req, "/args/context");
+	studio_sg_context_set(req, "/args/context"); // contexte du moteur : le projet enregistré le garde
 
 	if (strcmp(op, "current_path") == 0) {
 		char *p = studio_json_quote(project_filepath_get());
@@ -277,6 +284,10 @@ static void handle_request(void *data) {
 		else {
 			iron_log("studio: workfiles: open %s", path);
 			project_open_on_file_picked(path); // synchrone ; filepath et titre posés par l'import
+			// Le projet ouvert prend le contexte gardé dans son .arm ; celui de la fenêtre l'emporte (fichier ouvert
+			// depuis une autre tâche, ou d'avant le lot C5).
+			studio_project_check();
+			studio_sg_context_set(req, "/args/context");
 			set_title(path);
 			reply_ok(host, "null");
 		}
@@ -323,8 +334,19 @@ static void workfiles_update(void *data) {
 		studio_sg_release(wf.job);
 		wf.job = 0;
 	}
+	int serial = studio_sg_network_serial();
+	if (serial != wf.net_serial) {
+		wf.net_serial = serial;
+		if (studio_sg_network(NULL) == STUDIO_SG_NET_ONLINE && wf.command_count == 0) {
+			wf.listed = false; // ShotGrid de retour : les commandes sont relues à la prochaine ouverture du menu
+		}
+	}
 	bool menu_open = ui_menu_show && wf.menu_drawn;
 	wf.menu_drawn  = false;
+	if (menu_open && wf.relayout) {
+		ui_menu_show_first = true;
+	}
+	wf.relayout = false;
 	if (wf.job_list != 0 && studio_sg_state(wf.job_list) == STUDIO_SG_DONE) {
 		on_commands(wf.job_list);
 		studio_sg_release(wf.job_list);
@@ -355,17 +377,35 @@ static void workfiles_on_start(void *data) {
 	show("open");
 }
 
+// ---- Scripting (minic) -----------------------------------------------------------------------------------------------
+
+#ifdef WITH_EVAL
+
+#include "minic.h"
+
+// studio_sg_show("open") : comme le menu ShotGrid ("open", "save", "Publish..." ou le nom d'une commande du moteur).
+// 1 si la fenêtre est demandée, 0 sinon (une autre est ouverte, ShotGrid hors ligne).
+static minic_val_t mn_studio_sg_show(minic_val_t *a, int n) {
+	const char *command = minic_arg_p(a, n, 0);
+	return minic_val_int(command != NULL && command[0] != 0 && show(command) ? 1 : 0);
+}
+
+static void workfiles_register_script_api(void) {
+	minic_register("studio_sg_show", "i(p)", mn_studio_sg_show);
+}
+
+#endif
+
 void studio_workfiles_init(void) {
 	ui_menubar_add_category("ShotGrid", shotgrid_menu_draw);
 	sys_notify_on_update(workfiles_update, NULL);
+#ifdef WITH_EVAL
+	workfiles_register_script_api();
+#endif
 	const char *on_start = getenv("STUDIO_SG_WORKFILES_ON_START");
 	if (on_start != NULL && strcmp(on_start, "1") == 0) {
 		sys_notify_on_next_frame(workfiles_on_start, NULL); // après base_init() (et sa boîte des projets récents)
 	}
-}
-
-int studio_workfiles_project_id(void) {
-	return wf.project_id;
 }
 
 bool studio_workfiles_busy(void) {

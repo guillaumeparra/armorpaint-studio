@@ -10,8 +10,5 @@
 
 void studio_workfiles_init(void);
 
-// Projet ShotGrid du contexte courant (dernière fenêtre Workfiles), 0 si inconnu.
-int studio_workfiles_project_id(void);
-
 // Vrai tant qu'une fenêtre ShotGrid est ouverte : un appel au sidecar attendrait sa fermeture.
 bool studio_workfiles_busy(void);

@@ -12,6 +12,9 @@
 # "id" est toujours le premier champ : le superviseur apparie requête et réponse sans parser le JSON.
 # Une réponse portant "restart":true annonce que le sidecar s'arrête juste après : le superviseur le relance et
 # rejoue la requête (changement de projet Toolkit, voir studio_sg_session.py).
+# Une réponse porte "sg" quand la requête a parlé au site ShotGrid : {"online":true}, ou {"online":false,"reason":...}
+# s'il était injoignable (lot C5, mode dégradé : le superviseur en tient l'état hors ligne d'ArmorPaint). C'est le
+# résultat du dernier appel réseau de la requête (voir network()), ou d'une erreur sg_unreachable.
 #
 # stdout est réservé au protocole. Tout le reste — logs, print() d'un hook, sortie d'un sous-processus — part sur
 # stderr, que le superviseur recopie dans le log d'ArmorPaint. stdin est réservé aussi : rien d'autre ne peut le
@@ -32,6 +35,19 @@ log = logging.getLogger("studio_sg")
 
 HOST = None  # canal vers ArmorPaint (HostChannel), posé par main() ; utilisé par le moteur tk-armorpaint
 SESSION = None  # la session (studio_sg_session.Session), posée par main() ; pour les hooks du moteur (publish)
+
+# Joignabilité du site ShotGrid (lot C5). OFFLINE : raison du dernier appel réseau en échec, None depuis le dernier
+# appel réussi (d'une requête à l'autre). _seen : ce que la requête en cours en a vu, pour le champ "sg" de sa réponse.
+OFFLINE = None
+_seen = None
+
+
+def network(online, reason=None):
+    """Résultat d'un appel au site ShotGrid : abouti (online), ou injoignable (reason : le message de l'erreur).
+    Appelé à chaque appel de l'API ShotGrid (Session._watch_network) et quand un publish est mis en file d'attente."""
+    global OFFLINE, _seen
+    OFFLINE = None if online else (reason or "ShotGrid unreachable")
+    _seen = {"online": True} if online else {"online": False, "reason": OFFLINE}
 
 
 class BridgeError(Exception):
@@ -145,7 +161,7 @@ def _json_default(value):
     return str(value)
 
 
-def encode(message_id, ok, payload, restart=False):
+def encode(message_id, ok, payload, restart=False, sg=None):
     # Ordre des clés fixe, "id" en tête (voir l'en-tête). NaN et infinis ne sont pas du JSON : refusés.
     message = {"id": message_id, "ok": ok}
     if ok:
@@ -154,6 +170,8 @@ def encode(message_id, ok, payload, restart=False):
         message["error"] = payload
     if restart:
         message["restart"] = True
+    if sg is not None:
+        message["sg"] = sg
     return json.dumps(message, default=_json_default, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
 
 
@@ -161,8 +179,18 @@ _ID_PREFIX = re.compile(r'^\s*\{\s*"id"\s*:\s*(\d+)')
 _HOST_PREFIX = re.compile(r'^\s*\{\s*"host"\s*:')
 
 
+def _sg(error=None):
+    # Le champ "sg" de la réponse : ce que la requête a vu du réseau ; une erreur sg_unreachable le dit aussi (sans
+    # appel observé : un site simulé, une erreur de connexion avant l'appel).
+    if error is not None and error.code == "sg_unreachable" and (_seen is None or _seen["online"]):
+        network(False, error.message)
+    return _seen
+
+
 def handle_line(session, line):
     """Traite une ligne de requête, retourne (ligne de réponse, arrêter après)."""
+    global _seen
+    _seen = None
     message_id = None
     match = _ID_PREFIX.match(line)
     if match:
@@ -181,14 +209,15 @@ def handle_line(session, line):
         if not isinstance(args, dict):
             raise BridgeError("bad_request", "args must be a JSON object")
         data = session.call(request["op"], args)
-        return encode(message_id, True, data), request["op"] == "shutdown"
+        return encode(message_id, True, data, sg=_sg()), request["op"] == "shutdown"
     except BridgeError as e:
-        return encode(message_id, False, {"code": e.code, "message": e.message}, e.restart), e.restart
+        return encode(message_id, False, {"code": e.code, "message": e.message}, e.restart, _sg(e)), e.restart
     except Exception as e:  # noqa: BLE001 — tout doit devenir une réponse, sinon le superviseur attend jusqu'au timeout
         error = session.classify(e)
         if error.code == "internal":
             log.error("%s failed:\n%s", line[:200], traceback.format_exc())
-        return encode(message_id, False, {"code": error.code, "message": error.message}, error.restart), error.restart
+        payload = {"code": error.code, "message": error.message}
+        return encode(message_id, False, payload, error.restart, _sg(error)), error.restart
 
 
 def main(session_factory=None):

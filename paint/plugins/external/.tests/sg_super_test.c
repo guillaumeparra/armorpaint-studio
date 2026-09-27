@@ -356,6 +356,57 @@ static void test_jobs(void) {
 	printf("  ok   jobs: FIFO, get/int/length, cancel running/queued/sync, release running/queued, table full\n");
 }
 
+// Jobs différés (studio_sg_start_after) : l'essai de connexion du mode hors ligne, qui doit partir à l'heure même
+// quand l'app ne fait plus de frames.
+static void test_delayed(void) {
+	use_fake("ok", 0, 0);
+	double t0    = now_s();
+	int    later = studio_sg_start_after("echo", "{\"x\":1}", 0, 600);
+	int    now   = studio_sg_start("echo", "{\"x\":2}", 0);
+	CHECK(later > 0 && now > 0, "start delayed and immediate");
+	CHECK(wait_done(now, 5) == STUDIO_SG_DONE && studio_sg_state(later) == STUDIO_SG_QUEUED, "the immediate job passes the delayed one: state %d",
+	      studio_sg_state(later));
+	wakes = 0;
+	CHECK(wait_done(later, 5) == STUDIO_SG_DONE && now_s() - t0 >= 0.6 && studio_sg_int(later, "/data/x", 0) == 1, "delayed job done after its delay: %.2f s",
+	      now_s() - t0);
+	CHECK(wakes > 0, "the delayed reply wakes the app");
+	studio_sg_release(later);
+	studio_sg_release(now);
+
+	// Dans l'ordre de leurs heures, pas de leur création.
+	int second = studio_sg_start_after("echo", NULL, 0, 700);
+	int first  = studio_sg_start_after("echo", NULL, 0, 200);
+	CHECK(wait_done(first, 5) == STUDIO_SG_DONE && studio_sg_state(second) == STUDIO_SG_QUEUED, "earliest delayed job first");
+	CHECK(wait_done(second, 5) == STUDIO_SG_DONE && studio_sg_ok(second), "later delayed job done");
+	studio_sg_release(first);
+	studio_sg_release(second);
+
+	// Annulé : fini tout de suite ; libéré : ne part jamais.
+	t0            = now_s();
+	int cancelled = studio_sg_start_after("echo", NULL, 0, 60000);
+	sleep_ms(50);
+	studio_sg_cancel(cancelled);
+	CHECK(wait_done(cancelled, 5) == STUDIO_SG_DONE && now_s() - t0 < 1.0 && strcmp(studio_sg_get(cancelled, "/error/code"), "cancelled") == 0,
+	      "cancelled delayed job done at once: %.2f s, %s", now_s() - t0, studio_sg_result(cancelled));
+	studio_sg_release(cancelled);
+	log_clear();
+	int dropped = studio_sg_start_after("log", "{\"n\":1}", 0, 200);
+	studio_sg_release(dropped);
+	sleep_ms(500);
+	int probe = studio_sg_run("echo", NULL, 0);
+	CHECK(studio_sg_ok(probe) && !log_has("line 0"), "released delayed job never sent");
+	studio_sg_release(probe);
+
+	// Un job différé en attente ne retient pas les autres, ni l'arrêt du sidecar.
+	int pending = studio_sg_start_after("echo", NULL, 0, 60000);
+	int quick   = studio_sg_start("echo", "{\"x\":5}", 0);
+	CHECK(wait_done(quick, 5) == STUDIO_SG_DONE && studio_sg_int(quick, "/data/x", 0) == 5, "job after a pending delayed one");
+	studio_sg_release(quick);
+	studio_sg_release(pending);
+	studio_sg_stop();
+	printf("  ok   delayed jobs: passed by later jobs, run on time and wake, ordered by time, cancel, release\n");
+}
+
 static void test_no_leak(void) {
 	use_fake("ok", 0, 0);
 	free(expect("echo", NULL, 0, NULL, "warm up"));
@@ -524,6 +575,44 @@ static void test_host(void) {
 	printf("  ok   host: requests to the app, replies in order, errors, stray and stale lines, job, cancel\n");
 }
 
+static void test_network(void) {
+	use_fake("ok", 0, 0);
+	CHECK(studio_sg_network(NULL) == STUDIO_SG_NET_UNKNOWN, "network unknown at start");
+	int serial = studio_sg_network_serial();
+	free(expect("echo", NULL, 0, NULL, "echo"));
+	CHECK(studio_sg_network(NULL) == STUDIO_SG_NET_UNKNOWN && studio_sg_network_serial() == serial, "a reply without sg says nothing");
+	free(expect("net", "{\"sg\":{\"online\":true}}", 0, NULL, "online"));
+	CHECK(studio_sg_network(NULL) == STUDIO_SG_NET_ONLINE && studio_sg_network_serial() == serial + 1, "online");
+	wakes = 0;
+	log_clear();
+	free(expect("net", "{\"sg\":{\"online\":false,\"reason\":\"Connection refused\"}}", 0, NULL, "offline"));
+	char *reason = NULL;
+	CHECK(studio_sg_network(&reason) == STUDIO_SG_NET_OFFLINE && reason != NULL && strcmp(reason, "Connection refused") == 0 &&
+	          studio_sg_network_serial() == serial + 2,
+	      "offline: %s", reason != NULL ? reason : "(null)");
+	free(reason);
+	CHECK(wakes > 0 && log_has("ShotGrid site unreachable: Connection refused"), "change logged, app woken");
+	free(expect("net", "{\"sg\":{\"online\":false,\"reason\":\"timed out\"}}", 0, NULL, "still offline"));
+	CHECK(studio_sg_network(&reason) == STUDIO_SG_NET_OFFLINE && studio_sg_network_serial() == serial + 2 && reason != NULL && strcmp(reason, "timed out") == 0,
+	      "still offline: same serial, last reason");
+	free(reason);
+	// Les erreurs du superviseur ne disent rien du site.
+	free(expect("crash", NULL, 0, "sidecar_died", "crash"));
+	CHECK(studio_sg_network(NULL) == STUDIO_SG_NET_OFFLINE, "sidecar_died keeps the state");
+	int job = studio_sg_start("net", "{\"sg\":{\"online\":true}}", 0);
+	CHECK(wait_done(job, 10) == STUDIO_SG_DONE && studio_sg_network(&reason) == STUDIO_SG_NET_ONLINE && reason == NULL, "a job reply is observed too");
+	studio_sg_release(job);
+	free(expect("unreachable", "{\"message\":\"No route to host\"}", 0, "sg_unreachable", "unreachable"));
+	CHECK(studio_sg_network(&reason) == STUDIO_SG_NET_OFFLINE && reason != NULL && strcmp(reason, "No route to host") == 0,
+	      "an sg_unreachable error without sg: %s", reason != NULL ? reason : "(null)");
+	free(reason);
+	serial = studio_sg_network_serial();
+	use_fake("ok", 0, 0);
+	CHECK(studio_sg_network(NULL) == STUDIO_SG_NET_UNKNOWN && studio_sg_network_serial() == serial + 1, "unknown again after configure");
+	studio_sg_stop();
+	printf("  ok   network: sg field, sg_unreachable, supervisor errors, jobs, configure\n");
+}
+
 int main(int argc, char **argv) {
 	if (argc != 3) {
 		fprintf(stderr, "usage: sg_super_test <tests dir> <workdir>\n");
@@ -536,7 +625,9 @@ int main(int argc, char **argv) {
 	test_failures();
 	test_startup();
 	test_jobs();
+	test_delayed();
 	test_host();
+	test_network();
 	test_no_leak();
 	test_end_to_end();
 	printf("%d checks, %d failures\n", checks, failures);

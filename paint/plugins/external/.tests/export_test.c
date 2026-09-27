@@ -810,6 +810,34 @@ static void test_preflight(const char *work) {
 	free(dn);
 }
 
+// ---- Journal en ajout et comptage (lot C5) ----------------------------------------------------------------------------
+
+static void test_fs_log(const char *work) {
+	char queue[1100], path[1200];
+	snprintf(queue, sizeof(queue), "%s/queue", work);
+	CHECK(studio_fs_count(queue, ".json") == -1, "count: missing folder");
+	mkdir(queue, 0755);
+	CHECK(studio_fs_count(queue, ".json") == 0, "count: empty folder");
+	const char *names[] = {"a.json", "b.json", "b.json.tmp", ".c.json", "b.png"};
+	for (int i = 0; i < 5; ++i) {
+		snprintf(path, sizeof(path), "%s/%s", queue, names[i]);
+		studio_fs_write(path, "{}", 2);
+	}
+	snprintf(path, sizeof(path), "%s/discarded", queue);
+	mkdir(path, 0755);
+	CHECK(studio_fs_count(queue, ".json") == 2, "count: .json only, no hidden or temporary file");
+
+	snprintf(path, sizeof(path), "%s/audit.jsonl", work);
+	remove(path);
+	CHECK(studio_fs_append(path, "{\"a\":1}\n", 8) && studio_fs_append(path, "{\"b\":2}\n", 8), "append");
+	size_t size = 0;
+	char  *text = studio_fs_read(path, &size);
+	CHECK(text != NULL && strcmp(text, "{\"a\":1}\n{\"b\":2}\n") == 0 && size == 16, "append: both lines, in order");
+	free(text);
+	snprintf(path, sizeof(path), "%s/missing/audit.jsonl", work);
+	CHECK(!studio_fs_append(path, "x", 1), "append: missing folder");
+}
+
 // ---- Conseil de résolution UDIM (lot D0) -----------------------------------------------------------------------------
 
 static void check_hint(int tiles, int stride, int rx, int ry, int bits, const char *want) {
@@ -870,6 +898,7 @@ int main(int argc, char **argv) {
 	test_naming();
 	test_presets(argv[3]);
 	test_preflight(argv[2]);
+	test_fs_log(argv[2]);
 	test_udim_hint();
 	printf("  %d checks, %d failures\n", checks, failures);
 	return failures != 0;

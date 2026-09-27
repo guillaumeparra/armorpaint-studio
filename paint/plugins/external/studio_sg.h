@@ -57,6 +57,9 @@ enum { STUDIO_SG_UNKNOWN = 0, STUDIO_SG_QUEUED = 1, STUDIO_SG_RUNNING = 2, STUDI
 
 int  studio_sg_start(const char *op, const char *args_json, int timeout_ms);
 int  studio_sg_run(const char *op, const char *args_json, int timeout_ms); // synchrone : le job est fini au retour
+// Job différé : en file (STUDIO_SG_QUEUED) jusqu'à delay_ms, les jobs suivants passent devant lui d'ici là. Sa réponse
+// réveille l'app comme les autres (config.wake), même au repos : de quoi faire quelque chose à heure fixe sans frames.
+int  studio_sg_start_after(const char *op, const char *args_json, int timeout_ms, int delay_ms);
 int  studio_sg_state(int job);
 void studio_sg_cancel(int job);  // en file : ne partira pas ; en cours : sidecar tué ; réponse "cancelled"
 void studio_sg_release(int job); // en cours : annulé, libéré à la fin
@@ -79,6 +82,22 @@ long long   studio_sg_int(int job, const char *pointer, long long fallback);
 
 char *studio_sg_host_take(void);               // prochaine requête (à libérer), NULL si aucune
 void  studio_sg_host_reply(const char *reply); // réponse (objet JSON portant "host")
+
+// ---- Joignabilité du site ShotGrid (lot C5) ---------------------------------------------------------------------------
+// Une réponse du sidecar porte "sg" quand la requête a parlé au site : {"online":true}, ou {"online":false,"reason":...}
+// s'il était injoignable ; une erreur sg_unreachable dit la même chose. Le superviseur en tient l'état, le passe au log
+// à chaque changement et réveille l'app (config.wake). Les erreurs du superviseur (sidecar mort, timeout, annulation)
+// ne disent rien du site : l'état reste celui de la dernière réponse qui en parlait. Inconnu au démarrage et après
+// studio_sg_configure.
+
+enum {
+	STUDIO_SG_NET_UNKNOWN = 0,
+	STUDIO_SG_NET_ONLINE  = 1,
+	STUDIO_SG_NET_OFFLINE = 2
+};
+
+int studio_sg_network(char **reason); // état ; *reason (optionnel) : message du dernier échec (malloc), NULL en ligne
+int studio_sg_network_serial(void);   // change à chaque changement d'état
 
 // À la sortie de l'app : annule les jobs, arrête le sidecar. Les appels suivants échouent en sidecar_failed.
 void studio_sg_shutdown(void);

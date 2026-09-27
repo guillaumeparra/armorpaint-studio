@@ -29,3 +29,8 @@ char *studio_fs_dirname(const char *path);
 bool studio_fs_write(const char *path, const void *data, size_t size);
 // Contenu entier d'un fichier (malloc, terminé par un NUL non compté dans *size), NULL s'il est illisible.
 char *studio_fs_read(const char *path, size_t *size);
+// Ajoute data à la fin du fichier (créé s'il manque), d'une seule écriture en ajout : deux processus qui écrivent le
+// même journal ligne par ligne n'en mêlent pas les lignes (lot C5).
+bool studio_fs_append(const char *path, const void *data, size_t size);
+// Nombre d'entrées du dossier dir dont le nom finit par suffix (noms cachés exclus), -1 si le dossier est illisible.
+int studio_fs_count(const char *dir, const char *suffix);

@@ -105,7 +105,10 @@ class ArmorPaintSessionPublishPlugin(HookBaseClass):
         super().publish(settings, item)
 
     def finalize(self, settings, item):
-        super().finalize(settings, item)
+        # ShotGrid injoignable (publish mis en file d'attente, lot C5) : le projet passe quand même à sa version
+        # suivante, le fichier publié est écrit.
+        finalize = super().finalize
+        self.parent.engine.finalize_publish(item, self.logger, lambda: finalize(settings, item))
         self._save_to_next_version(item.properties["path"], item, self._save_as)
 
     def _copy_to_publish(self, settings, item):

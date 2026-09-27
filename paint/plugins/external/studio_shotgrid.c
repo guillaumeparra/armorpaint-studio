@@ -1,7 +1,10 @@
 #include "studio_shotgrid.h"
+#include "iron_string.h"
 #include "studio.h"
+#include "studio_audit.h"
 #include "studio_json.h"
 #include "studio_sg.h"
+#include "studio_sg_offline.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,11 +32,26 @@ static void shotgrid_configure(void) {
 	}
 	const char *argv[] = {python, bridge, NULL};
 	// Pas de __pycache__ dans data/ : le paquet de l'app est signé (macOS), et ce dossier peut être en lecture seule.
-	const char        *env[]  = {"PYTHONDONTWRITEBYTECODE=1", NULL};
+	// Lot C5 : la file d'attente des publishes et le journal d'audit d'ArmorPaint (studio_sg_offline.h, studio_audit.h).
+	const char *queue     = studio_sg_queue_dir();
+	const char *audit     = studio_audit_path();
+	char       *queue_env = queue != NULL ? strdup(string_tmp("STUDIO_SG_QUEUE=%s", queue)) : NULL;
+	char       *audit_env = audit != NULL ? strdup(string_tmp("STUDIO_AUDIT_LOG=%s", audit)) : NULL;
+	const char *env[4]    = {"PYTHONDONTWRITEBYTECODE=1"};
+	int         count     = 1;
+	if (queue_env != NULL) {
+		env[count++] = queue_env;
+	}
+	if (audit_env != NULL) {
+		env[count++] = audit_env;
+	}
+	env[count] = NULL;
 	// wake : sans entrée clavier ou souris, iron saute les frames (IDLE_SLEEP) et avec elles les callbacks qui relèvent
 	// jobs et requêtes host ; quand l'artiste travaille dans une fenêtre Qt du sidecar, ArmorPaint n'en reçoit aucune.
 	studio_sg_config_t config = {.argv = argv, .env = env, .log = shotgrid_log, .wake = iron_delay_idle_sleep};
-	studio_sg_configure(&config);
+	studio_sg_configure(&config); // copie la configuration
+	free(queue_env);
+	free(audit_env);
 	iron_log("studio: shotgrid ready (sidecar: %s %s, started on first call)", python, bridge);
 }
 

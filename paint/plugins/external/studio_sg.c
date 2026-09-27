@@ -434,6 +434,75 @@ static char *ensure_sidecar(int id, volatile int *cancel) {
 	}
 }
 
+// ---- Joignabilité du site (lot C5, voir studio_sg.h) ------------------------------------------------------------------
+
+// Écrits sous call et state (network_set), lus sous l'un ou l'autre.
+static int   net_state;
+static char *net_reason;
+static int   net_serial;
+
+static void network_set(int state, char *reason) {
+	state_lock();
+	bool changed = state != net_state;
+	if (changed) {
+		net_state = state;
+		net_serial++;
+	}
+	if (state != STUDIO_SG_NET_OFFLINE || reason != NULL) {
+		free(net_reason);
+		net_reason = reason;
+		reason     = NULL;
+	}
+	state_unlock();
+	free(reason);
+	if (changed) {
+		if (state == STUDIO_SG_NET_OFFLINE) {
+			sg_log("ShotGrid site unreachable: %s", net_reason != NULL ? net_reason : "?");
+		}
+		else {
+			sg_log(state == STUDIO_SG_NET_ONLINE ? "ShotGrid site reachable" : "ShotGrid site state unknown");
+		}
+		if (cfg_wake != NULL) {
+			cfg_wake();
+		}
+	}
+}
+
+// Ce que la réponse d'un appel dit du site : son champ "sg", ou une erreur sg_unreachable. Sous call.
+static void observe_network(const char *reply) {
+	if (reply == NULL) {
+		return;
+	}
+	studio_json_value_t online = studio_json_find(reply, "/sg/online");
+	if (online.type == STUDIO_JSON_BOOL) {
+		bool up = studio_json_truthy(online);
+		network_set(up ? STUDIO_SG_NET_ONLINE : STUDIO_SG_NET_OFFLINE, up ? NULL : studio_json_text(studio_json_find(reply, "/sg/reason")));
+		return;
+	}
+	char *code = studio_json_text(studio_json_find(reply, "/error/code"));
+	if (code != NULL && strcmp(code, "sg_unreachable") == 0) {
+		network_set(STUDIO_SG_NET_OFFLINE, studio_json_text(studio_json_find(reply, "/error/message")));
+	}
+	free(code);
+}
+
+int studio_sg_network(char **reason) {
+	state_lock();
+	int state = net_state;
+	if (reason != NULL) {
+		*reason = state == STUDIO_SG_NET_OFFLINE && net_reason != NULL ? strdup(net_reason) : NULL;
+	}
+	state_unlock();
+	return state;
+}
+
+int studio_sg_network_serial(void) {
+	state_lock();
+	int serial = net_serial;
+	state_unlock();
+	return serial;
+}
+
 // Un appel, sous call. op_json : op déjà en littéral JSON ; args_json : objet JSON sur une ligne.
 static char *call_locked(const char *op, const char *op_json, const char *args_json, int timeout_ms, volatile int *cancel) {
 	int    id   = next_id++;
@@ -557,6 +626,7 @@ static char *call_locked(const char *op, const char *op_json, const char *args_j
 	}
 	host_reset();
 	free(line);
+	observe_network(reply);
 	return reply;
 }
 
@@ -624,6 +694,7 @@ void studio_sg_configure(const studio_sg_config_t *config) {
 	cfg_call_ms  = config->call_timeout_ms != 0 ? config->call_timeout_ms : SG_DEFAULT_CALL_MS;
 	cfg_log      = config->log;
 	cfg_wake     = config->wake;
+	network_set(STUDIO_SG_NET_UNKNOWN, NULL);
 	call_unlock();
 }
 
@@ -678,7 +749,8 @@ typedef struct sg_job {
 	char        *args_line;
 	int          timeout_ms;
 	volatile int cancel;
-	int          state;    // sous state
+	int          state;      // sous state
+	int64_t      not_before; // en file : pas avant (now_ms), 0 : dès que possible
 	bool         released; // idem : libéré pendant qu'il tournait, le thread le libérera
 	char        *result;
 	char       **texts; // rendus par studio_sg_get, vivent jusqu'au release
@@ -740,8 +812,8 @@ static void job_execute(sg_job_t *j) {
 	}
 }
 
-// Crée et inscrit un job dans l'état donné. 0 si la table est pleine.
-static int job_create(const char *op, const char *args_json, int timeout_ms, int state, sg_job_t **out) {
+// Crée et inscrit un job dans l'état donné ; en file, il ne part pas avant delay_ms. 0 si la table est pleine.
+static int job_create(const char *op, const char *args_json, int timeout_ms, int state, int delay_ms, sg_job_t **out) {
 	sg_job_t *j = calloc(1, sizeof(sg_job_t));
 	if (j == NULL) {
 		return 0;
@@ -749,6 +821,7 @@ static int job_create(const char *op, const char *args_json, int timeout_ms, int
 	j->op         = strdup(op != NULL ? op : "");
 	j->timeout_ms = timeout_ms;
 	j->state      = state;
+	j->not_before = delay_ms > 0 ? now_ms() + delay_ms : 0;
 	j->result     = prepare(op, args_json, &j->op_json, &j->args_line); // erreur : le job la rendra telle quelle
 	if (j->op == NULL) {
 		job_free(j);
@@ -776,18 +849,52 @@ static int job_create(const char *op, const char *args_json, int timeout_ms, int
 }
 
 #ifndef _WIN32
+// Attente du thread des jobs (sous state) : un signal, ou l'heure `due` (now_ms) du prochain job différé. Par tranches
+// d'une seconde au plus : pthread_cond_timedwait suit l'horloge murale, qui peut sauter.
+static void worker_wait(int64_t due) {
+	if (due == 0) {
+		pthread_cond_wait(&state_cond, &state_mutex);
+		return;
+	}
+	int64_t wait = due - now_ms();
+	if (wait <= 0) {
+		return;
+	}
+	if (wait > 1000) {
+		wait = 1000;
+	}
+	struct timespec ts;
+	clock_gettime(CLOCK_REALTIME, &ts);
+	ts.tv_sec += (time_t)(wait / 1000);
+	ts.tv_nsec += (long)(wait % 1000) * 1000000L;
+	if (ts.tv_nsec >= 1000000000L) {
+		ts.tv_sec += 1;
+		ts.tv_nsec -= 1000000000L;
+	}
+	pthread_cond_timedwait(&state_cond, &state_mutex, &ts);
+}
+
 static void *worker(void *arg) {
 	(void)arg;
 	state_lock();
 	while (!quitting) {
 		sg_job_t *next = NULL;
+		int64_t   now  = now_ms();
+		int64_t   due  = 0; // le plus proche des jobs différés qui ne sont pas encore dus
 		for (int i = 0; i < SG_MAX_JOBS; i++) {
-			if (jobs[i] != NULL && jobs[i]->state == STUDIO_SG_QUEUED && (next == NULL || jobs[i]->id < next->id)) {
-				next = jobs[i];
+			sg_job_t *j = jobs[i];
+			if (j == NULL || j->state != STUDIO_SG_QUEUED) {
+				continue;
+			}
+			if (j->not_before > now && !j->cancel) {
+				due = due == 0 || j->not_before < due ? j->not_before : due;
+			}
+			else if (next == NULL || j->id < next->id) {
+				next = j;
 			}
 		}
 		if (next == NULL) {
-			pthread_cond_wait(&state_cond, &state_mutex);
+			worker_wait(due);
 			continue;
 		}
 		next->state = STUDIO_SG_RUNNING;
@@ -801,8 +908,12 @@ static void *worker(void *arg) {
 #endif
 
 int studio_sg_start(const char *op, const char *args_json, int timeout_ms) {
+	return studio_sg_start_after(op, args_json, timeout_ms, 0);
+}
+
+int studio_sg_start_after(const char *op, const char *args_json, int timeout_ms, int delay_ms) {
 	sg_job_t *j;
-	int       id = job_create(op, args_json, timeout_ms, STUDIO_SG_QUEUED, &j);
+	int       id = job_create(op, args_json, timeout_ms, STUDIO_SG_QUEUED, delay_ms, &j);
 	if (id == 0) {
 		return 0;
 	}
@@ -824,7 +935,7 @@ int studio_sg_start(const char *op, const char *args_json, int timeout_ms) {
 	}
 	bool threaded = worker_started;
 	if (!threaded) {
-		j->state = STUDIO_SG_RUNNING; // pas de thread disponible : on exécute ici plutôt que de perdre le job
+		j->state = STUDIO_SG_RUNNING; // pas de thread disponible : on exécute ici (sans délai) plutôt que de perdre le job
 	}
 	pthread_cond_signal(&state_cond);
 	state_unlock();
@@ -837,7 +948,7 @@ int studio_sg_start(const char *op, const char *args_json, int timeout_ms) {
 
 int studio_sg_run(const char *op, const char *args_json, int timeout_ms) {
 	sg_job_t *j;
-	int       id = job_create(op, args_json, timeout_ms, STUDIO_SG_RUNNING, &j);
+	int       id = job_create(op, args_json, timeout_ms, STUDIO_SG_RUNNING, 0, &j);
 	if (id != 0) {
 		job_execute(j);
 	}
@@ -858,6 +969,9 @@ void studio_sg_cancel(int job) {
 	if (j != NULL) {
 		j->cancel = 1;
 	}
+#ifndef _WIN32
+	pthread_cond_signal(&state_cond); // un job différé annulé part tout de suite (réponse "cancelled")
+#endif
 	state_unlock();
 }
 

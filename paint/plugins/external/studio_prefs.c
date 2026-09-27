@@ -277,6 +277,18 @@ const char *studio_prefs_error(void) {
 	return sp.error;
 }
 
+char *studio_prefs_dir(void) {
+	if (sp.ignored || sp.path[0] == 0) {
+		return NULL;
+	}
+	char *dir = studio_fs_dirname(sp.path);
+	if (dir != NULL && dir[0] == 0) {
+		free(dir);
+		dir = strdup("."); // $STUDIO_PREFS sans dossier
+	}
+	return dir;
+}
+
 bool studio_prefs_has(const char *key) {
 	return find(key) != NULL;
 }

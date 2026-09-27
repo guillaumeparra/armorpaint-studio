@@ -12,15 +12,27 @@
 #
 # Réglages : variables d'environnement STUDIO_SG_*, et un hook studio optionnel (STUDIO_SG_HOOK, chemin d'un .py qui
 # définit setup(session)) pour changer les réglages, remplacer ou ajouter des opérations. Voir README.md.
+#
+# Mode dégradé (lot C5) : chaque appel à l'API ShotGrid dit au superviseur si le site a répondu (_watch_network, champ
+# "sg" des réponses), et les connexions ont un délai (STUDIO_SG_NET_TIMEOUT, 30 s) : ShotGrid injoignable ne bloque
+# jamais longtemps. Un publish que ShotGrid injoignable fait échouer une fois ses fichiers écrits est mis en file
+# d'attente (studio_sg_queue.py, dossier STUDIO_SG_QUEUE) et rejoué plus tard (op replay_publishes). Les publishes
+# enregistrés, mis en file, rejoués ou écartés vont au journal d'audit (studio_audit.py, fichier STUDIO_AUDIT_LOG).
 
+import datetime
+import errno
 import glob
 import importlib
 import importlib.util
 import logging
 import os
 import re
+import socket
 import sys
 
+import studio_audit
+import studio_sg_bridge
+import studio_sg_queue
 from studio_sg_bridge import BridgeError
 
 log = logging.getLogger("studio_sg")
@@ -170,6 +182,41 @@ def _str(args, key, required=True):
     return value
 
 
+def _seconds(name, default):
+    try:
+        return float(os.environ.get(name) or default)
+    except ValueError:
+        log.warning("%s is not a number of seconds: %s used", name, default)
+        return default
+
+
+# Erreurs qui disent ShotGrid injoignable, par nom de classe (voir Session.classify) : réseau, DNS (httplib2 enveloppe
+# gaierror dans ServerNotFoundError), proxy, réponse HTTP en erreur (ProtocolError : 502, 503…), et les erreurs
+# système d'une connexion qui n'aboutit pas.
+_UNREACHABLE = {"ProtocolError", "ConnectionError", "TimeoutError", "SSLError", "URLError", "gaierror", "timeout",
+                "RemoteDisconnected", "ServerNotFoundError", "ProxyError", "IncompleteRead"}
+_NET_ERRNO = {errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ENETDOWN, errno.EHOSTDOWN, errno.ECONNREFUSED,
+              errno.ECONNRESET, errno.ECONNABORTED, errno.ETIMEDOUT}
+
+
+def unreachable(e):
+    """Vrai si l'erreur, ou celle qu'elle enveloppe (ShotgunPublishError de register_publish, erreur relancée par un
+    hook), dit ShotGrid injoignable."""
+    seen = set()
+    while e is not None and id(e) not in seen:
+        seen.add(id(e))
+        if {cls.__name__ for cls in type(e).__mro__} & _UNREACHABLE:
+            return True
+        if isinstance(e, OSError) and e.errno in _NET_ERRNO:
+            return True
+        e = e.__cause__ or e.__context__
+    return False
+
+
+def _site_key(url):
+    return (url or "").strip().rstrip("/").lower()
+
+
 class Session(object):
     def __init__(self):
         self.settings = default_settings()
@@ -185,6 +232,11 @@ class Session(object):
         self.tk = None
         self.tk_project_id = None
         self.engine = None
+        self.queue = studio_sg_queue.Queue.from_env()  # file d'attente des publishes (lot C5), None sans dossier
+        self._publishing = 0  # un publish est en cours (op publish, fenêtre ouverte par show_app)
+        self._placeholders = {}  # id provisoire (négatif) d'un publish mis en file -> sa clé
+        timeout = _seconds("STUDIO_SG_NET_TIMEOUT", 30.0)
+        socket.setdefaulttimeout(timeout if timeout > 0 else None)  # shotgun_api3 et tk-core n'en posent pas
         if self.sgtk is not None:
             self._setup_toolkit_logging()
             self._forbid_prompts()
@@ -215,6 +267,8 @@ class Session(object):
                 "error": self.core_error,
             },
             "ops": sorted(self.ops),
+            "queue": self.queue.directory if self.queue is not None else None,
+            "net_timeout": socket.getdefaulttimeout(),
         }
 
     def close(self):
@@ -228,6 +282,7 @@ class Session(object):
         fn = self.ops.get(op)
         if fn is None:
             raise BridgeError("unknown_op", "unknown operation '%s'" % op)
+        self._watch_network()
         return fn(args)
 
     def classify(self, e):
@@ -238,8 +293,7 @@ class Session(object):
         if names & {"AuthenticationFault", "MissingTwoFactorAuthenticationFault", "AuthenticationError",
                     "AuthenticationCancelled", "IncompleteCredentials"}:
             return BridgeError("auth_required", "ShotGrid authentication required: %s" % message)
-        if names & {"ProtocolError", "ConnectionError", "TimeoutError", "SSLError", "URLError", "gaierror",
-                    "timeout", "RemoteDisconnected"}:
+        if unreachable(e):
             return BridgeError("sg_unreachable", "ShotGrid unreachable: %s" % message)
         if "Fault" in names:
             return BridgeError("sg_error", "ShotGrid error: %s" % message)
@@ -283,6 +337,49 @@ class Session(object):
         auth.renew_session = refuse
         auth.authenticate = refuse
 
+    @staticmethod
+    def _watch_network():
+        """Chaque appel à l'API ShotGrid dit au superviseur si le site a répondu (studio_sg_bridge.network) : l'état
+        hors ligne d'ArmorPaint (lot C5). Ils passent tous par Shotgun._call_rpc, remplacé sur chaque copie chargée de
+        shotgun_api3 (celle de tk-core, puis celle d'un core swap) ; refait à chaque requête, tk-core important
+        shotgun_api3 à la demande. Les envois de fichiers (vignettes) n'y passent pas : leurs erreurs le disent."""
+        for name, module in list(sys.modules.items()):
+            if not (name == "shotgun_api3" or name.endswith(".shotgun_api3") or name.endswith("shotgun_api3.shotgun")):
+                continue
+            cls = vars(module).get("Shotgun")  # vars : pas de __getattr__ de module (imports paresseux)
+            if not isinstance(cls, type) or "_call_rpc" not in vars(cls) or vars(cls).get("_studio_watched"):
+                continue
+
+            def call_rpc(sg, *args, _call_rpc=cls._call_rpc, **kwargs):
+                try:
+                    result = _call_rpc(sg, *args, **kwargs)
+                except Exception as e:
+                    if unreachable(e):
+                        studio_sg_bridge.network(False, str(e) or type(e).__name__)
+                    elif "Fault" in {c.__name__ for c in type(e).__mro__}:
+                        studio_sg_bridge.network(True)  # le site a répondu, par une erreur
+                    raise
+                studio_sg_bridge.network(True)
+                return result
+
+            cls._call_rpc = call_rpc
+            cls._studio_watched = True
+
+    def _queue_publishes(self):
+        """Remplace sgtk.util.register_publish du core chargé (à refaire après un core swap, comme _forbid_prompts ;
+        les hooks de tk-multi-publish2 l'appellent par sgtk.util) : voir _register_or_queue."""
+        util = self.sgtk.util
+        if getattr(util.register_publish, "_studio_original", None) is not None:
+            return
+        original = util.register_publish
+
+        def register_publish(tk, context, path, name, version_number, **kwargs):
+            return self._register_or_queue(original, tk, context, path, name, version_number, kwargs)
+
+        register_publish.__doc__ = original.__doc__
+        register_publish._studio_original = original
+        util.register_publish = register_publish
+
     def _require_toolkit(self):
         if self.sgtk is None:
             raise BridgeError("toolkit_unavailable", self.core_error)
@@ -310,6 +407,11 @@ class Session(object):
         self.user = user
         self.sg = user.create_sg_connection()
         return self.sg
+
+    def _site(self):
+        """URL du site ShotGrid de la session, sans requête."""
+        self._connect()
+        return self.user.host
 
     def _human_user(self):
         if self.human is None:
@@ -361,6 +463,7 @@ class Session(object):
         # Après un éventuel core swap : nouveaux modules, nouvel utilisateur.
         self.sgtk = importlib.import_module("sgtk")
         self._forbid_prompts()
+        self._queue_publishes()
         self.user = self.sgtk.get_authenticated_user() or self.user
         self.sg = tk.shotgun
         self.tk = tk
@@ -493,6 +596,12 @@ class Session(object):
             "user": human,
             "method": "script" if os.environ.get("STUDIO_SG_SCRIPT_NAME") else "session",
         }
+
+    def op_check_online(self, args):
+        """Le site répond-il ? Une requête légère (info), sans amorçage ni authentification : pour sortir du mode
+        hors ligne (lot C5). Erreur sg_unreachable sinon."""
+        info = self._connect().info() or {}
+        return {"online": True, "site": self._site(), "version": info.get("version")}
 
     def op_context(self, args):
         """Contexte de lancement transmis par ShotGrid Desktop (SHOTGUN_ENTITY_TYPE/ID), ou null."""
@@ -628,10 +737,13 @@ class Session(object):
         <channel>, <UDIM>, <ext>, qu'ArmorPaint remplace à chaque texture (studio_export_naming.c). pattern : sans
         tuile ; pattern_udim : avec (null si le template n'a pas de clé UDIM, ou si elle est obligatoire pour
         pattern). template null (et reason) : fichier hors des templates du projet, ou pas de template de textures
-        pour son type d'entité ; ArmorPaint garde alors ses noms. Projet : project_id, sinon celui du chemin
-        (_project_from_path), sinon celui déjà amorcé, sinon _default_project()."""
+        pour son type d'entité ; ArmorPaint garde alors ses noms. Projet : project_id (sauf d'un autre site,
+        _other_site), sinon celui du chemin (_project_from_path), sinon celui déjà amorcé, sinon _default_project()."""
         path = _str(args, "path")
-        project_id = _int(args, "project_id", required=False) or self._project_from_path(path)
+        project_id = _int(args, "project_id", required=False)
+        if self._other_site(args):
+            project_id = None
+        project_id = project_id or self._project_from_path(path)
         if project_id is not None:
             tk = self.tk_for_project(project_id)
         else:
@@ -711,11 +823,24 @@ class Session(object):
             "bad_request", "no project for show_app: pass project_id or task_id, or launch ArmorPaint from ShotGrid Desktop"
         )
 
+    def _other_site(self, args):
+        """Vrai si args donne un site (celui du contexte, engine.context_info) qui n'est pas celui de la session : ses
+        identifiants (task_id, project_id) sont alors ignorés (projet enregistré ailleurs, contexte gardé dans son
+        .arm, lot C5)."""
+        site = _str(args, "site", required=False)
+        if site and _site_key(site) != _site_key(self._site()):
+            log.warning("context of another ShotGrid site ignored (%s, this site is %s)", site, self._site())
+            return True
+        return False
+
     def _engine_for(self, args):
         """Le moteur tk-armorpaint dans le contexte demandé : task_id, sinon project_id, sinon _default_project().
-        Sans task_id, le moteur garde son contexte courant dans ce projet (celui de la dernière fenêtre)."""
+        Sans task_id, le moteur garde son contexte courant dans ce projet (celui de la dernière fenêtre). site :
+        _other_site()."""
         task_id = _int(args, "task_id", required=False)
         project_id = _int(args, "project_id", required=False)
+        if self._other_site(args):
+            task_id = project_id = None
         task = None
         if task_id is not None:
             task = self._task(task_id)
@@ -783,7 +908,11 @@ class Session(object):
                 % (command, engine.name, engine.context, hint, ", ".join(sorted(engine.commands)) or "none"),
             )
         log.info("show_app: %s in %s", command, engine.context)
-        entry["callback"]()
+        self._publishing += 1  # la fenêtre Publish peut publier : mise en file d'attente possible (lot C5)
+        try:
+            entry["callback"]()
+        finally:
+            self._publishing -= 1
         engine = self.sgtk.platform.current_engine() or engine  # une app a pu changer de contexte
         self.engine = engine
         return {"command": command, "context": engine.context_info()}
@@ -797,8 +926,11 @@ class Session(object):
         version) reste décochée. Retourne {"context", "publishes": [{"item","type","id","name","path","version_number",
         "published_file_type"}], "skipped", "finalized", "messages": [{"level","message"}]} (avertissements et erreurs
         des hooks) ; finalized faux : publiés, mais la finalisation (version suivante du projet) a échoué, voir
-        messages. Erreurs : publish_invalid (validation, rien n'est publié), publish_failed (au publish : ce qui est
-        déjà publié est dans le message), nothing_to_publish, app_unavailable (pas de tk-multi-publish2)."""
+        messages. ShotGrid devenu injoignable pendant le publish (lot C5) : les publishes restants sont mis en file
+        d'attente, "queued" (leur clé) à la place de "id" ; la liste de ces clés dans "queued". Erreurs :
+        publish_invalid (validation, rien n'est publié), sg_unreachable (ShotGrid injoignable avant le publish, rien
+        n'est écrit), publish_failed (au publish : ce qui est déjà publié est dans le message), nothing_to_publish,
+        app_unavailable (pas de tk-multi-publish2)."""
         description = args.get("description")
         if description is not None and not isinstance(description, str):
             raise BridgeError("bad_request", "description must be a string")
@@ -821,9 +953,11 @@ class Session(object):
         # descend, comme pour la fenêtre, qui y branche son journal.
         handler = Messages(logging.WARNING)
         app.logger.addHandler(handler)
+        self._publishing += 1
         try:
             return self._publish(engine, app.create_publish_manager(), description, skip, messages)
         finally:
+            self._publishing -= 1
             app.logger.removeHandler(handler)
             self.engine = self.sgtk.platform.current_engine() or engine
 
@@ -843,17 +977,20 @@ class Session(object):
         try:
             failures = manager.validate()
             if failures:
-                raise BridgeError(
-                    "publish_invalid",
-                    "; ".join("%s (%s): %s" % (t.item.name, t.name, e or "not valid") for t, e in failures),
-                )
+                message = "; ".join("%s (%s): %s" % (t.item.name, t.name, e or "not valid") for t, e in failures)
+                if any(isinstance(e, BaseException) and unreachable(e) for _, e in failures):
+                    raise BridgeError("sg_unreachable", "ShotGrid unreachable, nothing published: %s" % message)
+                raise BridgeError("publish_invalid", message)
             try:
                 manager.publish()
-            except Exception as e:  # noqa: BLE001 — l'erreur du plugin, avec ce qui est déjà publié
-                done = [i.name for i in manager.tree if "sg_publish_data" in i.properties]
+            except Exception as e:  # noqa: BLE001 — l'erreur du plugin, avec ce qui est déjà publié ou en file
+                data = [(i.name, i.properties.get("sg_publish_data")) for i in manager.tree]
+                done = [name for name, d in data if d and not d.get("queued")]
+                queued = [name for name, d in data if d and d.get("queued")]
                 raise BridgeError(
                     "publish_failed",
-                    "%s%s" % (e, " (already published: %s)" % ", ".join(done) if done else ""),
+                    "%s%s%s" % (e, " (already published: %s)" % ", ".join(done) if done else "",
+                                " (queued until ShotGrid is back: %s)" % ", ".join(queued) if queued else ""),
                 )
             finalized = True
             try:
@@ -870,15 +1007,17 @@ class Session(object):
             if not data:
                 continue
             path = data.get("path")
+            queued = data.get("queued")
             publishes.append(
                 {
                     "item": item.name,
                     "type": item.type_spec,
-                    "id": data.get("id"),
+                    "id": data.get("id") if (data.get("id") or 0) > 0 else None,  # négatif : en file, provisoire
                     "name": data.get("name") or data.get("code"),
                     "path": (path.get("local_path") if isinstance(path, dict) else None) or item.properties.get("path"),
                     "version_number": data.get("version_number"),
                     "published_file_type": item.properties.get("publish_type"),
+                    "queued": queued,
                 }
             )
         return {
@@ -887,6 +1026,7 @@ class Session(object):
             "skipped": skipped,
             "finalized": finalized,
             "messages": messages,
+            "queued": [p["queued"] for p in publishes if p["queued"]],
         }
 
     @staticmethod
@@ -944,3 +1084,324 @@ class Session(object):
         if not os.path.exists(path):
             raise BridgeError("not_found", "thumbnail does not exist: %s" % path)
         return {"attachment_id": self._connect().upload_thumbnail(entity["type"], entity["id"], path)}
+
+    # ---- File d'attente des publishes (lot C5) ----------------------------------------------------------------------
+    # Un publish écrit ses fichiers (copie du projet, export des textures) avant de les enregistrer dans ShotGrid
+    # (register_publish). ShotGrid injoignable à ce moment-là, l'enregistrement est gardé dans la file
+    # (studio_sg_queue.py) et le publish continue : le hook reçoit un PublishedFile provisoire, et les publishes
+    # suivants du même passage vont aussi dans la file, sans attendre le délai réseau de chacun. Le rejeu
+    # (replay_publishes) les enregistre plus tard dans l'ordre, avec leur date d'origine. Limite : le statut des
+    # anciens publishes qu'un publish rejoué remplace n'est pas effacé (finalisation de tk-multi-publish2, sautée).
+
+    def _register_or_queue(self, register, tk, context, path, name, version_number, kwargs):
+        """register_publish (tk-core), inscrit au journal d'audit. Pendant un publish (op publish, fenêtre Publish,
+        voir _publishing), ShotGrid injoignable le met en file d'attente au lieu d'échouer : un parent en file (ses
+        enfants dépendent de son PublishedFile provisoire), ShotGrid déjà vu injoignable, ou l'échec réseau de
+        l'enregistrement."""
+        queue = self.queue if self._publishing and not kwargs.get("dry_run") else None
+        parents = [self._placeholders[i] for i in kwargs.get("dependency_ids") or [] if i in self._placeholders]
+        if queue is not None and (parents or studio_sg_bridge.OFFLINE):
+            reason = "parent publish queued" if parents else studio_sg_bridge.OFFLINE
+            return self._queue_publish(context, path, name, version_number, kwargs, parents, reason)
+        try:
+            publish = register(tk, context, path, name, version_number, **kwargs)
+        except Exception as e:
+            if queue is None or not unreachable(e):
+                self._audit_publish("publish_failed", context, path, name, version_number, error=str(e))
+                raise
+            # Les envois de vignettes ne passent pas par _watch_network : l'état hors ligne est posé ici.
+            studio_sg_bridge.network(False, str(e) or type(e).__name__)
+            entity = getattr(e, "entity", None)  # ShotgunPublishError : le PublishedFile, s'il a été créé
+            return self._queue_publish(context, path, name, version_number, kwargs, [], str(e), entity, e)
+        if not kwargs.get("dry_run"):
+            self._audit_publish("publish", context, path, name, version_number, id=(publish or {}).get("id"))
+        return publish
+
+    def _queue_publish(self, context, path, name, version_number, kwargs, parents, error, entity=None, cause=None):
+        """Met le publish en file d'attente, rend son PublishedFile provisoire : id négatif, pour ses enfants
+        (_register_or_queue), et "queued", sa clé. Déjà créé (entity), c'est le vrai, complété au rejeu."""
+        kwargs = dict(kwargs)
+        thumbnail = kwargs.pop("thumbnail_path", None)
+        created_at = kwargs.pop("created_at", None)
+        if isinstance(created_at, datetime.datetime):
+            created_at = studio_sg_queue.iso(created_at.astimezone(datetime.timezone.utc))
+        record = {
+            "site": self._site(),
+            "project_id": (context.project or {}).get("id"),
+            "task_id": (context.task or {}).get("id"),
+            "context": self._context_dict(context),
+            "path": path,
+            "name": name,
+            "version_number": version_number,
+            "published_file_type": kwargs.pop("published_file_type", None),
+            "comment": kwargs.pop("comment", None),
+            "created_at": created_at,
+            "dependency_ids": [i for i in kwargs.pop("dependency_ids", None) or [] if i not in self._placeholders],
+            "depends_on": parents,
+            "kwargs": kwargs,
+            "entity_id": entity["id"] if entity else None,
+            "error": error,
+        }
+        try:
+            key = self.queue.add(record, thumbnail)
+        except Exception as e:  # noqa: BLE001 — pas de file : le publish échoue, comme sans elle
+            log.error("publish queue: %s could not be queued: %s", path, e)
+            self._audit_publish("publish_failed", context, path, name, version_number, error="%s (not queued: %s)" % (error, e))
+            message = "ShotGrid unreachable (%s) and the publish could not be queued: %s" % (error, e)
+            if cause is not None:
+                raise RuntimeError(message) from cause
+            raise RuntimeError(message) from e
+        if entity:
+            publish = dict(entity, queued=key)
+        else:
+            placeholder = -1 - len(self._placeholders)
+            self._placeholders[placeholder] = key
+            publish = {
+                "type": "PublishedFile",
+                "id": placeholder,
+                "code": os.path.basename(path),
+                "name": name,
+                "version_number": version_number,
+                "path": {"local_path": path},
+                "queued": key,
+            }
+        log.warning("ShotGrid unreachable (%s): publish of %s queued as %s", error, path, key)
+        self._audit_publish(
+            "publish_queued", context, path, name, version_number, key=key, id=entity["id"] if entity else None,
+            depends_on=parents or None, error=error,
+        )
+        return publish
+
+    @staticmethod
+    def _context_dict(context):
+        # Comme Context.to_dict(), sans l'utilisateur : context.user peut interroger ShotGrid (injoignable ici).
+        # Context.from_dict() le relit.
+        def link(entity):
+            return {k: entity[k] for k in ("type", "id", "name") if k in entity} if entity else None
+
+        return {
+            "project": link(context.project),
+            "entity": link(context.entity),
+            "step": link(context.step),
+            "task": link(context.task),
+            "additional_entities": [link(e) for e in context.additional_entities or []],
+            "source_entity": link(context.source_entity),
+        }
+
+    def _audit_publish(self, event, context, path, name, version_number, **fields):
+        project, task = getattr(context, "project", None) or {}, getattr(context, "task", None) or {}
+        studio_audit.write(
+            event, site=self.user.host if self.user is not None else None, sg_login=getattr(self.user, "login", None),
+            project_id=project.get("id"), task_id=task.get("id"), path=path, name=name, version_number=version_number,
+            **fields
+        )
+
+    def _audit_record(self, event, record, **fields):
+        studio_audit.write(
+            event, site=record.get("site"), sg_login=getattr(self.user, "login", None),
+            project_id=record.get("project_id"), task_id=record.get("task_id"), path=record.get("path"),
+            name=record.get("name"), version_number=record.get("version_number"), **fields
+        )
+
+    _PENDING_FIELDS = ("key", "created", "site", "project_id", "task_id", "path", "name", "version_number",
+                       "published_file_type", "depends_on", "entity_id", "attempts", "last_attempt", "error")
+
+    def op_pending_publishes(self, args):
+        """Publishes en file d'attente, dans l'ordre, sans requête ShotGrid : {"queue" (dossier, null sans file),
+        "count", "publishes": [{"key","created","site","project_id","task_id","path","name","version_number",
+        "published_file_type","depends_on","entity_id","attempts","last_attempt","error"}]}."""
+        records = self.queue.records() if self.queue is not None else []
+        return {
+            "queue": self.queue.directory if self.queue is not None else None,
+            "count": len(records),
+            "publishes": [{f: r.get(f) for f in self._PENDING_FIELDS} for r in records],
+        }
+
+    def op_replay_publishes(self, args):
+        """Enregistre dans ShotGrid les publishes en file d'attente d'un projet : project_id, sinon celui de
+        l'instance Toolkit s'il en a, sinon celui du plus ancien. Un projet par appel (un processus, un projet
+        Toolkit) : "projects" liste les autres projets qui en ont. Seuls ceux du site de la session sont rejoués.
+        Dans l'ordre de la file : un parent (le projet) avant ses enfants (ses textures), qui en dépendent. Un publish
+        déjà créé (avant l'échec, ou réponse perdue) n'est pas recréé : il est complété (vignette, dépendances). Un
+        échec réseau arrête le rejeu ("stopped" : sa raison) ; un autre échec laisse le publish en file ("failed") et
+        le rejeu continue. Retourne {"project_id", "replayed": [{"key","id","path","name","version_number"}],
+        "failed": [{"key","path","error"}], "stopped", "pending" (restants sur ce site, tous projets), "projects",
+        "other_sites" (en file pour un autre site)}."""
+        project_id = _int(args, "project_id", required=False)
+        result = {"project_id": None, "replayed": [], "failed": [], "stopped": None, "pending": 0, "projects": [],
+                  "other_sites": 0}
+        if self.queue is None:
+            return result
+        site = _site_key(self._site())
+        records = [r for r in self.queue.records() if _site_key(r.get("site")) == site]
+        if project_id is None:
+            ids = [r.get("project_id") for r in records if r.get("project_id")]
+            project_id = self.tk_project_id if self.tk_project_id in ids else (ids[0] if ids else None)
+        mine = [r["key"] for r in records if r.get("project_id") == project_id]
+        if mine:
+            result["project_id"] = project_id
+            self._replay(self.tk_for_project(project_id), mine, result)
+        rest = self.queue.records()
+        here = [r for r in rest if _site_key(r.get("site")) == site]
+        result["pending"] = len(here)
+        result["other_sites"] = len(rest) - len(here)
+        result["projects"] = sorted({r["project_id"] for r in here if r.get("project_id") not in (None, project_id)})
+        return result
+
+    def _replay(self, tk, keys, result):
+        for key in keys:
+            record = self.queue.load(key)  # relu : un parent rejoué a réécrit ses dépendances
+            if record is None:
+                continue
+            waiting = [k for k in record.get("depends_on") or [] if self.queue.load(k) is not None]
+            if waiting:
+                result["failed"].append({"key": key, "path": record.get("path"),
+                                         "error": "waiting for its parent publish %s" % ", ".join(waiting)})
+                continue
+            if record.get("depends_on"):
+                log.warning("publish queue: %s replayed without its discarded parent %s", key, record["depends_on"])
+            record["attempts"] = (record.get("attempts") or 0) + 1
+            record["last_attempt"] = studio_sg_queue.iso(studio_sg_queue.utc_now())
+            try:
+                publish = self._replay_one(tk, record)
+            except Exception as e:  # noqa: BLE001 — gardé en file, avec l'erreur
+                entity = getattr(e, "entity", None)
+                if entity:
+                    record["entity_id"] = entity["id"]
+                record["error"] = str(e) or type(e).__name__
+                self.queue.save(record)
+                if unreachable(e):
+                    studio_sg_bridge.network(False, record["error"])
+                    log.warning("publish queue: ShotGrid unreachable, replay stopped at %s: %s", key, record["error"])
+                    result["stopped"] = record["error"]
+                    return
+                log.error("publish queue: %s not replayed: %s", key, record["error"])
+                result["failed"].append({"key": key, "path": record.get("path"), "error": record["error"]})
+                self._audit_record("publish_failed", record, key=key, error=record["error"], replay=True)
+                continue
+            record["entity_id"] = publish["id"]
+            self.queue.save(record)  # interrompu d'ici à remove(), le rejeu suivant le retrouve par entity_id
+            for child in self.queue.records():
+                if key in (child.get("depends_on") or []):
+                    child["depends_on"] = [k for k in child["depends_on"] if k != key]
+                    child["dependency_ids"] = list(child.get("dependency_ids") or []) + [publish["id"]]
+                    self.queue.save(child)
+            self.queue.remove(record)
+            log.info("publish queue: %s registered as PublishedFile %d", key, publish["id"])
+            result["replayed"].append({"key": key, "id": publish["id"], "path": record.get("path"),
+                                       "name": record.get("name"), "version_number": record.get("version_number")})
+            self._audit_record("publish_replayed", record, key=key, id=publish["id"], queued_at=record.get("created"))
+
+    def _replay_one(self, tk, record):
+        context = self._replay_context(tk, record)
+        kwargs = dict(record.get("kwargs") or {})
+        thumbnail = self.queue.thumbnail_path(record)
+        ids = list(record.get("dependency_ids") or [])
+        existing = self._published(tk, record)
+        if existing is not None:
+            log.info("publish queue: %s already in ShotGrid (PublishedFile %d), completed", record["key"], existing["id"])
+            self._complete_publish(tk, context, existing, thumbnail, ids, kwargs)
+            return existing
+        register = self.sgtk.util.register_publish
+        register = getattr(register, "_studio_original", register)  # pas d'audit "publish" : rejoué, pas publié
+        kwargs.update(comment=record.get("comment") or "", published_file_type=record.get("published_file_type"),
+                      thumbnail_path=thumbnail, dependency_ids=ids)
+        created_at = studio_sg_queue.parse_iso(record.get("created_at") or record.get("created"))
+        call = (tk, context, record["path"], record["name"], record["version_number"])
+        try:
+            return register(*call, created_at=created_at, **kwargs)
+        except Exception as e:
+            if record.get("created_at") or created_at is None or unreachable(e) or getattr(e, "entity", None):
+                raise
+            # La date d'origine refusée (droits sur le site) : enregistré à l'heure du rejeu.
+            log.warning("publish queue: %s: created_at refused (%s), registered at the current time", record["key"], e)
+            return register(*call, **kwargs)
+
+    def _replay_context(self, tk, record):
+        data = record.get("context")
+        if isinstance(data, dict) and data.get("project"):
+            try:
+                return self.sgtk.Context.from_dict(tk, data)
+            except Exception as e:  # noqa: BLE001 — relu depuis ShotGrid ci-dessous
+                log.warning("publish queue: %s: context unreadable (%s)", record["key"], e)
+        if record.get("task_id"):
+            return tk.context_from_entity("Task", record["task_id"])
+        return tk.context_from_entity("Project", record["project_id"])
+
+    @staticmethod
+    def _published(tk, record):
+        """Le PublishedFile du publish s'il existe déjà : créé avant l'échec (entity_id), ou dont la réponse s'est
+        perdue (même projet, tâche, nom, version et fichier)."""
+        sg = tk.shotgun
+        fields = ["code", "name", "version_number", "path"]
+        if record.get("entity_id"):
+            found = sg.find_one("PublishedFile", [["id", "is", record["entity_id"]]], fields)
+            if found is not None:
+                return found
+        if not record.get("project_id"):
+            return None
+        task = {"type": "Task", "id": record["task_id"]} if record.get("task_id") else None
+        filters = [
+            ["project", "is", {"type": "Project", "id": record["project_id"]}],
+            ["task", "is", task],
+            ["name", "is", record["name"]],
+            ["version_number", "is", record["version_number"]],
+        ]
+        target = os.path.normcase(os.path.normpath(record["path"]))
+        for found in sg.find("PublishedFile", filters, fields):
+            path = found.get("path")
+            local = path.get("local_path") if isinstance(path, dict) else None
+            if local and os.path.normcase(os.path.normpath(local)) == target:
+                return found
+            if not local and found.get("code") == os.path.basename(record["path"]):
+                return found
+        return None
+
+    def _complete_publish(self, tk, context, entity, thumbnail, ids, kwargs):
+        # Ce que register_publish fait après la création (vignettes, dépendances), sans doubler l'existant.
+        sg = tk.shotgun
+        if thumbnail:
+            sg.upload_thumbnail("PublishedFile", entity["id"], thumbnail)
+            if kwargs.get("update_entity_thumbnail") and context.entity:
+                sg.upload_thumbnail(context.entity["type"], context.entity["id"], thumbnail)
+            if kwargs.get("update_task_thumbnail") and context.task:
+                sg.upload_thumbnail("Task", context.task["id"], thumbnail)
+        wanted = list(ids)
+        paths = kwargs.get("dependency_paths") or []
+        if paths:
+            wanted += [p["id"] for p in self.sgtk.util.find_publish(tk, paths).values()]
+        link = {"type": "PublishedFile", "id": entity["id"]}
+        have = {
+            (d.get("dependent_published_file") or {}).get("id")
+            for d in sg.find("PublishedFileDependency", [["published_file", "is", link]], ["dependent_published_file"])
+        }
+        batch = [
+            {
+                "request_type": "create",
+                "entity_type": "PublishedFileDependency",
+                "data": {"published_file": link, "dependent_published_file": {"type": "PublishedFile", "id": i}},
+            }
+            for i in dict.fromkeys(wanted)
+            if i not in have
+        ]
+        if batch:
+            sg.batch(batch)
+
+    def op_discard_publishes(self, args):
+        """Écarte des publishes de la file d'attente (keys) : jamais rejoués, leurs fichiers vont dans discarded/ du
+        dossier de la file. Leurs enfants encore en file seront enregistrés sans dépendre d'eux. Retourne
+        {"discarded", "missing"} (clés)."""
+        keys = args.get("keys")
+        if not isinstance(keys, list) or not keys or not all(studio_sg_queue.valid_key(k) for k in keys):
+            raise BridgeError("bad_request", "keys must be a non-empty list of publish queue keys")
+        discarded, missing = [], []
+        for key in keys:
+            record = self.queue.load(key) if self.queue is not None else None
+            if record is None:
+                missing.append(key)
+                continue
+            self.queue.discard(record)
+            discarded.append(key)
+            log.info("publish queue: %s discarded (%s)", key, record.get("path"))
+            self._audit_record("publish_discarded", record, key=key)
+        return {"discarded": discarded, "missing": missing}

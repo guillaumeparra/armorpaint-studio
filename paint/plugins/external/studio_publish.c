@@ -10,6 +10,7 @@
 #include "iron_ui.h"
 #include "engine.h"
 #include "../../sources/types.h"
+#include "studio_audit.h"
 #include "studio_export_naming.h"
 #include "studio_export_window.h"
 #include "studio_json.h"
@@ -175,8 +176,11 @@ static void copy_request(int host, const char *req) {
 		}
 		else {
 			char *q = studio_json_quote(path);
+			char *s = studio_json_quote(current);
 			reply_ok(host, string_tmp("{\"path\":%s,\"size\":%ld}", q, size));
+			studio_audit("project_copy", string_tmp("\"path\":%s,\"from\":%s,\"size\":%ld", q, s, size));
 			free(q);
+			free(s);
 		}
 		free(tmp);
 	}

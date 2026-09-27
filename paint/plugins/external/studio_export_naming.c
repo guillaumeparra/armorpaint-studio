@@ -5,6 +5,8 @@
 #include "studio_json.h"
 #include "studio_naming.h"
 #include "studio_sg.h"
+#include "studio_sg_context.h"
+#include "studio_sg_offline.h"
 #include "studio_workfiles.h"
 #include <stdlib.h>
 #include <string.h>
@@ -30,6 +32,7 @@ static struct {
 	char *pattern_udim; // avec tuile, NULL si le template n'en a pas
 	bool  seen;         // ShotGrid sert dans la session
 	bool  told;         // console : nommage (ou son absence) déjà signalé pour path
+	int   net_serial;   // studio_sg_network_serial() déjà vu
 } nm;
 
 static bool enabled(void) {
@@ -75,17 +78,33 @@ static void track(const char *path, bool ask) {
 	if (!ask) {
 		return;
 	}
+	// Projet du contexte (studio_sg_context.h), avec son site : le sidecar l'ignore s'il est d'un autre site.
 	char *quoted  = studio_json_quote(path);
-	int   project = studio_workfiles_project_id();
-	char *args    = project > 0 ? string_tmp("{\"path\":%s,\"project_id\":%d}", quoted, project) : string_tmp("{\"path\":%s}", quoted);
+	char *site    = studio_json_quote(studio_sg_context_site());
+	int   project = studio_sg_context_project_id();
+	char *args    = project > 0 ? string_tmp("{\"path\":%s,\"project_id\":%d,\"site\":%s}", quoted, project, site) : string_tmp("{\"path\":%s}", quoted);
 	free(quoted);
+	free(site);
 	nm.job = studio_sg_start("texture_pattern", args, 60000);
+}
+
+// Mode dégradé (studio_sg_offline.h) : les textures gardent les noms d'ArmorPaint, dit une fois par projet.
+static void tell_offline(void) {
+	if (!nm.told) {
+		console_error("ShotGrid texture naming: ShotGrid is unreachable, textures keep ArmorPaint names until it is back");
+		nm.told = true;
+	}
 }
 
 static void collect(void) {
 	const char *reply = studio_sg_result(nm.job);
 	nm.ready          = true;
-	if (!studio_sg_ok(nm.job)) {
+	if (!studio_sg_ok(nm.job) && strcmp(studio_sg_get(nm.job, "/error/code"), "sg_unreachable") == 0) {
+		// Pas de réponse : redemandé au retour du site ; l'export d'ici là le dit (ensure).
+		nm.ready = false;
+		iron_log("studio: naming: ShotGrid unreachable, template of %s asked again when it is back", nm.path);
+	}
+	else if (!studio_sg_ok(nm.job)) {
 		console_error(string_tmp("ShotGrid texture naming: %s: %s (textures keep ArmorPaint names)", studio_sg_get(nm.job, "/error/code"),
 		                         studio_sg_get(nm.job, "/error/message")));
 		nm.told = true;
@@ -122,8 +141,16 @@ static bool ensure(void) {
 	if (path == NULL || path[0] == 0) {
 		return false;
 	}
+	bool offline = studio_sg_offline();
 	if (nm.path == NULL || strcmp(nm.path, path) != 0 || (!nm.ready && nm.job == 0)) {
 		if (!enabled()) {
+			return false;
+		}
+		if (offline) { // pas de requête qui attendrait le délai du réseau
+			if (nm.path == NULL || strcmp(nm.path, path) != 0) {
+				track(path, false);
+			}
+			tell_offline();
 			return false;
 		}
 		track(path, true);
@@ -131,6 +158,10 @@ static bool ensure(void) {
 	if (!nm.ready) {
 		if (nm.job == 0) {
 			return false; // plus de place pour un job : le superviseur l'a déjà signalé
+		}
+		if (studio_sg_state(nm.job) != STUDIO_SG_DONE && offline) {
+			tell_offline(); // la réponse arrivera plus tard, le prochain export en profitera
+			return false;
 		}
 		if (studio_sg_state(nm.job) != STUDIO_SG_DONE && studio_workfiles_busy()) {
 			// Le job attend derrière la fenêtre ShotGrid, dont les requêtes passent par ce thread : attendre ici la
@@ -145,6 +176,9 @@ static bool ensure(void) {
 			sleep_ms(10);
 		}
 		collect();
+		if (!nm.ready) {
+			tell_offline(); // ShotGrid injoignable pendant la requête
+		}
 	}
 	return nm.template != NULL;
 }
@@ -229,9 +263,20 @@ static void naming_update(void *data) {
 	if (nm.job != 0 && studio_sg_state(nm.job) == STUDIO_SG_DONE) {
 		collect();
 	}
-	char *path = project_filepath_get();
+	char *path    = project_filepath_get();
+	bool  offline = studio_sg_offline();
 	if (path != NULL && path[0] != 0 && (nm.path == NULL || strcmp(nm.path, path) != 0)) {
-		track(path, enabled());
+		track(path, enabled() && !offline);
+	}
+	// ShotGrid de retour : le modèle resté sans réponse est redemandé.
+	int serial = studio_sg_network_serial();
+	if (serial != nm.net_serial) {
+		nm.net_serial = serial;
+		if (studio_sg_network(NULL) == STUDIO_SG_NET_ONLINE && nm.path != NULL && !nm.ready && nm.job == 0 && enabled()) {
+			char *again = strdup(nm.path);
+			track(again, true);
+			free(again);
+		}
 	}
 }
 

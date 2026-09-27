@@ -13,7 +13,12 @@
 #   import sg_fixture; sg_fixture.setup(dossier)   le prépare dans le processus (tests unitaires)
 #
 # STUDIO_TEST_TK_CORE : dossier racine de tk-core. STUDIO_TEST_SCENARIO : variante du site (voir setup()).
+#
+# Réseau coupé (lot C5, mode dégradé) : STUDIO_TEST_OFFLINE_FLAG=<fichier>, le site est injoignable tant que ce
+# fichier existe ; STUDIO_TEST_OFFLINE_AT=<méthode>:<type>:<n> (create:PublishedFile:2), le n-ième de ces appels
+# échoue et crée le fichier ; STUDIO_TEST_LOST_AT, pareil, mais l'appel a eu lieu avant d'échouer (réponse perdue).
 
+import errno
 import json
 import os
 import re
@@ -176,6 +181,54 @@ def _edit_templates(config, old, new):
         f.write(text.replace(old, new))
 
 
+def _observe(db):
+    """Les appels à mockgun disent au sidecar si le site a répondu (studio_sg_bridge.network) : un vrai site passe par
+    Shotgun._call_rpc, que le sidecar surveille, pas mockgun. Et le réseau coupé sur commande (voir l'en-tête)."""
+    flag = os.environ.get("STUDIO_TEST_OFFLINE_FLAG")
+    triggers = {}
+    for name in ("STUDIO_TEST_OFFLINE_AT", "STUDIO_TEST_LOST_AT"):
+        spec = os.environ.get(name)
+        if spec:
+            method, entity_type, count = spec.split(":")
+            triggers[(method, entity_type)] = [int(count), name == "STUDIO_TEST_LOST_AT"]
+    if triggers and not flag:
+        sys.exit("STUDIO_TEST_OFFLINE_AT and STUDIO_TEST_LOST_AT need STUDIO_TEST_OFFLINE_FLAG")
+    db.info = lambda: {"version": list(db.server_info["version"]), "s3_uploads_enabled": False}
+
+    def network(online, reason=None):
+        bridge = sys.modules.get("studio_sg_bridge")
+        if bridge is not None and hasattr(bridge, "network"):
+            bridge.network(online, reason)
+
+    def unreachable():
+        error = ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused (simulated, %s)" % HOST)
+        network(False, str(error))
+        return error
+
+    def observed(method, fn):
+        def call(*args, **kwargs):
+            if flag and os.path.exists(flag):
+                raise unreachable()
+            trigger = triggers.get((method, args[0] if args and isinstance(args[0], str) else None))
+            if trigger is not None:
+                trigger[0] -= 1
+                if trigger[0] == 0:
+                    if trigger[1]:
+                        fn(*args, **kwargs)  # fait sur le site, mais la réponse se perd
+                    with open(flag, "w"):
+                        pass
+                    raise unreachable()
+            result = fn(*args, **kwargs)
+            network(True)
+            return result
+
+        return call
+
+    for method in ("info", "find", "find_one", "create", "update", "delete", "revive", "batch", "upload",
+                   "upload_thumbnail", "schema_read", "schema_entity_read", "schema_field_read"):
+        setattr(db, method, observed(method, getattr(db, method)))
+
+
 def setup(workdir, scenario=None):
     """Prépare le site dans ce processus. Retourne un dict des entités créées (et "db", la base mockgun).
 
@@ -298,6 +351,7 @@ def setup(workdir, scenario=None):
         e["publish_type_" + code.split()[0].lower()] = db.create("PublishedFileType", {"code": code})
     if scenario == "demo":
         _demo_production(db, e)
+    _observe(db)
 
     # Le réseau : toute connexion ShotGrid aboutit à mockgun (ou échoue selon le scénario).
     class Offline(object):

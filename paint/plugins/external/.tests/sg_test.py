@@ -16,6 +16,7 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 ASSETS = os.path.join(os.path.dirname(HERE), "assets")
 sys.path.insert(0, ASSETS)
+SITE = "https://studio.test.shotgunstudio.com"  # sg_fixture.HOST
 
 
 def write(path, content="arm"):
@@ -404,6 +405,13 @@ class TestToolkit(Base):
         self.assertEqual(s2.data("texture_pattern", {"path": nv["path"]})["template"], "armorpaint_asset_textures")
         self.assertIn("Toolkit ready for project 1", s2.stderr())
 
+        # project_id d'un autre site (contexte gardé dans un .arm, lot C5) : ignoré, le projet vient du chemin.
+        other = {"path": nv["path"], "project_id": 999, "site": "https://elsewhere.shotgrid.autodesk.com"}
+        self.assertEqual(s2.data("texture_pattern", other)["template"], "armorpaint_asset_textures")
+        self.assertIn("context of another ShotGrid site ignored", s2.stderr())
+        # Du site de la session, il compte : un autre projet que celui amorcé demande un redémarrage.
+        self.assertEqual(s2.error("texture_pattern", dict(other, site=SITE))[0], "restart_required")
+
     def test_texture_pattern_settings(self):
         # Pas de template de textures pour les Assets : pas de nommage ; un template sans {channel} : erreur.
         s = self.start(STUDIO_SG_TEXTURE_TEMPLATES="Shot=armorpaint_shot_textures")
@@ -479,6 +487,17 @@ class TestEngine(Base):
         wf = {c["name"]: c for c in menu["commands"]}["File Open..."]
         self.assertEqual((wf["app_instance"], wf["type"]), ("tk-multi-workfiles2", "default"))
         self.assertEqual(menu["favourites"], ["File Open...", "File Save...", "Publish..."])  # réglage menu_favourites
+
+    def test_context_of_another_site(self):
+        # Contexte gardé dans un .arm enregistré pour un autre site (lot C5) : ses identifiants ne valent rien ici.
+        s = self.start("demo", STUDIO_SG_NO_UI="1")
+        menu = s.data("list_commands", {"task_id": 1})
+        self.assertEqual(menu["context"]["site"], SITE)
+        other = s.data("list_commands", {"task_id": 2, "site": "https://elsewhere.shotgrid.autodesk.com"})
+        self.assertEqual(other["context"]["task_id"], 1)
+        self.assertIn("context of another ShotGrid site ignored", s.stderr())
+        same = s.data("list_commands", {"task_id": 2, "site": "HTTPS://studio.test.shotgunstudio.com/"})
+        self.assertEqual(same["context"]["task_id"], 2)
 
     def test_engine_missing(self):
         s = self.start()  # config sans tk-armorpaint
@@ -620,13 +639,7 @@ def setup(session):
 """
 
 
-@unittest.skipUnless(os.environ.get("STUDIO_TEST_TK_APPS"), "STUDIO_TEST_TK_APPS not set (Toolkit apps)")
-@unittest.skipUnless(has_qt(), "PySide6 not importable by this Python (tk-multi-publish2 imports its Qt modules)")
-class TestPublish(Base):
-    """Publish sans fenêtre (op publish, lot C4) : tk-multi-publish2 et les hooks du moteur
-    (tk-armorpaint/hooks/tk-multi-publish2) sur le site simulé (scénario demo), contre un faux ArmorPaint. Le vrai
-    ArmorPaint et la fenêtre Publish : publish_app.sh."""
-
+class PublishBase(Base):
     def start_publish(self, **env):
         hook = os.path.join(self.workdir, "find_hook.py")
         write(hook, FIND_HOOK)
@@ -648,6 +661,14 @@ class TestPublish(Base):
             depends_on = files[dep["published_file"]["id"]].setdefault("depends_on", [])
             depends_on.append(dep["dependent_published_file"]["id"])
         return files
+
+
+@unittest.skipUnless(os.environ.get("STUDIO_TEST_TK_APPS"), "STUDIO_TEST_TK_APPS not set (Toolkit apps)")
+@unittest.skipUnless(has_qt(), "PySide6 not importable by this Python (tk-multi-publish2 imports its Qt modules)")
+class TestPublish(PublishBase):
+    """Publish sans fenêtre (op publish, lot C4) : tk-multi-publish2 et les hooks du moteur
+    (tk-armorpaint/hooks/tk-multi-publish2) sur le site simulé (scénario demo), contre un faux ArmorPaint. Le vrai
+    ArmorPaint et la fenêtre Publish : publish_app.sh."""
 
     def test_publish_project_and_udim_textures(self):
         s, host = self.start_publish()
@@ -835,6 +856,353 @@ class TestPublish(Base):
         self.assertIn("disk full", reply["error"]["message"])
         self.assertIn("already published: robot.v001.arm", reply["error"]["message"])
         self.assertEqual(host.path, os.path.join(self.work, "robot.v001.arm"))  # pas de version suivante
+
+
+@unittest.skipUnless(os.environ.get("STUDIO_TEST_TK_APPS"), "STUDIO_TEST_TK_APPS not set (Toolkit apps)")
+@unittest.skipUnless(has_qt(), "PySide6 not importable by this Python (tk-multi-publish2 imports its Qt modules)")
+class TestQueue(PublishBase):
+    """Mode dégradé (lot C5) : ShotGrid injoignable pendant un publish, file d'attente et rejeu, sur le site simulé au
+    réseau coupé à la demande (sg_fixture.py). La file et le journal d'audit sont lus sur disque, comme ArmorPaint."""
+
+    def env(self, queue=True, **env):
+        self.flag = os.path.join(self.workdir, "offline")
+        self.queue_dir = os.path.join(self.workdir, "queue")
+        self.audit = os.path.join(self.workdir, "audit.jsonl")
+        return dict(STUDIO_SG_QUEUE=self.queue_dir if queue else None, STUDIO_AUDIT_LOG=self.audit,
+                    STUDIO_TEST_OFFLINE_FLAG=self.flag, **env)
+
+    def start_queue(self, queue=True, **env):
+        s, host = self.start_publish(**self.env(queue, **env))
+        host.current = {"preset": "basic", "dir": self.workdir, "mode": 3}
+        return s, host
+
+    def restart(self, s, **env):
+        """ArmorPaint relancé : un autre sidecar (et un site simulé tout neuf, sans les publishes du précédent)."""
+        s.close()
+        self.sidecars.remove(s)
+        return self.start("demo", STUDIO_SG_NO_UI="1", STUDIO_SG_HOOK=os.path.join(self.workdir, "find_hook.py"),
+                          **self.env(**env))
+
+    def online(self):
+        if os.path.exists(self.flag):
+            os.remove(self.flag)
+
+    def records(self):
+        import studio_sg_queue
+
+        return studio_sg_queue.Queue(self.queue_dir).records()
+
+    def events(self):
+        if not os.path.exists(self.audit):
+            return []
+        with open(self.audit) as f:
+            return [json.loads(line) for line in f]
+
+    def test_queued_mid_publish_then_replayed(self):
+        # Le projet est enregistré, puis ShotGrid tombe : les textures (fichiers écrits) vont dans la file.
+        s, host = self.start_queue(STUDIO_TEST_OFFLINE_AT="create:PublishedFile:2")
+        reply = s.call("publish", {"task_id": 1, "description": "offline pass"}, timeout=180)
+        self.assertTrue(reply["ok"], reply)
+        self.assertFalse(reply["sg"]["online"])
+        self.assertIn("Connection refused", reply["sg"]["reason"])
+        result = reply["data"]
+        self.assertTrue(result["finalized"], result)
+        self.assertEqual(result["context"]["site"], SITE)
+        by_item = {p["item"]: p for p in result["publishes"]}
+        project = by_item["robot.v001.arm"]
+        self.assertGreater(project["id"], 0)
+        self.assertIsNone(project["queued"])
+        textures = [by_item["robot_base.<UDIM>.png"], by_item["robot_nor.<UDIM>.png"]]
+        self.assertEqual([t["id"] for t in textures], [None, None])
+        self.assertEqual(result["queued"], [t["queued"] for t in textures])
+        messages = [m["message"] for m in result["messages"] if m["level"] == "warning"]
+        self.assertEqual(len([m for m in messages if "is queued" in m]), 2, messages)
+        self.assertEqual(len([m for m in messages if "keep their status" in m]), 1, messages)  # finalisation du projet
+        self.assertEqual(host.path, os.path.join(self.work, "robot.v002.arm"))  # version suivante quand même
+
+        records = self.records()
+        self.assertEqual([r["key"] for r in records], result["queued"])
+        for r in records:
+            self.assertEqual((r["project_id"], r["task_id"], r["depends_on"]), (1, 1, []))
+            self.assertEqual(r["dependency_ids"], [project["id"]])
+            self.assertEqual((r["comment"], r["published_file_type"], r["version_number"]), ("offline pass", "UDIM Image", 1))
+            self.assertEqual((r["site"], r["context"]["task"]["id"], r["attempts"]), (SITE, 1, 0))
+            self.assertTrue(os.path.isfile(os.path.join(self.queue_dir, r["thumbnail"])))  # copie de la vignette
+        pending = s.data("pending_publishes")
+        self.assertEqual((pending["count"], pending["queue"]), (2, self.queue_dir))
+        self.assertEqual([p["name"] for p in pending["publishes"]], ["robot_base.<UDIM>.png", "robot_nor.<UDIM>.png"])
+
+        # Rejeu hors ligne : arrêté au premier, rien ne change.
+        replay = s.data("replay_publishes")
+        self.assertEqual((replay["replayed"], replay["failed"], replay["pending"]), ([], [], 2))
+        self.assertIn("Connection refused", replay["stopped"])
+        self.assertEqual([r["attempts"] for r in self.records()], [1, 0])
+
+        # En ligne : enregistrés dans l'ordre, dépendants du projet, avec leur description.
+        self.online()
+        reply = s.call("replay_publishes")
+        self.assertEqual(reply["sg"], {"online": True})
+        replay = reply["data"]
+        self.assertEqual([r["key"] for r in replay["replayed"]], result["queued"])
+        self.assertEqual((replay["project_id"], replay["pending"], replay["stopped"], replay["failed"]), (1, 0, None, []))
+        files = self.published(s)
+        self.assertEqual(len(files), 3)
+        for r in replay["replayed"]:
+            self.assertEqual(files[r["id"]]["depends_on"], [project["id"]])
+            self.assertEqual(files[r["id"]]["description"], "offline pass")
+            self.assertEqual(files[r["id"]]["task"]["id"], 1)
+        # À la date du publish, pas à celle du rejeu.
+        import studio_sg_queue
+
+        when = {f["id"]: f["created_at"] for f in s.data("find", {"entity_type": "PublishedFile", "fields": ["created_at"]})}
+        for r, record in zip(replay["replayed"], records):
+            self.assertEqual(studio_sg_queue.parse_iso(when[r["id"]]), studio_sg_queue.parse_iso(record["created"]))
+        self.assertEqual(self.records(), [])
+        self.assertEqual(s.data("replay_publishes")["replayed"], [])
+
+        events = self.events()
+        self.assertEqual([e["event"] for e in events],
+                         ["publish", "publish_queued", "publish_queued", "publish_replayed", "publish_replayed"])
+        self.assertEqual({(e["source"], e["project_id"], e["task_id"]) for e in events}, {("sidecar", 1, 1)})
+        self.assertEqual(events[0]["id"], project["id"])
+        self.assertEqual([e["key"] for e in events[1:3]], result["queued"])
+
+    def test_lost_response_not_duplicated(self):
+        # Le PublishedFile du projet est créé, mais la réponse se perd : tout part dans la file, les textures
+        # dépendent du projet en file. Au rejeu, le projet est retrouvé, pas recréé.
+        s, host = self.start_queue(STUDIO_TEST_LOST_AT="create:PublishedFile:1")
+        result = s.data("publish", {"task_id": 1}, timeout=180)
+        self.assertEqual([p["id"] for p in result["publishes"]], [None, None, None])
+        records = self.records()
+        self.assertEqual([r["key"] for r in records], result["queued"])
+        project_key = records[0]["key"]
+        self.assertEqual((records[0]["name"], records[0]["entity_id"]), ("robot.arm", None))
+        self.assertEqual([r["depends_on"] for r in records[1:]], [[project_key], [project_key]])
+        self.assertEqual([r["dependency_ids"] for r in records[1:]], [[], []])
+        self.assertEqual(host.path, os.path.join(self.work, "robot.v002.arm"))
+
+        self.online()
+        created = list(self.published(s))
+        self.assertEqual(len(created), 1)
+        replay = s.data("replay_publishes")
+        self.assertEqual(replay["replayed"][0]["id"], created[0])
+        files = self.published(s)
+        self.assertEqual(len(files), 3)
+        for r in replay["replayed"][1:]:
+            self.assertEqual(files[r["id"]]["depends_on"], created)
+
+    def test_replay_interrupted_and_discard(self):
+        s, host = self.start_queue(STUDIO_TEST_OFFLINE_AT="create:PublishedFile:1")
+        result = s.data("publish", {"task_id": 1}, timeout=180)
+        project_key, base_key, nor_key = result["queued"]
+
+        # ArmorPaint relancé, et ShotGrid qui retombe au deuxième enregistrement du rejeu.
+        self.online()
+        s = self.restart(s, STUDIO_TEST_OFFLINE_AT="create:PublishedFile:2")
+        self.assertEqual(s.data("pending_publishes")["count"], 3)
+        replay = s.data("replay_publishes")
+        self.assertEqual([r["key"] for r in replay["replayed"]], [project_key])
+        self.assertIn("Connection refused", replay["stopped"])
+        self.assertEqual(replay["pending"], 2)
+        project_id = replay["replayed"][0]["id"]
+        records = {r["key"]: r for r in self.records()}
+        self.assertEqual((records[base_key]["depends_on"], records[base_key]["dependency_ids"]), ([], [project_id]))
+        self.assertEqual((records[base_key]["attempts"], records[nor_key]["attempts"]), (1, 0))
+        self.assertIn("Connection refused", records[base_key]["error"])
+
+        # Écarté : jamais rejoué, gardé à part.
+        self.assertEqual(s.data("discard_publishes", {"keys": [nor_key, "nope"]}),
+                         {"discarded": [nor_key], "missing": ["nope"]})
+        self.assertTrue(os.path.isfile(os.path.join(self.queue_dir, "discarded", nor_key + ".json")))
+        self.assertEqual(s.error("discard_publishes", {"keys": ["../%s" % base_key]})[0], "bad_request")
+        self.assertEqual(s.error("discard_publishes", {"keys": []})[0], "bad_request")
+
+        self.online()
+        replay = s.data("replay_publishes")
+        self.assertEqual([r["key"] for r in replay["replayed"]], [base_key])
+        self.assertEqual(self.published(s)[replay["replayed"][0]["id"]]["depends_on"], [project_id])
+        self.assertEqual(s.data("pending_publishes")["count"], 0)
+        events = [e["event"] for e in self.events()]
+        self.assertEqual(events.count("publish_queued"), 3)
+        self.assertEqual(events.count("publish_replayed"), 2)
+        self.assertEqual(events.count("publish_discarded"), 1)
+
+    def test_without_queue_the_publish_fails(self):
+        s, host = self.start_queue(queue=False, STUDIO_TEST_OFFLINE_AT="create:PublishedFile:1")
+        code, reply = s.error("publish", {"task_id": 1}, timeout=180)
+        self.assertEqual(code, "publish_failed")
+        self.assertIn("Connection refused", reply["error"]["message"])
+        self.assertFalse(reply["sg"]["online"])
+        self.assertEqual([e["event"] for e in self.events()], ["publish_failed"])
+        self.assertEqual(s.data("pending_publishes"), {"queue": None, "count": 0, "publishes": []})
+        self.assertEqual(s.data("replay_publishes")["replayed"], [])
+
+    def test_offline_before_publish(self):
+        # ShotGrid injoignable dès le départ : rien n'est écrit ni mis en file, l'erreur le dit.
+        s, host = self.start_queue()
+        write(self.flag, "")
+        code, reply = s.error("publish", {"task_id": 1}, timeout=180)
+        self.assertEqual(code, "sg_unreachable")
+        self.assertFalse(reply["sg"]["online"])
+        self.assertEqual(self.records(), [])
+        self.assertNotIn("publish_copy", host.ops())
+        self.assertEqual(s.error("check_online")[0], "sg_unreachable")
+        self.online()
+        reply = s.call("check_online")
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(reply["sg"], {"online": True})
+        self.assertEqual(reply["data"]["site"], SITE)
+        result = s.data("publish", {"task_id": 1}, timeout=180)
+        self.assertEqual((result["queued"], len(self.published(s))), ([], 3))
+
+
+class TestOffline(Base):
+    """Mode dégradé (lot C5) sans Toolkit ni apps : l'état réseau des réponses, le délai des connexions, et les
+    briques du sidecar (classement des erreurs, surveillance de shotgun_api3, file d'attente, journal d'audit)."""
+
+    def test_net_timeout(self):
+        self.assertEqual(self.start().hello["data"]["net_timeout"], 30.0)
+        self.assertEqual(self.start(STUDIO_SG_NET_TIMEOUT="2.5").hello["data"]["net_timeout"], 2.5)
+        self.assertIsNone(self.start(STUDIO_SG_NET_TIMEOUT="0").hello["data"]["net_timeout"])
+
+    def test_replies_carry_the_network_state(self):
+        s = self.start()
+        reply = s.call("list_projects")
+        self.assertEqual(reply["sg"], {"online": True})
+        self.assertNotIn("sg", s.call("ping"))  # pas de requête ShotGrid
+        self.assertEqual(s.data("check_online")["site"], SITE)
+        s = self.start("offline")
+        code, reply = s.error("list_projects")
+        self.assertEqual(code, "sg_unreachable")
+        self.assertEqual(reply["sg"]["online"], False)
+        self.assertIn("503", reply["sg"]["reason"])
+        self.assertEqual(s.error("check_online")[0], "sg_unreachable")
+
+    def test_unreachable(self):
+        import errno
+        import socket
+
+        from studio_sg_session import unreachable
+
+        class ProtocolError(Exception):
+            pass
+
+        class Fault(Exception):
+            pass
+
+        def chained(inner):
+            try:
+                try:
+                    raise inner
+                except Exception as e:
+                    raise RuntimeError("wrapped") from e
+            except RuntimeError as e:
+                return e
+
+        self.assertTrue(unreachable(ConnectionRefusedError(errno.ECONNREFUSED, "refused")))
+        self.assertTrue(unreachable(OSError(errno.ENETUNREACH, "network is unreachable")))
+        self.assertTrue(unreachable(socket.timeout("timed out")))
+        self.assertTrue(unreachable(socket.gaierror(8, "nodename nor servname provided")))
+        self.assertTrue(unreachable(ProtocolError("503")))
+        self.assertTrue(unreachable(chained(ConnectionResetError())))
+        self.assertFalse(unreachable(OSError(errno.ENOSPC, "no space left")))
+        self.assertFalse(unreachable(Fault("API update() CRUD ERROR")))
+        self.assertFalse(unreachable(chained(ValueError("bad"))))
+        self.assertFalse(unreachable(None))
+
+    def test_watch_network(self):
+        # Chaque appel de l'API (Shotgun._call_rpc) dit au superviseur si le site a répondu.
+        import types
+
+        import studio_sg_bridge
+        from studio_sg_session import Session
+
+        class Fault(Exception):
+            pass
+
+        class Shotgun(object):
+            outcome = None
+
+            def _call_rpc(self, method, params):
+                if self.outcome is not None:
+                    raise self.outcome
+                return {"method": method}
+
+        module = types.ModuleType("fake_vendor.shotgun_api3")
+        module.Shotgun = Shotgun
+        sys.modules[module.__name__] = module
+        try:
+            Session._watch_network()
+            Session._watch_network()  # une seule fois
+            sg = Shotgun()
+            self.assertEqual(sg._call_rpc("info", None), {"method": "info"})
+            self.assertEqual((studio_sg_bridge.OFFLINE, studio_sg_bridge._seen), (None, {"online": True}))
+            sg.outcome = ConnectionRefusedError(61, "Connection refused")
+            self.assertRaises(ConnectionRefusedError, sg._call_rpc, "find", None)
+            self.assertIn("Connection refused", studio_sg_bridge.OFFLINE)
+            self.assertFalse(studio_sg_bridge._seen["online"])
+            sg.outcome = Fault("permission denied")  # le site a répondu
+            self.assertRaises(Fault, sg._call_rpc, "update", None)
+            self.assertEqual((studio_sg_bridge.OFFLINE, studio_sg_bridge._seen), (None, {"online": True}))
+        finally:
+            del sys.modules[module.__name__]
+            studio_sg_bridge.network(True)
+
+    def test_queue_store(self):
+        import studio_sg_queue
+
+        q = studio_sg_queue.Queue(os.path.join(self.workdir, "q"))
+        self.assertEqual((q.keys(), q.records()), ([], []))
+        thumb = os.path.join(self.workdir, "thumb.png")
+        png(thumb)
+        first = q.add({"path": "/a/robot.v001.arm", "name": "robot.arm"}, thumb)
+        second = q.add({"path": "/a/robot_base.v001.png", "depends_on": [first]})
+        self.assertEqual(q.keys(), [first, second])  # dans l'ordre de la mise en file
+        record = q.load(first)
+        self.assertEqual((record["version"], record["attempts"], record["thumbnail"]), (1, 0, first + ".png"))
+        self.assertEqual(q.thumbnail_path(record), os.path.join(q.directory, first + ".png"))
+        self.assertIsNotNone(studio_sg_queue.parse_iso(record["created"]))
+        self.assertRaises(TypeError, q.add, {"when": object()})
+        self.assertEqual(q.count(), 2)
+        record["error"] = "later"
+        q.save(record)
+        self.assertEqual(q.load(first)["error"], "later")
+        for bad in ("../" + first, first + ".json", "", None, "a/b"):
+            self.assertFalse(studio_sg_queue.valid_key(bad), bad)
+            self.assertIsNone(q.load(bad))
+        q.discard(record)
+        self.assertEqual(q.keys(), [second])
+        self.assertTrue(os.path.isfile(os.path.join(q.directory, "discarded", first + ".png")))
+        q.remove(q.load(second))
+        self.assertEqual(q.count(), 0)
+        write(os.path.join(q.directory, "broken.json"), "{")
+        self.assertEqual(q.records(), [])  # illisible : sauté
+
+    def test_audit(self):
+        import studio_audit
+
+        path = os.path.join(self.workdir, "audit.jsonl")
+        old = os.environ.get("STUDIO_AUDIT_LOG")
+        try:
+            os.environ.pop("STUDIO_AUDIT_LOG", None)
+            self.assertFalse(studio_audit.write("publish"))
+            os.environ["STUDIO_AUDIT_LOG"] = path
+            self.assertTrue(studio_audit.write("publish", path="/a/é.arm", id=3, error=None))
+            self.assertTrue(studio_audit.write("publish_queued", key="k"))
+            os.environ["STUDIO_AUDIT_LOG"] = os.path.join(self.workdir, "missing", "audit.jsonl")
+            self.assertFalse(studio_audit.write("publish"))  # dossier absent : signalé, pas bloquant
+        finally:
+            os.environ.pop("STUDIO_AUDIT_LOG", None)
+            if old is not None:
+                os.environ["STUDIO_AUDIT_LOG"] = old
+        with open(path, "rb") as f:
+            lines = f.read().decode("ascii").splitlines()
+        events = [json.loads(line) for line in lines]
+        self.assertEqual([e["event"] for e in events], ["publish", "publish_queued"])
+        self.assertEqual((events[0]["path"], events[0]["id"], events[0]["source"]), ("/a/é.arm", 3, "sidecar"))
+        self.assertNotIn("error", events[0])
+        self.assertEqual(set(events[1]), {"time", "source", "pid", "host", "user", "event", "key"})
+        self.assertRegex(events[1]["time"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$")
 
 
 class TestCoreDiscovery(Base):

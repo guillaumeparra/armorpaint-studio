@@ -17,6 +17,9 @@
 void        studio_prefs_init(void);  // external_init(), avant les modules qui lisent leurs préférences
 const char *studio_prefs_path(void);  // fichier lu et écrit (ignoré en --background sans $STUDIO_PREFS)
 const char *studio_prefs_error(void); // dernière erreur de lecture ou d'écriture ; "" sinon
+// Dossier du fichier (malloc), pour les autres fichiers du studio (journal d'audit, publishes en attente, lot C5) ;
+// NULL quand les préférences sont ignorées (--background sans $STUDIO_PREFS).
+char *studio_prefs_dir(void);
 
 bool        studio_prefs_has(const char *key);
 const char *studio_prefs_string(const char *key, const char *fallback); // fallback si absente ou pas une chaîne

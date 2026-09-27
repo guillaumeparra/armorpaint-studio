@@ -104,11 +104,13 @@ class ArmorPaintEngine(Engine):
                 subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", path])
 
     def context_info(self, ctx=None):
-        """Le contexte pour ArmorPaint (titre de la fenêtre, contexte de la prochaine fenêtre)."""
+        """Le contexte pour ArmorPaint (titre de la fenêtre, contexte de la prochaine fenêtre, gardé dans le .arm : le
+        site dit à quel site ShotGrid appartiennent ces identifiants)."""
         ctx = ctx or self.context
         project, entity, step, task = (ctx.project or {}), (ctx.entity or {}), (ctx.step or {}), (ctx.task or {})
         parts = [p for p in (project.get("name"), entity.get("name"), step.get("name"), task.get("name")) if p]
         return {
+            "site": self.sgtk.shotgun_url,
             "project_id": project.get("id"),
             "project": project.get("name"),
             "entity_type": entity.get("type"),
@@ -131,6 +133,30 @@ class ArmorPaintEngine(Engine):
         args = dict(args or {})
         args.setdefault("context", self.context_info())
         return channel.request(op, args)
+
+    def finalize_publish(self, item, logger, finalize):
+        """Finalisation ShotGrid d'un publish, finalize (celle de publish_file.py : statut des publishes qu'il
+        remplace), en mode dégradé (lot C5, voir studio_sg_session.py) : sautée pour un publish mis en file d'attente,
+        et ShotGrid injoignable n'y est qu'un avertissement. Le dit dans logger. Faux si elle n'a pas eu lieu."""
+        path = item.properties.get("path") or item.name
+        data = item.properties.get("sg_publish_data") or {}
+        if data.get("queued"):
+            logger.warning(
+                "ShotGrid unreachable: %s is queued, it will be registered in ShotGrid when the site is back (%s)"
+                % (path, data["queued"])
+            )
+            return False
+        try:
+            finalize()
+        except Exception as e:
+            session = sys.modules.get("studio_sg_session")
+            if session is None or not session.unreachable(e):
+                raise
+            logger.warning(
+                "ShotGrid unreachable: %s is published, but the publishes it replaces keep their status (%s)" % (path, e)
+            )
+            return False
+        return True
 
     def sidecar_session(self):
         """La session du sidecar (studio_sg_session.Session) : ses réglages et ses opérations, pour les hooks (le

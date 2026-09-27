@@ -6,6 +6,8 @@
 #include <io.h>
 #include <windows.h>
 #else
+#include <dirent.h>
+#include <fcntl.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
 #endif
@@ -239,4 +241,74 @@ char *studio_fs_read(const char *path, size_t *size) {
 		*size = len;
 	}
 	return data;
+}
+
+bool studio_fs_append(const char *path, const void *data, size_t size) {
+#ifdef _WIN32
+	wchar_t *w = wide(path);
+	HANDLE   h = w != NULL
+	                 ? CreateFileW(w, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL)
+	                 : INVALID_HANDLE_VALUE;
+	free(w);
+	if (h == INVALID_HANDLE_VALUE) {
+		return false;
+	}
+	DWORD written = 0;
+	bool  ok      = size <= 0xffffffffu && WriteFile(h, data, (DWORD)size, &written, NULL) && written == size;
+	CloseHandle(h);
+	return ok;
+#else
+	int fd = open(path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0644);
+	if (fd < 0) {
+		return false;
+	}
+	ssize_t written = write(fd, data, size);
+	bool    ok      = written >= 0 && (size_t)written == size;
+	ok              = close(fd) == 0 && ok;
+	return ok;
+#endif
+}
+
+static bool has_suffix(const char *name, const char *suffix) {
+	size_t n = strlen(name), k = strlen(suffix);
+	return name[0] != '.' && n >= k && strcmp(name + n - k, suffix) == 0;
+}
+
+int studio_fs_count(const char *dir, const char *suffix) {
+	int count = 0;
+#ifdef _WIN32
+	size_t   len     = strlen(dir);
+	char    *pattern = malloc(len + 3);
+	wchar_t *w       = NULL;
+	if (pattern != NULL) {
+		memcpy(pattern, dir, len);
+		memcpy(pattern + len, "\\*", 3);
+		w = wide(pattern);
+		free(pattern);
+	}
+	WIN32_FIND_DATAW found;
+	HANDLE           h = w != NULL ? FindFirstFileW(w, &found) : INVALID_HANDLE_VALUE;
+	free(w);
+	if (h == INVALID_HANDLE_VALUE) {
+		return -1;
+	}
+	do {
+		char name[1024];
+		if (WideCharToMultiByte(CP_UTF8, 0, found.cFileName, -1, name, sizeof(name), NULL, NULL) > 0 && has_suffix(name, suffix)) {
+			count++;
+		}
+	} while (FindNextFileW(h, &found));
+	FindClose(h);
+#else
+	DIR *d = opendir(dir);
+	if (d == NULL) {
+		return -1;
+	}
+	struct dirent *e;
+	while ((e = readdir(d)) != NULL) {
+		count += has_suffix(e->d_name, suffix);
+	}
+	closedir(d);
+#endif
+	return count;
 }

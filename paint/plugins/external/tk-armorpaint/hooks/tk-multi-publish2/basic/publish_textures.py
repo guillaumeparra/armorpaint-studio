@@ -112,6 +112,10 @@ class ArmorPaintTexturesPublishPlugin(HookBaseClass):
             raise Exception("Texture files not written: %s" % (", ".join(missing),))
         super().publish(settings, item)
 
+    def finalize(self, settings, item):
+        finalize = super().finalize  # ShotGrid injoignable : voir le moteur (lot C5)
+        self.parent.engine.finalize_publish(item, self.logger, lambda: finalize(settings, item))
+
     def _check_work_template(self, item, copied):
         # Les noms viennent du template des textures, mais le canal et l'extension y sont mis par ArmorPaint à la place
         # des marqueurs <channel> et <ext>, que les filtres des clés n'ont pas vus (op texture_pattern) : un canal
