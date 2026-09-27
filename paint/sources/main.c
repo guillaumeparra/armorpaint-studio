@@ -436,4 +436,8 @@ void _kickstart() {
 #endif
 
 	iron_start();
+#ifdef WITH_EXTERNAL // STUDIO-PATCH(batch-report): report and exit code of a --background run, see plugins/external/PATCHES.md
+	void studio_batch_finish(void);
+	studio_batch_finish();
+#endif
 }

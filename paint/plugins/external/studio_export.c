@@ -13,6 +13,7 @@
 #include "../../sources/types.h"
 #include "studio.h"
 #include "studio_atlas.h"
+#include "studio_batch.h"
 #include "studio_export_naming.h"
 #include "studio_exr.h"
 #include "studio_exr_codec.h"
@@ -1686,6 +1687,9 @@ bool studio_export_begin(char *path, bool bake_material) {
 		return true; // passe interne (plan) : l'upstream déroule ses boucles, studio_export_layers intercepte
 	}
 	const char *name = current_preset_name();
+	if (args_export_textures && !ex.args_consumed) {
+		studio_batch_apply_cli(); // --export-mode, --export-naming, --export-color-space (lot B7)
+	}
 	if (args_export_textures) {
 		ex.args_consumed = true;
 	}
@@ -1694,9 +1698,11 @@ bool studio_export_begin(char *path, bool bake_material) {
 	if (!inline_preset) {
 		scan_presets(); // relus à chaque export : un preset ajouté ou modifié compte sans relancer ArmorPaint
 		e = find_entry(name);
-		if (e == NULL) {
-			return true; // preset upstream
-		}
+	}
+	studio_batch_export_begin(path, name, inline_preset || e != NULL, (int)g_context->layers_export,
+	                          g_context->layers_destination == EXPORT_DESTINATION_DISK, ex.preflight_only);
+	if (!inline_preset && e == NULL) {
+		return true; // preset upstream
 	}
 	if (g_context->layers_destination == EXPORT_DESTINATION_PACK_INTO_PROJECT) {
 		report(false, "Studio preset %s: textures packed into the project use ArmorPaint's generic writer (8-bit, preset "
@@ -1810,6 +1816,7 @@ bool studio_export_begin(char *path, bool bake_material) {
 	}
 	free(text);
 	if (last_report.blocking > 0 || ex.preflight_only) {
+		studio_batch_export_end(last_report.blocking == 0, NULL);
 		finish();
 		return false;
 	}
@@ -1841,6 +1848,7 @@ bool studio_export_layers(char *path, char *base, char *f, char *udim, slot_laye
 
 bool studio_export_end(void) {
 	if (ex.phase == PHASE_IDLE) {
+		studio_batch_export_end(true, NULL); // export upstream : ses fichiers sont passés par studio_batch_on_file
 		return true;
 	}
 	if (ex.phase == PHASE_PLANNING) {
@@ -1860,10 +1868,14 @@ bool studio_export_end(void) {
 		for (int i = 0; i < ex.note_count; ++i) {
 			report(false, "Texture export: %s", ex.notes[i]);
 		}
+		for (int i = 0; i < ex.staged_count; ++i) {
+			studio_batch_on_file(ex.staged[i].path);
+		}
 	}
 	else {
 		show_text("Texture export failed: nothing was replaced", ex.error, true);
 	}
+	studio_batch_export_end(ok, ok ? manifest : NULL);
 	free(manifest);
 	ex.last_ok = ok;
 	finish(); // retire aussi les fichiers temporaires restants

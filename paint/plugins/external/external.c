@@ -1,6 +1,7 @@
 #include "studio.h"
 #include "studio_atlas.h"
 #include "studio_audit.h"
+#include "studio_batch.h"
 #include "studio_exec.h"
 #include "studio_export.h"
 #include "studio_export_window.h"
@@ -39,4 +40,5 @@ void external_init(void) {
 	studio_atlas_init();
 	studio_export_init();
 	studio_export_window_init();
+	studio_batch_init(); // en dernier : vérifie la ligne de commande avec les presets et OCIO chargés (lot B7)
 }

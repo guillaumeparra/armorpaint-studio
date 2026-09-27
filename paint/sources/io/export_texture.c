@@ -62,6 +62,10 @@ static void export_texture_write_texture(char *file, buffer_t *pixels, i32 type,
 		return;
 	}
 
+#ifdef WITH_EXTERNAL // STUDIO-PATCH(batch-report): files listed in the --background report, see plugins/external/PATCHES.md
+	void studio_batch_on_file(const char *path);
+	studio_batch_on_file(file);
+#endif
 	if (bits == 8 && g_context->format_type == TEXTURE_LDR_FORMAT_PNG) {
 		iron_write_png(file, pixels, res_x, res_y, format);
 	}

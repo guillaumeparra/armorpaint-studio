@@ -2,7 +2,7 @@
 
 // Lots B2, B4, B5 : export de textures par preset studio (studio_preset.h). Les presets studio sont seulement lus (rien
 // n'est installé ni écrit) ; quand l'un d'eux est choisi (fenêtre d'export, studio_export_window.h ; --export-textures
-// --export-preset <nom> ; studio_export_run ; Ctrl+E), l'export passe par ici :
+// <type> <nom> <dossier>, options de studio_batch.h ; studio_export_run ; Ctrl+E), l'export passe par ici :
 //   1. passe à blanc d'export_texture_run : l'upstream parcourt objets, atlas et tuiles, studio_export_layers note les
 //      fichiers qu'il écrirait (plan) ;
 //   2. préflight (studio_preflight.h) : bloquant -> rien n'est écrit, rapport affiché ;

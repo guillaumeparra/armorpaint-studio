@@ -63,6 +63,10 @@ void console_info(char *s) {
 }
 
 void console_error(char *s) {
+#ifdef WITH_EXTERNAL // STUDIO-PATCH(batch-report): errors fail a --background run (exit code, report), see plugins/external/PATCHES.md
+	void studio_batch_on_error(const char *message);
+	studio_batch_on_error(s);
+#endif
 	console_message_timer = 8.0;
 	console_message       = string_copy(s);
 	console_message_color = 0xffaa0000;
@@ -71,6 +75,10 @@ void console_error(char *s) {
 }
 
 void console_log(char *s) {
+#ifdef WITH_EXTERNAL // STUDIO-PATCH(batch-report): log of the --background report
+	void studio_batch_on_log(const char *message);
+	studio_batch_on_log(s);
+#endif
 	iron_log(s);
 	base_redraw_console();
 	string_array_push(console_last_traces, string_copy(s));
