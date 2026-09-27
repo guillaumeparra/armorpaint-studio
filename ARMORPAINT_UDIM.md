@@ -1,6 +1,7 @@
 # ArmorPaint — vers des UDIM natifs
 
 > **Décision 2026-09-26 : option B retenue** (un jeu de textures par tuile, « contexte de tuile », §6). Les options C et D sont écartées ; C reste une évolution possible de B si le nombre de draws devenait un problème (100+ tuiles).
+> **2026-09-27 : lots D0 et D1 faits** (§3, §7). D1 garde un objet de peinture par tuile : la tuile-donnée, le maillage à plages et la migration passent au lot D2 (§7, « Lot D1 »).
 > Document de réflexion à l'origine ; le §7 sert désormais de plan (chantier D de `ARMORPAINT_LOTS.md`). Il fait l'état des UDIM après le commit upstream `99156dfc` (« paint: paint across udims », 2026-09-15), liste les limites, compare quatre architectures et propose une feuille de route.
 > Base : branche `studio` au commit `fbde517a`. Estimations en **jours-homme**, avec les mêmes hypothèses que `ARMORPAINT_LOTS.md`.
 > ⚠️ **§5.2 de `ARMORPAINT_ANALYSE.md` est en partie périmé.** Depuis `99156dfc`, on peut peindre à travers les tuiles et les calques partagés ne sont plus dupliqués par tuile. Ce document le remplace pour tout ce qui touche aux UDIM.
@@ -51,8 +52,8 @@ Objectifs, numérotés pour la comparaison du §5 :
 | N5 | Mémoire proportionnelle aux tuiles réellement peintes. | ⚠️ Constante : on paie tout de suite une texture pleine, mais chaque tuile y est sous-résolue. |
 | N6 | Undo proportionnel à ce que le trait a touché. | ❌ Copie du calque entier. |
 | N7 | Nombre de tuiles sans plafond pratique (au moins 100 ; Mari va bien au-delà). | ❌ 64 au plus en grille, 100 à l'import FBX, sans message. |
-| N8 | Se combine avec les autres découpages : jeux de textures, split par matériau, export par objet. | ❌ Atlas et UDIM ne se combinent pas. Le split UDIM exclut le split par matériau. |
-| N9 | UV matériau fidèles aux UV du DCC : bruits procéduraux et dégradés continus d'une tuile à l'autre. | ⚠️ Seulement quand l'ordre des cases coïncide avec la grille UDIM (§3). |
+| N8 | Se combine avec les autres découpages : jeux de textures, split par matériau, export par objet. | ❌ Atlas et UDIM ne se combinent pas. Le split UDIM exclut le split par matériau. **D1** : split par matériau et par tuile, un jeu de textures par matériau, export par jeu et par tuile ; les jeux d'une tuile partagent sa case d'atlas jusqu'à D2. |
+| N9 | UV matériau fidèles aux UV du DCC : bruits procéduraux et dégradés continus d'une tuile à l'autre. | ⚠️ Seulement quand l'ordre des cases coïncide avec la grille UDIM (§3). **✅ D1** (L8), hors vue 2D. |
 | N10 | Projets existants relus sans perte. | — (contrainte de migration) |
 
 ---
@@ -142,11 +143,11 @@ Notre couche studio (`studio_export.c`, `studio_atlas.c`) se branche par-dessus 
 | L1 | Résolution par tuile = `res / ceil(√N)` | atlas en grille dans une texture de calque | 6 tuiles en 4K → 1365 px ; ré-agrandies à l'export | 🔴 |
 | L2 | Pas de résolution par tuile | `config_get_texture_res_*` global (109 références) ; `.arm` carré par calque ([import_arm.c:324](paint/sources/io/import_arm.c:324)) | Impossible d'avoir le visage en 8K et le corps en 2K | 🔴 |
 | L3 | Au-delà de 64 tuiles, tout finit dans la case 63, sans message | `tiles_spent` ([util_mesh.c:164](paint/sources/util/util_mesh.c:164)) | Peinture silencieusement fausse | ✅ D0 (🔴) |
-| L4 | Identité de la tuile tirée du nom de l'objet | `util_mesh_udim_tile(name)` | Renommer un objet dans l'onglet Meshes change sa tuile ; un nom `truc.1005` hors UDIM est pris pour une tuile | 🟠 |
-| L5 | Split obligatoire | `import_obj.c`, `build_udim_split` | Plus de split par matériau ni par objet ; N copies des sommets (OBJ) ; tout fusionné (FBX). Depuis D0 : un objet par objet (nœud FBX) et par tuile, avec ses seuls sommets ; reste le split par matériau (D1) | 🟠 |
+| L4 | Identité de la tuile tirée du nom de l'objet | `util_mesh_udim_tile(name)` | Renommer un objet dans l'onglet Meshes change sa tuile ; un nom `truc.1005` hors UDIM est pris pour une tuile. Depuis D1, un renommage garde la tuile ; reste le second cas (tuile-donnée, D2) | 🟡 D1 en partie (🟠) |
+| L5 | Split obligatoire | `import_obj.c`, `build_udim_split` | Plus de split par matériau ni par objet ; N copies des sommets (OBJ) ; tout fusionné (FBX). Depuis D0 : un objet par objet (nœud FBX) et par tuile, avec ses seuls sommets ; depuis D1, aussi par matériau et par tuile. Reste le split lui-même, un objet par tuile (D2) | 🟡 D0-D1 en partie (🟠) |
 | L6 | Bords de case | cases jointives, sans gouttière | Le filtrage bilinéaire et la dilatation débordent d'une case sur sa voisine : liseré aux bords des îlots collés au bord de tuile | 🟠 |
 | L7 | Grille carrée | `stride = ceil(√N)` | 5 tuiles → grille 3×3 : 44 % de VRAM perdue ; 10 tuiles → 4×4 : 37 % | 🟡 |
-| L8 | UV matériau ≠ UV du DCC | `atlas_uv × stride` = UV locale + (colonne, rangée) de la case | Pour 1001-1004 en grille 2×2, 1003 reçoit le décalage (0, 1) au lieu de (2, 0) : bruits UV et dégradés discontinus entre tuiles voisines | 🟡 |
+| L8 | UV matériau ≠ UV du DCC | `atlas_uv × stride` = UV locale + (colonne, rangée) de la case | Pour 1001-1004 en grille 2×2, 1003 reçoit le décalage (0, 1) au lieu de (2, 0) : bruits UV et dégradés discontinus entre tuiles voisines | ✅ D1 (🟡) |
 | L9 | Deux espaces coexistent (atlas / tuile) | `layers_udim_remap` à chaque flatten ou export | Copies GPU, 4 cibles statiques, perte de résolution dans les deux sens | 🟡 |
 | L10 | Mémoire et undo non proportionnels | un calque = 3 RT pleine résolution ; undo = copie du calque entier ([util_layer.c:70](paint/sources/util/util_layer.c:70)) | Toucher une tuile sauvegarde toutes les tuiles ; dès 8K, l'undo tombe à 4 puis 1 pas | 🟡 |
 | L11 | Import : tuile ≥ 10 en U | `1000 + v·10 + u + 1` jamais borné | u = 10 donne 1011, qui collisionne avec (0, 1) | ✅ D0 (🟠) |
@@ -155,10 +156,15 @@ Notre couche studio (`studio_export.c`, `studio_atlas.c`) se branche par-dessus 
 | L14 | FBX : plafond de 100 tuiles, premier jeu d'UV seulement, tous les nœuds fusionnés | `io_fbx.c:10`, `:222`, `:274` | Géométrie perdue sans message | ✅ D0 (🟠) |
 | L15 | CLI `--export-textures` toujours en Visible | `args.c:161` | Pas d'export par tuile en batch (notre `studio_export_run` contourne) | 🟡 |
 | L16 | `atlas_objects` indexé par position | tableau parallèle à `paint_objects` | Trier ou supprimer dans Meshes désynchronise (tâche `task_24e2330f`) | 🟡 |
+| L17 | Cases renumérotées quand la table des tuiles change | case = rang de la tuile dans la table triée, grille `ceil(√N)` ; les calques d'atlas ne sont pas recopiés | Ajouter un maillage qui apporte une tuile, supprimer le dernier objet d'une tuile ou passer de 4 à 5 tuiles (grille 2×2 → 3×3) décale les cases : la peinture des calques partagés (et limités à un jeu) reste en place et passe à une autre tuile. Constaté le 2026-09-27 : 1001, 1002 et 1011 peintes, puis un maillage en 1003 ajouté : la 1003 montre la peinture de la 1011, l'export de la 1011 est vide. Les calques d'une tuile ne bougent pas | 🔴 → D2 |
 
 **Phase 0 faite le 2026-09-27** (macOS) : L3 et L11 à L14 corrigées, L5 en partie, par les patches `udim-import`,
 `fbx-split` et `udim-tile-limit` (`paint/plugins/external/PATCHES.md`). L'import donne aussi le conseil de résolution
 du tableau ci-dessous. L8 passe en phase 1 et L6 en phase 2 (§7).
+
+**Lot D1 fait le 2026-09-27** (macOS) : L8 corrigée, L4 et L5 en partie, N8 à l'export (jeux × tuiles), par les
+patches `udim-core`, `udim-material-uv`, `udim-export-sets`, `udim-tile-name` et la partie D1 d'`udim-import` et
+`fbx-split`. L17 trouvée en route, laissée à la phase 2 (§7, « Lot D1 »).
 
 **Tableau utile pour la production.** Avec le système actuel, la résolution projet nécessaire se déduit du nombre de tuiles :
 
@@ -315,7 +321,7 @@ typedef struct mesh_tile_range {
 ### 6.2 Import sans split
 
 - L'OBJ garde le calcul actuel des tuiles (`part->udims`). Mais au lieu de créer N objets, il **concatène les N listes d'index** dans l'ordre des tuiles et enregistre les plages. Les UV restent renormalisées 0-1 : bonne précision en `i16`.
-- Split par objet ou par matériau **et** UDIM deviennent orthogonaux : un objet `body` peut couvrir 1001 à 1004 (N8).
+- Split par objet ou par matériau **et** UDIM deviennent orthogonaux : un objet `body` peut couvrir 1001 à 1004 (N8). Le lot D1 a fait le split par matériau et par tuile (objets `<matériau>.<tuile>`, un jeu de textures par matériau) ; l'objet unique à plages reste pour la phase 2.
 - Corrections L11 à L14 : **faites en phase 0** (2026-09-27, patches `udim-import` et `fbx-split`), reprises telles quelles :
   - tuile calculée par `floorf`, avec une tolérance aux bords (`base/sources/iron_udim.c`), plus par `(int)` ;
   - une uv hors des tuiles 1001-1990 (négative, u ≥ 10, nan) fait refuser le fichier, avec un message ;
@@ -325,7 +331,7 @@ typedef struct mesh_tile_range {
 
 ### 6.3 Rendu viewport
 
-- `render_path` dessine chaque objet **plage par plage**. Avant chaque plage : `layers_set_tile(t)`, puis l'uniforme `_udim_offset = (u, v)` pour les UV matériau.
+- `render_path` dessine chaque objet **plage par plage**. Avant chaque plage : `layers_set_tile(t)`, puis l'uniforme `_udim_offset = (u, v)` pour les UV matériau. Le lot D1 a posé `_udim_offset`, par objet de tuile (`util_udim_draw_paint_meshes`) : il passera à la plage.
 - Le shader de maillage n'échantillonne plus en `tex_coord_atlas` mais en `tex_coord` (UV locale). `make_mesh.c` **se simplifie** : le varying atlas disparaît.
 - Le composite des calques pour l'affichage (le « flatten » vers `texpaint` du viewport) se fait par tuile. Un cache par tuile évite de recomposer les tuiles non modifiées. C'est le point de performance à surveiller.
 
@@ -365,7 +371,7 @@ pour chaque plage de l'objet peint :
 ### 6.7 Export
 
 - **Per UDIM Tile** : une passe par tuile, **sans recadrage ni ré-agrandissement**, à la résolution de la tuile (N4). `<UDIM>` vient de `udim_tiles[t].id` et non plus d'un nom d'objet.
-- **UDIM × jeux de textures** : un jeu de textures devient un ensemble de tuiles. L'export écrit `<atlas>` × `<UDIM>` (N8). Notre `studio_export` sait déjà nommer les deux ; il suffit de lui passer la tuile au lieu de `object_name`.
+- **UDIM × jeux de textures** : un jeu de textures devient un ensemble de tuiles. L'export écrit `<atlas>` × `<UDIM>` (N8). Notre `studio_export` sait déjà nommer les deux ; il suffit de lui passer la tuile au lieu de `object_name`. Fait au lot D1 dans l'atlas actuel (`udim-export-sets`) : `<fichier>_<jeu>_<canal>.<tuile>`, `<atlas>` et `<UDIM>` dans le preset studio.
 - **Résolution par map** (studio) : elle se combine avec la résolution par tuile par une échelle relative (« map ½ de la tuile »), ou alors on la retire en mode UDIM. **Décision de produit à prendre.**
 - CLI `--export-textures` : un argument de mode (L15). Au passage, ça rend notre `studio_export_run` moins nécessaire.
 
@@ -397,9 +403,9 @@ Le moniteur VRAM du plan OCIO/export (si on le fait) doit afficher le détail **
 
 ### 6.10 Interface
 
-- Onglet **Meshes** : un nœud par objet, avec ses tuiles en enfants. Chaque tuile affiche sa résolution (menu), sa VRAM et une action « isoler » (n'afficher et ne peindre que cette tuile).
-- Import : l'option « Split By: UDIM Tile » disparaît au profit d'une case **« UDIM » cochée automatiquement** dès que des UV sortent de 0-1. Le split par objet ou matériau reste disponible à côté.
-- Fenêtre d'export studio : la ligne « N UDIM tiles » devient un tableau des tuiles (id, résolution, jeu). La section Jeux de textures ne se masque plus en mode UDIM.
+- Onglet **Meshes** : un nœud par objet, avec ses tuiles en enfants. Chaque tuile affiche sa résolution (menu), sa VRAM et une action « isoler » (n'afficher et ne peindre que cette tuile). Pas fait au lot D1 : avec la phase 2.
+- Import : l'option « Split By: UDIM Tile » disparaît au profit d'une case **« UDIM » cochée automatiquement** dès que des UV sortent de 0-1. Le split par objet ou matériau reste disponible à côté. Lot D1 : la case « UDIM Tiles » est là, à côté d'Object / Material ; elle ne se coche pas encore d'elle-même.
+- Fenêtre d'export studio : la ligne « N UDIM tiles » devient un tableau des tuiles (id, résolution, jeu). La section Jeux de textures ne se masque plus en mode UDIM. Lot D1 : la section des jeux s'affiche en Per UDIM Tile, avec le résumé « N texture set tiles » ; le tableau des tuiles reste à faire.
 
 ---
 
@@ -408,8 +414,8 @@ Le moniteur VRAM du plan OCIO/export (si on le fait) doit afficher le détail **
 | Phase | Contenu | Livrable testable | Estimation |
 |---|---|---|---|
 | **0 — Correctifs sans regret** ✅ 2026-09-27 | L11 à L14 dans l'importeur OBJ et FBX (refus avec message des uv hors 1001-1990, triangles à cheval coupés, plafond FBX dynamique, un objet par objet et par tuile). Erreur explicite au-delà de 64 tuiles (L3). Résolution projet conseillée à l'import (tableau du §3). **Reportés :** UV matériau réelles (L8) en phase 1 : un uniforme `_udim_offset` par objet ne s'applique pas au maillage fusionné, peint en un seul draw, alors que la phase 1 dessine par plage ; gouttière et clamp entre cases (L6) en phase 2, qui supprime l'atlas qu'ils corrigeraient. | `.tests/obj.sh` (udim/), `.tests/fbx.sh`, `.tests/udim_app.sh` : UV négatives, u ≥ 10, triangles à cheval, 70 tuiles (atlas, peinture, export), conseil de résolution | **8-12 j** |
-| **1 — Tuile = donnée, maillage à plages** | `g_project->udim_tiles` sauvé dans le `.arm`. Import sans split, avec plages d'index. Rendu viewport par plage. **Stockage encore en atlas** : les plages remplacent les objets, l'atlas reste pour les calques. Migration des objets `nom.1xxx`. UV matériau = UV UDIM réelles (L8, reporté de la phase 0), par un décalage par plage. | Un objet `body` sur 4 tuiles, split par matériau et UDIM ensemble, jeux de textures × UDIM à l'export ; bruit procédural continu entre 1003 et 1004 | **10-15 j** |
-| **2 — Jeu de textures par tuile** | `layer_tile_t`, `layers_set_tile`, boucles dans la peinture, le flatten, les masques, la dilatation, le bake et l'export. Nouveau bloc `.arm` et migration depuis l'atlas. Suppression de l'espace atlas UDIM (`tex_coord_atlas`, `layers_udim_remap`). **Résolution encore uniforme.** | Export Per UDIM Tile bit à bit identique à un rendu d'une seule tuile en projet 1 tuile ; peinture continue à travers 1001/1002 | **20-30 j** |
+| **1 — Tuile = donnée, maillage à plages** 🟡 2026-09-27, en partie | **Fait (lot D1)** : UV matériau = UV UDIM réelles (L8, reporté de la phase 0), par un décalage par objet de tuile ; split par matériau et par tuile ; jeux de textures × tuiles à l'export ; renommage qui garde la tuile. **Passé en phase 2** : `g_project->udim_tiles` sauvé dans le `.arm`, import sans split avec plages d'index, rendu viewport par plage, migration des objets `nom.1xxx` (voir « Lot D1 » ci-dessous). Stockage encore en atlas. | `.tests/udim_app.sh` sections 6 à 9, `.tests/sets_app.sh` section 6, `.tests/fbx.sh` : bruit procédural continu entre 1003 et 1004 et entre 1001 et 1011, `skin` et `cloth` par tuile, export jeux × tuiles | **10-15 j** (la part reportée est à réestimer avec la phase 2) |
+| **2 — Jeu de textures par tuile** | Reçu de la phase 1 : `udim_tiles` dans le `.arm`, maillage à plages (un draw par plage dans les trois backends), migration des objets `nom.1xxx`. `layer_tile_t`, `layers_set_tile`, boucles dans la peinture, le flatten, les masques, la dilatation, le bake et l'export. Nouveau bloc `.arm` et migration depuis l'atlas. Suppression de l'espace atlas UDIM (`tex_coord_atlas`, `layers_udim_remap`), ce qui corrige L17. **Résolution encore uniforme.** | Export Per UDIM Tile bit à bit identique à un rendu d'une seule tuile en projet 1 tuile ; peinture continue à travers 1001/1002 | **20-30 j** |
 | **3 — Résolution par tuile** | `res_x`/`res_y` par tuile, UI Meshes, dilatation proportionnelle, inventaire et correction des outils en texels, export natif par tuile | Visage 8K + corps 2K, export aux deux résolutions, sans ré-échantillonnage | **6-10 j** |
 | **4 — Mémoire** | Allocation paresseuse par tuile et par canal, undo par tuile sale, éviction LZ4, moniteur VRAM par tuile | 10 tuiles 4K × 8 calques qui tiennent sur une machine de 24 Go | **12-20 j** |
 | **Total B** | | | **~56-87 j** (phase 0 comprise) |
@@ -418,13 +424,56 @@ Le moniteur VRAM du plan OCIO/export (si on le fait) doit afficher le détail **
 - La phase 2 est **le point de non-retour pour le fork** : format `.arm` divergent et gros patches dans les fichiers chauds.
 - La phase 3 n'a pas de sens sans la phase 4 sur des assets réels.
 
+### Lot D1 (2026-09-27) : fait, reporté
+
+**Décision : un objet de peinture par tuile, comme l'upstream.** La phase 1 prévoyait de remplacer les objets
+`nom.1xxx` par des plages d'index d'un seul maillage. Le lot D1 les garde, pour trois raisons :
+- iron ne sait dessiner qu'un index buffer entier (`gpu_draw_internal`, sous Metal `indexCount:current_ib->count` et
+  `indexBufferOffset:0`) : dessiner par plage demande un draw à plage dans les trois backends (Metal, D3D12, Vulkan) ;
+- chaque objet de tuile a déjà son draw : un uniforme `_udim_offset` par objet suffit pour L8, sans plages ;
+- le `.arm` ne change pas. Il reste lisible par ArmorPaint et par les builds studio précédents : aucun format ne
+  diverge avant le go / no-go de la phase 2.
+
+La tuile-donnée (`udim_tiles` dans le `.arm`), l'import sans split à plages d'index, le rendu par plage et la migration
+des objets `nom.1xxx` passent donc à la phase 2, qui change de toute façon le format et rend par tuile.
+
+**Fait** (patches `udim-core`, `udim-material-uv`, `udim-export-sets`, `udim-tile-name`, et la partie D1
+d'`udim-import` et `fbx-split` ; détail et mutations dans `paint/plugins/external/PATCHES.md`) :
+- UV matériau = UV UDIM réelles (L8) : les calques partagés (et limités à un jeu) sont peints objet de tuile par objet
+  de tuile avec `_udim_offset`, les calques d'une tuile lisent `_udim_tile`. Un bruit procédural est continu de 1003 à
+  1004 et de 1001 à 1011, et le même sur le calque d'une tuile que sur le calque partagé. Le bake et les outils qui
+  pointent (Picker, ColorID, Material, Cursor) gardent le maillage fusionné ;
+- import OBJ et FBX « Material » + « UDIM Tiles » : un objet par matériau et par tuile (`skin.1001`), rassemblé d'un
+  objet du fichier à l'autre, et un jeu de textures par matériau ;
+- export Per UDIM Tile par jeu : `<fichier>_<jeu>_<canal>.<tuile>`, chaque jeu sur ses seules tuiles ; le preset
+  studio remplit `<atlas>` et `<UDIM>` ; la fenêtre d'export montre les jeux dans ce mode. Deux bugs upstream des
+  masques de jeu corrigés en route : l'export par tuile d'un calque limité à un jeu plantait (lecture hors du tableau
+  des objets), et Selected avec des jeux sortait tous les calques ;
+- renommer un objet dans l'onglet Meshes garde sa tuile (L4 en partie) ;
+- scripts `studio_layer_new` et `studio_object_rename`, pour les bancs.
+
+Tests : `.tests/udim_app.sh` sections 6 à 9, `.tests/sets_app.sh` section 6, `.tests/fbx.sh` (matériau × UDIM) ;
+sans le correctif (mutations), leurs contrôles échouent.
+
+**Limites connues après D1**
+- L17 (§3) : les cases se décalent quand la table des tuiles change. Pas de garde en D1 ; le stockage par tuile de la
+  phase 2 la corrige. En attendant : importer toutes les tuiles avant de peindre (README d'`external/`).
+- Les jeux d'une tuile partagent sa case d'atlas : là où leurs uv se chevauchent, un calque partagé donne les mêmes
+  texels aux deux jeux. Les calques limités à un jeu restent séparés.
+- Après un import en ajout, les jeux ne correspondent plus aux objets : la fenêtre les ignore (« Atlas 1 ») et l'export
+  par tuile sort sans jeux, jusqu'à ce qu'on les redéfinisse. Un ajout ne crée pas de jeux par matériau.
+- En Selected, le preset studio met le nom du jeu dans `<object>`.
+- Vue 2D : le plan 2D n'est pas un objet de tuile ; les matériaux y gardent l'espace de la case.
+- La tuile vient toujours du nom : un objet `truc.1005` hors UDIM reste une tuile (L4).
+- Onglet Meshes : les tuiles d'un objet ne sont pas regroupées sous lui (§6.10).
+
 ---
 
 ## 8. Coût de maintenance du fork
 
 - **Surface.** La phase 2 touche environ 12 fichiers upstream, dont les 6 plus actifs (§4.8). Il faut compter **une demi-journée à deux jours de résolution de conflits par pull** sur la durée de vie du fork, davantage si upstream continue à retravailler les UDIM, ce qui est probable après `99156dfc`.
 - **Format.** Des `.arm` écrits par notre build ne s'ouvrent plus dans un ArmorPaint officiel. Il faut prévoir un **export « compatible upstream »**, qui écrit l'atlas en grille avec perte, si des fichiers doivent circuler hors studio.
-- **Règle `PATCHES.md`.** Un `STUDIO-PATCH(udim-*)` par point d'entrée : `udim-tiles`, `udim-ranges`, `udim-layer-tiles`, `udim-arm`, `udim-export`. Chacun a son `.patch` et son `.base`, et on accepte que `check_patches.sh` en signale souvent. Le registre existant supporte ce fonctionnement, mais le volume change d'ordre de grandeur (aujourd'hui : injections de quelques lignes).
+- **Règle `PATCHES.md`.** Un `STUDIO-PATCH(udim-*)` par point d'entrée : `udim-tiles`, `udim-ranges`, `udim-layer-tiles`, `udim-arm`, `udim-export`. Au lot D1 : `udim-core` (le fichier `util_udim.c`), `udim-material-uv`, `udim-export-sets`, `udim-tile-name`. Chacun a son `.patch` et son `.base`, et on accepte que `check_patches.sh` en signale souvent. Le registre existant supporte ce fonctionnement, mais le volume change d'ordre de grandeur (aujourd'hui : injections de quelques lignes).
 - **Pour limiter la surface :**
   - mettre la logique (table des tuiles, allocation, éviction, migration) dans un **nouveau fichier** `paint/sources/util/util_udim.c`, qu'upstream ne touche pas ;
   - ne garder dans les fichiers chauds que les **boucles** `for tile … layers_set_tile(tile)` et les points d'appel ;
@@ -452,6 +501,7 @@ Le moniteur VRAM du plan OCIO/export (si on le fait) doit afficher le détail **
 ## 10. Questions ouvertes et vérifications à faire
 
 - [x] **L12** : écriture hors tableau confirmée le 2026-09-26. Deux triangles, le second en u ∈ [-1,8 ; -1,2], import `Split by: UDIM Tile` : ASan signale un `heap-buffer-overflow` sur `num[tile] += 3` (`iron_obj.c:569`), 4 octets avant le tableau. Corrigé par le lot D0 le 2026-09-27 (patch `udim-import`, cas `neg` d'`.tests/obj.sh`).
+- [ ] **L17** : un garde en attendant la phase 2 ? Avertir quand un ajout ou une suppression change la table des tuiles d'un projet déjà peint, ou recopier les cases des calques d'atlas.
 - [ ] Inventorier les outils qui travaillent **en texels** (flou, smudge, clone, taille de brosse en pixels, rayon de dilatation) pour la phase 3.
 - [ ] Composite par tuile : mesurer le coût de `layers_flatten` × N tuiles à chaque trait. Faut-il un cache par tuile, ou recomposer seulement la tuile sale ?
 - [ ] Raytrace et bake : garder l'atlas du maillage fusionné comme proxy, ou passer au bake par tuile ?
