@@ -40,7 +40,8 @@ Modules, un par lot (voir `ARMORPAINT_LOTS.md` à la racine d'armorpaint) :
 | `studio_ocio`, `studio_export` (color_space OCIO) | A3 | ✅ export : chaque texture convertie vers un espace OCIO de la configuration, préflight, manifeste (macOS) |
 | `studio_ocio_view`, `studio_ocio_lut` | A2 | ✅ viewport : transformation display/view/look d'OCIO en LUT 3D dans le compositeur, menu Color (macOS) |
 | `studio_ocio_import` | A4 | ✅ textures importées : espace source par texture (nom, file_rule, format, choix de l'artiste), pixels convertis vers l'espace de travail au décodage, espaces dans le `.arm` (macOS) |
-| `studio_ocio` (préférences, shader exact) | A5, A6 | à faire |
+| `studio_prefs`, `studio_project`, `studio_ocio_prefs` | A5 | ✅ réglages couleur : préférences studio (`studio_prefs.json`, onglet Color), espace de travail gardé dans le `.arm`, textures reconverties quand il change (macOS) |
+| `studio_ocio` (shader exact) | A6 | à faire |
 | `studio_sg`, `studio_shotgrid`, `studio_json`, `assets/studio_sg_*.py` | C2 | ✅ sidecar ShotGrid (Toolkit), superviseur, API de scripting (macOS ; validé sur site simulé) |
 | `studio_workfiles`, `tk-armorpaint/` | C3 | ✅ Workfiles (tk-multi-workfiles2) et menu ShotGrid, par le moteur Toolkit tk-armorpaint (macOS ; validé sur site simulé) |
 | `studio_publish`, `tk-armorpaint/hooks/tk-multi-publish2/` | C4 | ✅ publish ShotGrid par tk-multi-publish2 : projet copié par ArmorPaint, textures exportées puis publiées, séquences `<UDIM>`, vignette du viewport (macOS ; validé sur site simulé) |
@@ -61,7 +62,9 @@ tools/armorpaint.sh --shotgrid-demo [dossier]   # sur le site ShotGrid simulé, 
 ## Variables d'environnement
 
 Réglages de secours, lus au démarrage. Ils existent pour diagnostiquer et pour revenir au comportement
-upstream sans rebuild ; les réglages destinés aux artistes passeront par l'UI et les presets (lots B4/B6).
+upstream sans rebuild ; les réglages destinés aux artistes passeront par l'UI et les presets (lots B4/B6). Les
+réglages couleur des artistes sont dans les préférences studio (« Réglages (A5) ») : les variables OCIO
+l'emportent sur elles, pour le lanceur d'un show.
 
 | Variable | Effet |
 |---|---|
@@ -75,11 +78,12 @@ upstream sans rebuild ; les réglages destinés aux artistes passeront par l'UI 
 | `STUDIO_PYTHON` | interpréteur Python 3 avec PySide6 de la fenêtre d'export (défaut : `STUDIO_SG_PYTHON`, puis `python3`) |
 | `STUDIO_EXPORT_WINDOW` | script de la fenêtre d'export à la place de `data/studio_export_window.py` |
 | `STUDIO_EXPORT_THREADS` | threads de composition et d'encodage des exports studio (défaut : cœurs matériels) |
-| `OCIO` | configuration OpenColorIO (fichier `.ocio`, archive `.ocioz` ou URI `ocio://`) ; défaut : `ocio://studio-config-latest` |
-| `STUDIO_OCIO_WORKING_SPACE` | espace de travail d'ArmorPaint dans la configuration OCIO (nom, alias ou rôle), quand elle n'en a pas de reconnaissable ; voir « Gestion couleur OCIO » |
+| `STUDIO_PREFS` | fichier des préférences studio à la place de `studio_prefs.json` ; en `--background`, seul moyen de les lire et de les écrire ; voir « Réglages (A5) » |
+| `OCIO` | configuration OpenColorIO (fichier `.ocio`, archive `.ocioz` ou URI `ocio://`), à la place de la préférence ; défaut : la préférence, sinon `ocio://studio-config-latest` |
+| `STUDIO_OCIO_WORKING_SPACE` | espace de travail des nouveaux projets (nom, alias ou rôle), à la place de la préférence ; un projet enregistré garde le sien. Sert aussi de repli à l'automatique quand la configuration n'a pas d'espace reconnaissable ; voir « Gestion couleur OCIO » |
 | `STUDIO_OCIO_LIB` | chemin de `libstudio_ocio` pour un build sans liaison statique (bancs de test, Linux) |
-| `STUDIO_OCIO_VIEWPORT=0` | viewport au tonemap filmique d'ArmorPaint au démarrage (réactivable par le menu Color) |
-| `STUDIO_OCIO_DISPLAY`, `STUDIO_OCIO_VIEW`, `STUDIO_OCIO_LOOK` | transformation d'affichage du viewport au démarrage ; défaut : display et view par défaut de la configuration, sans look. Une valeur inconnue est journalisée et remplacée par le défaut |
+| `STUDIO_OCIO_VIEWPORT=0` | viewport au tonemap filmique d'ArmorPaint au démarrage (réactivable par le menu Color), à la place du choix gardé dans les préférences ; une autre valeur : OCIO |
+| `STUDIO_OCIO_DISPLAY`, `STUDIO_OCIO_VIEW`, `STUDIO_OCIO_LOOK` | transformation d'affichage du viewport au démarrage, à la place du dernier choix du menu Color ; dès que l'une est définie, les trois viennent de l'environnement. Défaut : display et view par défaut de la configuration, sans look. Une valeur inconnue est journalisée et remplacée par le défaut |
 | `STUDIO_OCIO_IMPORT=0` | textures importées sans conversion OCIO (upstream) ; l'entrée des espaces d'un `.arm` n'est ni lue ni réécrite ; voir « Textures importées (A4) » |
 
 ## Exécution (C1)
@@ -719,7 +723,7 @@ aplatis (`png`/`jpg` : 8 bits, `exr16` : half, `exr32` : float), comme dans l'up
 
 Point d'injection upstream : `STUDIO-PATCH(studio-export)` (PATCHES.md).
 
-## Gestion couleur OCIO (A0, A1, A2, A3, A4)
+## Gestion couleur OCIO (A0, A1, A2, A3, A4, A5)
 
 **Décision A0 : le vrai OpenColorIO**, pas une réimplémentation. Version épinglée dans `.ocio/CMakeLists.txt`
 (`STUDIO_OCIO_TAG`, aujourd'hui `v2.5.2`, VFX Reference Platform CY2026), construite depuis ses sources avec ses
@@ -740,9 +744,11 @@ erreur devient un retour NULL/0/-1 et un message (`studio_ocio_lib_error()`, par
 - **Windows : à faire.**
 - Sans bibliothèque, ArmorPaint se construit et démarre sans OCIO ; `studio_ocio_status()` dit pourquoi.
 
-**Configuration**, dans l'ordre : chemin explicite (`studio_ocio_reload`, préférences du lot A5), `$OCIO`, puis la
-configuration studio intégrée à OCIO (`ocio://studio-config-latest`, ACES 2.0). Un `$OCIO` invalide est une erreur,
-sans repli : un repli cacherait au studio que sa configuration n'est pas chargée. Le log de démarrage l'affiche :
+**Configuration**, dans l'ordre : chemin explicite (`studio_ocio_reload`, scripts), `$OCIO`, la préférence
+(« Réglages (A5) »), puis la configuration studio intégrée à OCIO (`ocio://studio-config-latest`, ACES 2.0).
+`$OCIO` passe avant la préférence : c'est le lanceur du show qui la choisit. Un `$OCIO` ou une préférence invalides
+sont une erreur, sans repli : un repli cacherait au studio que sa configuration n'est pas chargée. Le log de
+démarrage l'affiche :
 
 ```
 studio: OCIO 2.5.2, config "studio-config-v4.0.0_aces-v2.0_ocio-v2.5" from ocio://studio-config-latest (built-in default), 55 colorspaces, display "sRGB - Display", working space "Linear Rec.709 (sRGB)"
@@ -760,7 +766,8 @@ configuration par son équivalence avec l'espace intégré `lin_rec709_srgb` d'O
 dans les configurations ACES studio et CG, `Linear Rec.709 (sRGB)`. Cette recherche demande les rôles d'échange
 (`aces_interchange`, `cie_xyz_d65_interchange`). Une configuration maison qui ne les a pas doit le nommer par
 `STUDIO_OCIO_WORKING_SPACE` (nom, alias ou rôle, par exemple `scene_linear` si c'est bien du Rec.709 linéaire). Sans
-lui, les conversions sont bloquées et le statut dit pourquoi. Le projet le portera au lot A5.
+lui, les conversions sont bloquées et le statut dit pourquoi. Il se choisit aussi dans les préférences et le projet
+le garde : voir « Réglages (A5) ».
 
 ### Viewport (A2)
 
@@ -777,8 +784,8 @@ chargée dans les préférences s'applique après OCIO, sur les valeurs d'affich
 d'ArmorPaint), sous-menus Display, View et Look. Une view HDR est marquée « (HDR) » : le viewport est un affichage
 SDR 8 bits, elle y est sans intérêt. La transformation suit un rechargement de la configuration : si la view choisie
 n'y existe plus, celle par défaut la remplace (journalisé). Sans OCIO ou sans espace de travail, le viewport reste
-filmique et le statut dit pourquoi. Le choix n'est pas encore mémorisé : variables `STUDIO_OCIO_DISPLAY`/`_VIEW`/
-`_LOOK` en attendant les préférences du lot A5.
+filmique et le statut dit pourquoi. Le choix (case, display, view, look) est gardé dans les préférences studio
+d'une session à l'autre ; `STUDIO_OCIO_VIEWPORT` et `STUDIO_OCIO_DISPLAY`/`_VIEW`/`_LOOK` l'emportent.
 
 **Précision de la LUT** contre OCIO exact, en 1/255 après écrêtage à [0, 1], sur 400 000 couleurs (gris HDR,
 couleurs saturées, 19 stops, albédos éclairés ; `.tests/ocio_view_test.c`, configurations studio et CG) :
@@ -919,6 +926,71 @@ réécrite (celle d'un projet ouvert est gardée telle quelle).
 - Une texture déjà dans le cache d'ArmorPaint (capture du viewport) n'est pas décodée à nouveau : ses pixels
   restent tels quels. Les vignettes du navigateur de fichiers ne sont pas converties.
 
+### Réglages (A5)
+
+**Préférences studio.** Les réglages couleur sont gardés d'une session à l'autre dans `studio_prefs.json`, à côté du
+`config.json` d'ArmorPaint (dossier `data/` de l'app, ou dossier de sauvegarde du système quand l'app est dans un
+dossier protégé), ou dans le fichier `$STUDIO_PREFS`. Un fichier à part : `config_save()` d'ArmorPaint réécrit
+`config.json` champ par champ et y perdrait les clés du studio. Objet JSON plat, clés inconnues gardées (celles d'une
+autre version du studio), écrit à chaque changement par un fichier temporaire renommé. Illisible, il est journalisé,
+ignoré, et mis de côté en `.bak` à la première écriture. En `--background`, il n'est ni lu ni écrit sans
+`$STUDIO_PREFS` : un script ne dépend pas des réglages de l'artiste et ne les change pas.
+
+| Clé | Réglage | Variable qui l'emporte |
+|---|---|---|
+| `ocio.config` | configuration OCIO (fichier `.ocio`, archive `.ocioz`, URI `ocio://`) ; absente : l'intégrée | `OCIO` |
+| `ocio.working_space` | espace de travail des nouveaux projets (nom, alias ou rôle) ; absente : l'automatique | `STUDIO_OCIO_WORKING_SPACE` |
+| `ocio.viewport` | viewport par OCIO (`true`) ou filmique | `STUDIO_OCIO_VIEWPORT` |
+| `ocio.display`, `ocio.view`, `ocio.look` | dernier choix du menu Color | `STUDIO_OCIO_DISPLAY`, `_VIEW`, `_LOOK` |
+
+**Preferences > Color** (onglet ajouté par le patch `preferences-tab` ; menu Color, « Color Preferences... ») :
+configuration (champ, Browse, Built-in pour revenir à l'intégrée) et son statut ; espace de travail des nouveaux
+projets (« Automatic » ou un espace de la configuration) ; espace du projet courant et son origine ; chemin du
+fichier des préférences. Avec `$OCIO`, le champ est grisé : la préférence vaut pour les sessions sans lui.
+
+**Dans le projet.** L'espace de travail voyage dans l'entrée `studio_ocio.json` du paquet d'assets du `.arm`, avec la
+configuration qui l'a donné. ArmorPaint sans studio garde l'entrée telle quelle. Les entrées sont écrites juste avant
+l'encodage du projet (patch `project-entries`, module `studio_project`) :
+
+```json
+{
+	"version": 1,
+	"config": "studio-config-v4.0.0_aces-v2.0_ocio-v2.5",
+	"config_source": "ocio://studio-config-latest",
+	"working_space": "Linear Rec.709 (sRGB)",
+	"working_space_auto": true
+}
+```
+
+- Un nouveau projet prend `$STUDIO_OCIO_WORKING_SPACE`, sinon la préférence, sinon l'automatique, jusqu'à son
+  enregistrement, qui fige l'espace trouvé : rouvert, il garde cet espace, quels que soient la préférence et
+  l'environnement.
+- `"working_space_auto": true` : l'automatique, cherché à nouveau dans la configuration de la session.
+- Sans entrée (projet d'avant A5, ou enregistré par ArmorPaint sans studio) : l'automatique, les couleurs
+  d'ArmorPaint.
+- Rouvert avec une autre configuration : signalé dans la console.
+- Un espace nommé que la configuration ne connaît pas : erreur, sans repli ; les conversions sont bloquées jusqu'à
+  un autre choix.
+
+**Menu Color, Working Space** : l'espace du projet courant, « Automatic » ou un espace de la configuration, gardé au
+prochain enregistrement. Un espace de travail autre que l'automatique (ACEScg, par exemple) change le sens de toutes
+les valeurs d'ArmorPaint : le sélecteur de couleur et les couleurs des nœuds ne passent pas par OCIO, leurs valeurs
+sont lues dans cet espace.
+
+**Changement en cours de session** (configuration ou espace de travail) : les textures converties sont rechargées
+depuis leurs fichiers et converties à nouveau, chacune avec son espace source ; celles qui ne sont que dans le paquet
+d'assets gardent leurs pixels (signalé). Viewport et exports suivent. Les calques ne sont pas convertis : ce qui est
+peint garde ses valeurs.
+
+**Au démarrage**, hors `--background`, une boîte « Color Management » signale OCIO indisponible (configuration
+refusée, bibliothèque absente) ou un espace de travail introuvable, et dit où le corriger.
+
+**Non couvert.**
+- Les calques ne sont pas convertis quand l'espace de travail change : ArmorPaint n'a pas de conversion de calque.
+- Les couleurs de l'interface et du sélecteur ne passent pas par OCIO : ce sont les valeurs de l'espace de travail,
+  affichées telles quelles.
+- Deux instances d'ArmorPaint écrivent le même fichier de préférences sans verrou : la dernière écriture l'emporte.
+
 ### Scripts (minic)
 
 ```c
@@ -956,6 +1028,23 @@ int   studio_texture_set_color_space(char *file, char *color_space);  // nom, al
                                                  // texture de ce chemin dans le projet, le choix vaut pour son import
 int   studio_texture_dump(char *file, char *out);  // pour les bancs : pixels relus du GPU ("STX1", largeur, hauteur, format)
 int   studio_project_pack_assets(int on);        // option Pack Assets du menu File : 1/0, -1 pour lire ; rend la valeur d'avant
+
+// Réglages (A5)
+char *studio_prefs_path(void);                   // fichier des préférences studio (ignoré en --background sans $STUDIO_PREFS)
+char *studio_ocio_config_preference(void);       // "" : aucune (configuration intégrée)
+int   studio_ocio_set_config_preference(char *path);  // "" : aucune. Enregistrée et rechargée (gardée seulement avec $OCIO) ;
+                                                 // rend 1 si OCIO est prêt
+char *studio_ocio_config_origin(void);           // "explicit", "$OCIO", "preferences", "built-in default"
+char *studio_ocio_working_space_preference(void);  // espace des nouveaux projets ; "" : automatique
+int   studio_ocio_set_working_space_preference(char *name);  // "" : automatique ; 0 si inconnu, rien ne change
+char *studio_ocio_working_space_origin(void);    // "project", "project, automatic", "$STUDIO_OCIO_WORKING_SPACE",
+                                                 // "preferences", "automatic" ; "" sans espace de travail
+char *studio_ocio_working_space_error(void);     // pourquoi il n'y a pas d'espace de travail ; "" sinon
+int   studio_ocio_project_working_space_mode(void);  // 0 nouveau projet (variable, préférence, automatique), 1 automatique, 2 nommé
+char *studio_ocio_project_working_space_name(void);  // nom enregistré pour le projet ; "" sinon
+int   studio_ocio_set_project_working_space(int mode, char *name);  // gardé au prochain enregistrement ; 0 si inconnu, rien ne change
+int   studio_ocio_prefs_show(void);              // ouvre Preferences > Color ; 0 sans onglet
+int   studio_ocio_import_reconvert(void);        // recharge et reconvertit les textures converties ; rend leur nombre
 ```
 
 ## Tests
@@ -977,6 +1066,7 @@ python3 .tests/arm_paths.py <projet.arm> [fichier...]   # chemins des fichiers d
 .tests/ocio_export_app.sh [dossier]    # export OCIO (A3) dans l'app : pixels = PyOpenColorIO, préflight, manifeste, cas bloquants
 .tests/ocio_view_app.sh [dossier]      # viewport OCIO (A2) dans l'app : compositeur = PyOpenColorIO, menu (API), rechargement, variables
 .tests/ocio_import_app.sh [dossier]    # textures importées (A4) dans l'app : pixels = PyOpenColorIO par format, choix par texture, .arm rouvert et paquet d'assets, STUDIO_OCIO_IMPORT=0, nœud Image Texture
+.tests/ocio_prefs_app.sh [dossier]     # réglages couleur (A5) dans l'app : fichier des préférences, espace de travail du projet (.arm rouvert, autre configuration, erreurs), textures reconverties = PyOpenColorIO, viewport
 .tests/export_window_app.sh [dossier]  # fenêtre d'export (B6) dans l'app, Qt offscreen : état, préflight, export, fichiers décochés, blocage, réouverture, bits et résolution par map, sidecar, preset du projet ; PY=<python PySide6>
 <python PySide6> .tests/export_window_ui.py [dossier]  # fenêtre d'export contre un faux ArmorPaint : liste groupée (tuiles UDIM, objets), cases, décomptes, problèmes affichés, tableau des maps, sidecar, nom des fichiers, jeux de textures
 .tests/sets_app.sh [dossier]           # jeux de textures, nom des fichiers et UDIM dans l'app, avec les maillages de udim_gen.py ; PY=<python PySide6>
@@ -1006,6 +1096,14 @@ relit les pixels envoyés au GPU (`studio_texture_dump`) et les compare à PyOpe
 près en 8 bits (99 % exacts), à 1 ulp en half. Il vérifie aussi le `.arm` (entrée des espaces, réouverture, paquet
 d'assets sans les fichiers) et le nœud Image Texture (export d'un gris linéaire par un calque de remplissage). Même
 venv que `ocio_export_app.sh`.
+
+`ocio_prefs_app.sh` fait tourner l'app avec un fichier de préférences à lui (`$STUDIO_PREFS`) : lecture, écriture,
+clé inconnue, `$OCIO` prioritaire, préférence invalide, fichier illisible, et le fichier de l'artiste intact en
+`--background`. Il enregistre des projets et relit leur entrée `studio_ocio.json` : espace figé à l'enregistrement,
+repris à la réouverture quels que soient la préférence et l'environnement, automatique sans entrée, autre
+configuration signalée, espace inconnu en erreur. Il change l'espace de travail (ACEScg, puis l'automatique) et
+compare les pixels des textures reconverties à PyOpenColorIO (`ocio_import_check.py --working=`). Même venv que
+`ocio_export_app.sh`.
 
 `export.sh` requiert libpng et libtiff (`brew install libpng libtiff`) ; `export_app.sh`, Pillow et `tiffinfo`.
 

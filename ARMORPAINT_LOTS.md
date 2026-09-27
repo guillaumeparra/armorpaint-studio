@@ -246,11 +246,45 @@ OCIO est du C++ ; le projet est du C. Il faut une couche `extern "C"`.
     (upstream) ; calques d'un PSD dans l'espace du fichier ; choix d'un autre `.arm` (matériaux, brosses importés)
     non lus.
 
-### A5 — Config, persistance, UI · **3 j**
+### A5 — Config, persistance, UI · **3 j** — ✅ **fait le 2026-09-27** (macOS)
 
 - Onglet OCIO dans les préférences : chemin de config (défaut `$OCIO`), working space, display/view par défaut.
 - Persister dans `config.json` et dans le `.arm` (le projet transporte son working space).
 - Message d'erreur clair si la config est absente ou invalide — **ne pas échouer silencieusement**.
+
+✅ **Fait le 2026-09-27** (macOS).
+- **Préférences studio** : `studio_prefs.json` à côté du `config.json` d'ArmorPaint (ou `$STUDIO_PREFS`), objet JSON
+  plat, clés inconnues gardées, écriture atomique, fichier illisible mis de côté en `.bak`. Configuration OCIO,
+  espace de travail des nouveaux projets, choix du viewport (display, view, look, OCIO ou filmique) ; les variables
+  d'environnement l'emportent (`$OCIO`, `STUDIO_OCIO_*`).
+- **UI** : onglet Color des préférences (patch upstream `preferences-tab`) : configuration (champ, Browse, Built-in)
+  et statut, espace des nouveaux projets, espace du projet courant. Menu Color : sous-menu Working Space (projet
+  courant) et « Color Preferences... ». Au démarrage, une boîte signale OCIO indisponible ou un espace de travail
+  introuvable, et où le corriger.
+- **Projet** : l'espace de travail voyage dans l'entrée `studio_ocio.json` du `.arm`, avec le nom et la source de la
+  configuration. Un nouveau projet suit la préférence jusqu'à son enregistrement, qui fige l'espace trouvé ; un projet
+  rouvert reprend le sien ; sans entrée (avant A5, ArmorPaint sans studio) : l'automatique. Autre configuration :
+  signalée ; espace inconnu de la configuration : erreur, sans repli. Point d'injection commun des entrées du
+  `.arm` : patch `project-entries` (remplace le hunk de `export_arm.c` d'`ocio-import`), module `studio_project`
+  (détection du changement de projet, entrées du paquet d'assets), prêt pour le contexte ShotGrid de C5.
+- **Changement en cours de session** (configuration ou espace de travail) : les textures converties sont rechargées
+  depuis leurs fichiers et converties à nouveau ; celles qui ne sont que dans le paquet d'assets gardent leurs pixels
+  (signalé) ; viewport et exports suivent.
+- **Tests.** `.tests/ocio_prefs_app.sh`, dans l'app : fichier des préférences (`--background`, écriture, relecture,
+  clé inconnue, `$OCIO`, préférence invalide, fichier illisible), espace de travail du projet (nouveau, enregistré,
+  rouvert, sans entrée, autre configuration, erreurs), textures reconverties (pixels comparés à PyOpenColorIO),
+  viewport : 40 contrôles, tous passent. Onglet, menu et boîte vérifiés à l'écran (captures de la fenêtre).
+- **Différent du plan.**
+  - Fichier `studio_prefs.json` à part plutôt que `config.json` : `config_save()` d'ArmorPaint réécrit `config.json`
+    champ par champ depuis sa structure et perdrait les clés du studio.
+  - En `--background`, les préférences ne sont ni lues ni écrites sans `$STUDIO_PREFS` : scripts et bancs ne
+    touchent pas aux réglages de l'artiste.
+  - L'espace de travail du projet se change dans le menu Color (Working Space) ; les préférences donnent celui des
+    nouveaux projets.
+  - Pas de display/view par défaut à régler : le dernier choix du menu Color est gardé.
+  - Les calques ne sont pas convertis quand l'espace de travail change (ArmorPaint n'a pas de conversion de
+    calque) : ce qui est peint garde ses valeurs, lues dans le nouvel espace. Le sélecteur de couleur et les couleurs
+    des nœuds ne passent pas par OCIO : leurs valeurs sont celles de l'espace de travail.
 
 ### A6 — Validation · **4 j**
 
@@ -532,7 +566,7 @@ Décidé le 2026-09-26. Analyse, architecture et détail des phases : **`ARMORPA
 → *Un artiste ouvre depuis ShotGrid, peint, sauve en version, exporte au bon nom au bon endroit.*
 
 **Phase 3 — couleur · 6 semaines**
-✅ `A0` → ✅ `A1` → ✅ `A3` (export, prioritaire sur le viewport) → ✅ `A2` → ✅ `A4` → `A5` → `A6`
+✅ `A0` → ✅ `A1` → ✅ `A3` (export, prioritaire sur le viewport) → ✅ `A2` → ✅ `A4` → ✅ `A5` → `A6`
 → *Export colorimétriquement juste d'abord ; le viewport ensuite.*
 
 **Phase 4 — industrialisation · 3 semaines**
