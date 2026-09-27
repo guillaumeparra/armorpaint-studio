@@ -45,7 +45,7 @@ Modules, un par lot (voir `ARMORPAINT_LOTS.md` à la racine d'armorpaint) :
 | `studio_sg`, `studio_shotgrid`, `studio_json`, `assets/studio_sg_*.py` | C2 | ✅ sidecar ShotGrid (Toolkit), superviseur, API de scripting (macOS ; validé sur site simulé) |
 | `studio_workfiles`, `tk-armorpaint/` | C3 | ✅ Workfiles (tk-multi-workfiles2) et menu ShotGrid, par le moteur Toolkit tk-armorpaint (macOS ; validé sur site simulé) |
 | `studio_publish`, `tk-armorpaint/hooks/tk-multi-publish2/` | C4 | ✅ publish ShotGrid par tk-multi-publish2 : projet copié par ArmorPaint, textures exportées puis publiées, séquences `<UDIM>`, vignette du viewport (macOS ; validé sur site simulé) |
-| `studio_shotgrid` (contexte, résilience) | C5 | à faire |
+| `studio_sg_context`, `studio_sg_offline`, `studio_audit`, `assets/studio_sg_queue.py`, `assets/studio_audit.py` | C5 | ✅ contexte ShotGrid gardé dans le `.arm`, mode dégradé hors ligne, file d'attente des publishes rejouée au retour du site, journal d'audit (macOS ; validé sur site simulé) |
 | `studio_export_window`, `assets/studio_export_window.py`, `studio_atlas` | B6 | ✅ fenêtre d'export Qt (PySide6) à la place de la boîte d'export : presets studio, espace OCIO, préflight en direct, nom des fichiers, jeux de textures (macOS) |
 
 Build : `../base/make --compile` depuis `paint/`. Le log de démarrage affiche `studio: external <version>
@@ -73,6 +73,7 @@ l'emportent sur elles, pour le lanceur d'un show.
 | `STUDIO_EXR_READER=legacy` | rend la lecture EXR à l'importeur upstream |
 | `STUDIO_EXR_THREADS` | nombre de threads de codec (défaut : cœurs matériels) |
 | `STUDIO_SG_*`, `STUDIO_SGTK_PATH` | sidecar ShotGrid, voir « ShotGrid (C2) » |
+| `STUDIO_AUDIT_LOG` | journal d'audit à la place de `studio_audit.jsonl` des préférences ; voir « Contexte et mode dégradé ShotGrid (C5) » |
 | `STUDIO_EXPORT_PRESETS` | presets d'export studio : dossiers ou fichiers `.json`, séparés par `:` (`;` sous Windows), prioritaires sur les presets livrés |
 | `STUDIO_EXPORT_COLOR_SPACE` | espace OCIO imposé aux textures de couleur des exports studio au démarrage (vide : celui du preset) ; voir « Fenêtre d'export (B6) » |
 | `STUDIO_PYTHON` | interpréteur Python 3 avec PySide6 de la fenêtre d'export (défaut : `STUDIO_SG_PYTHON`, puis `python3`) |
@@ -155,6 +156,9 @@ projet redémarre le sidecar, et le superviseur la rejoue ; l'appelant ne voit q
 | `STUDIO_SG_PUBLISH_TYPE` | type de publish (défaut `ArmorPaint Project`) |
 | `STUDIO_SG_DEFAULT_NAME` | nom de fichier de travail par défaut (défaut `scene`) |
 | `STUDIO_SG_HOOK` | fichier Python du studio avec `setup(session)`, qui peut ajouter des opérations (`session.ops["nom"] = fonction(args)`) |
+| `STUDIO_SG_NET_TIMEOUT` | délai des connexions au site, en secondes (défaut 30) ; voir C5 |
+| `STUDIO_SG_CHECK_INTERVAL` | hors ligne, secondes entre deux essais du site (défaut 120, `0` : jamais) ; voir C5 |
+| `STUDIO_SG_QUEUE` | dossier de la file d'attente des publishes (défaut `studio_publish_queue/` des préférences) ; voir C5 |
 | `STUDIO_SG_DEBUG` | log détaillé, tk-core compris |
 
 La configuration Toolkit du studio doit définir les templates de travail, avec les clés `name` et `version` :
@@ -184,8 +188,12 @@ Le nom de publish suit la convention Toolkit : le nom de fichier sans sa version
 | `upload_thumbnail` | `entity` (`{type, id}`), `path` | `{attachment_id}` |
 | `list_commands` | `task_id` ? ou `project_id` ? | `{context, commands, favourites, has_ui}` : le menu du moteur tk-armorpaint, voir C3 |
 | `show_app` | `command`, `task_id` ? ou `project_id` ? | `{command, context}` à la fin de la commande (fermeture de la fenêtre) |
-| `texture_pattern` | `path`, `project_id` ? | `{template, pattern, pattern_udim}` : chemin des textures exportées depuis le fichier de travail `path`, marqueurs `<channel>`, `<UDIM>`, `<ext>` ; `template` null (et `reason`) hors pipeline. Voir B3 |
-| `publish` | `description` ?, `skip` ?, `task_id` ? ou `project_id` ? | `{context, publishes, skipped, finalized, messages}` : publish du projet ouvert sans fenêtre, voir C4 |
+| `texture_pattern` | `path`, `project_id` ?, `site` ? | `{template, pattern, pattern_udim}` : chemin des textures exportées depuis le fichier de travail `path`, marqueurs `<channel>`, `<UDIM>`, `<ext>` ; `template` null (et `reason`) hors pipeline. Voir B3 |
+| `publish` | `description` ?, `skip` ?, `task_id` ? ou `project_id` ? | `{context, publishes, skipped, finalized, messages}` : publish du projet ouvert sans fenêtre, voir C4 ; `queued` : publishes mis en file, voir C5 |
+| `check_online` | — | `{online, site, version}` : le site répond, sans amorçage ; sinon `sg_unreachable`. Voir C5 |
+| `pending_publishes` | — | `{queue, count, publishes}` : la file d'attente, sans requête au site |
+| `replay_publishes` | `project_id` ? | `{project_id, replayed, failed, stopped, pending, projects, other_sites}` : enregistre les publishes en file d'un projet |
+| `discard_publishes` | `keys` | `{discarded, missing}` : publishes écartés de la file |
 | `ping`, `shutdown` | — | `{}` |
 
 Codes d'erreur (`/error/code`) : du sidecar, `bad_request`, `unknown_op`, `auth_required` (pas de session Desktop,
@@ -434,6 +442,125 @@ export de la fenêtre d'export ; absent, l'export courant. `skip` : les fichiers
 - La vignette est l'image du viewport, sans compas ni sphères d'environnement.
 - Un fichier rangé dans le dossier de travail (texture importée depuis `work/`) est désigné là par la copie
   publiée : il manque sur un poste sans ce dossier.
+- Windows : pas de sidecar (voir C2).
+
+## Contexte et mode dégradé ShotGrid (C5)
+
+### Contexte du projet
+
+Le contexte ShotGrid (projet, entité, étape, tâche) est celui de la dernière fenêtre Toolkit (File Open, File Save,
+Publish...) ou du menu ShotGrid. Il est **enregistré dans le `.arm`**, entrée `studio_shotgrid.json` (patch
+`project-entries`, lot A5), avec son site :
+
+```json
+{"version":1,"context":{"site":"https://studio.shotgrid.autodesk.com","project_id":12,"project":"Demo",
+ "entity_type":"Asset","entity_id":34,"entity":"robot","step":"Texture","task_id":56,"task":"texturing",
+ "label":"Demo / robot / Texture / texturing"}}
+```
+
+Un projet rouvert par le menu File d'ArmorPaint, sur un autre poste ou après un redémarrage, reprend donc sa tâche :
+la prochaine fenêtre ShotGrid s'y ouvre, le publish y va. Ouvrir un `.arm` prend son contexte, ou aucun s'il n'en a
+pas (`studio: shotgrid context cleared: the opened project has none` au log) ; un nouveau projet garde le contexte
+courant ; File Open de Workfiles donne celui de sa fenêtre, qui l'emporte sur celui du fichier. Le contexte d'un autre
+site ShotGrid reste dans le fichier, mais le sidecar ignore ses identifiants (`context of another ShotGrid site
+ignored` au log) : projet et tâche viennent alors du chemin du fichier.
+
+Le titre de la fenêtre le montre : `robot.v003 - Demo / robot / Texture / texturing - ArmorPaint`.
+
+### Mode dégradé
+
+Si le site ShotGrid ne répond plus, ArmorPaint reste utilisable **en mode fichier** : ouvrir, peindre, enregistrer et
+exporter ne dépendent pas de ShotGrid. Ce qui en dépend échoue vite et le dit :
+
+- le passage hors ligne est dit une fois dans la console (`ShotGrid unreachable (<raison>): ArmorPaint keeps working
+  on files, publishes are queued until ShotGrid is back`), puis dans le titre (`… (ShotGrid offline) - ArmorPaint`)
+  et en tête du menu ShotGrid (`ShotGrid offline: <raison>`, **Check Connection**) ;
+- les fenêtres Toolkit sont refusées aussitôt (`ShotGrid is offline: File Open needs the ShotGrid site`), sans
+  attendre le délai du réseau ;
+- les textures exportées gardent les noms d'ArmorPaint au lieu de ceux du template (B3), dit une fois par projet ;
+- un publish en cours met ses enregistrements restants en file d'attente (ci-dessous).
+
+Le sidecar sait si le site a répondu : chaque réponse d'une requête qui lui a parlé porte `"sg"`, `{"online":true}` ou
+`{"online":false,"reason":…}`, comme l'erreur `sg_unreachable`, et ses connexions ont un délai
+(`STUDIO_SG_NET_TIMEOUT`, 30 s). Le superviseur en tient l'état (`studio_sg_network`), dit au log à chaque changement.
+Hors ligne, le site est de nouveau essayé (op `check_online`) toutes les `STUDIO_SG_CHECK_INTERVAL` secondes (120 par
+défaut, `0` : jamais), **ArmorPaint au repos compris** : l'essai est un job différé du superviseur
+(`studio_sg_start_after`), qui part à l'heure sans frame et réveille l'app par sa réponse. Tout appel réussi compte
+aussi. Au retour du site (`ShotGrid is back`), le titre et les noms des templates reviennent, et les publishes en file
+sont rejoués.
+
+En ligne, rien ne sonde le site : une coupure est découverte au prochain appel à ShotGrid (menu, fenêtre, nommage des
+textures, publish).
+
+### File d'attente des publishes
+
+Quand le site devient injoignable pendant un publish, ses fichiers sont déjà écrits (copie du projet, textures) : leurs
+enregistrements dans ShotGrid (`register_publish`) sont gardés dans une file d'attente, un fichier JSON par publish et
+sa vignette, dans `STUDIO_SG_QUEUE` (défaut : `studio_publish_queue/` à côté des préférences studio). Le publish
+aboutit : l'op `publish` rend, pour chaque publish en file, `queued` (sa clé) à la place de `id`, et la liste de ces
+clés dans `queued`. Sans file (`--background` sans `STUDIO_SG_QUEUE` ni `STUDIO_PREFS`), un publish interrompu échoue
+(`publish_failed`).
+
+Au retour du site, la file est **rejouée d'elle-même**, projet par projet (op `replay_publishes` ; un projet Toolkit
+par processus), dans l'ordre : le projet avant ses textures, qui en dépendent. Un publish créé avant l'échec (réponse
+perdue) n'est pas recréé, il est complété (vignette, dépendances). Le menu ShotGrid montre ceux qui restent
+(`2 publishes waiting for ShotGrid`, **Replay Pending Publishes**). Seuls ceux du site de la session sont rejoués ;
+ceux d'un autre site attendent une session sur ce site. L'op `discard_publishes` en écarte (fichiers déplacés dans
+`discarded/` du dossier de la file).
+
+### Journal d'audit
+
+Une ligne JSON par évènement (JSON Lines) dans `studio_audit.jsonl`, à côté des préférences studio, ou dans
+`STUDIO_AUDIT_LOG` ; rien sans l'un ni l'autre (`--background` sans `STUDIO_PREFS`). ArmorPaint et le sidecar écrivent
+dans le même fichier, chaque ligne d'une seule écriture en ajout. Au démarrage, un journal de plus de 10 Mo passe en
+`.1`. Rien n'est envoyé au site.
+
+Champs communs : `time` (UTC, `2026-09-27T10:04:05.123Z`), `source` (`armorpaint` ou `sidecar`), `pid`, `host`,
+`user`, `event`. Les évènements `publish*` du sidecar portent aussi `site`, `sg_login`, `project_id`, `task_id`,
+`path`, `name` et `version_number`. Puis :
+
+| Source | Évènement | Champs |
+|---|---|---|
+| armorpaint | `project_open` | `path`, `sg` (contexte du projet, s'il en a un) |
+| | `project_save` | `path`, `size`, `sg` |
+| | `project_copy` | `path`, `from` (le projet copié), `size` : la copie publiée du projet (C4) |
+| | `sg_offline` | `reason` |
+| | `sg_online` | `pending` : publishes en file |
+| sidecar | `publish` | `id` |
+| | `publish_queued` | `key`, `id` (négatif s'il n'a pas pu être créé), `depends_on`, `error` |
+| | `publish_replayed` | `key`, `id`, `queued_at` |
+| | `publish_failed` | `error`, `replay` (pendant un rejeu) |
+| | `publish_discarded` | `key` |
+
+```sh
+jq -c 'select(.event | startswith("publish"))' studio_audit.jsonl
+```
+
+### Scripts (minic)
+
+Les ops `check_online`, `pending_publishes`, `replay_publishes` et `discard_publishes` sont dans le tableau des
+opérations de C2.
+
+| Fonction | Rôle |
+|---|---|
+| `char *studio_sg_context()` | contexte courant (objet JSON sur une ligne), `""` sans contexte |
+| `int studio_sg_context_set_json(char *json)` | pose le contexte (objet avec `project_id`, `task_id`, `label`, `site`…), `""` le retire ; `1` s'il y en a un |
+| `int studio_sg_offline()` | `1` si la dernière réponse de ShotGrid disait le site injoignable |
+| `int studio_sg_pending()` | publishes en file d'attente |
+| `int studio_sg_offline_busy()` | `1` pendant un essai demandé ou en cours, ou un rejeu |
+| `void studio_sg_check_connection()` | essaie le site maintenant, comme Check Connection |
+| `void studio_sg_replay_pending()` | rejoue la file, comme Replay Pending Publishes |
+| `char *studio_sg_queue_dir()` | dossier de la file, `""` sans file |
+| `int studio_sg_show(char *command)` | ouvre une fenêtre Toolkit comme le menu ShotGrid (`"open"`, `"save"`, `"Publish..."` ou le nom d'une commande du moteur) ; `0` si une autre est ouverte ou si ShotGrid est hors ligne |
+
+Côté C : `studio_sg_network()` et `studio_sg_network_serial()` (état du site), `studio_sg_start_after()` (job
+différé) dans `studio_sg.h` ; `studio_sg_context.h`, `studio_sg_offline.h`, `studio_audit.h`.
+
+**Limites connues.**
+
+- Validé sur le site simulé, la coupure simulée par le sidecar de test (connexion refusée) : DNS, proxy, site très
+  lent et session expirée pendant la coupure sont à vérifier à la recette (C6).
+- En ligne, pas de sonde : une coupure est découverte au prochain appel à ShotGrid.
 - Windows : pas de sidecar (voir C2).
 
 ## Nommage des exports (B3)
@@ -1055,8 +1182,9 @@ int   studio_ocio_import_reconvert(void);        // recharge et reconvertit les 
 .tests/obj.sh [dossier de travail]     # import OBJ (patches obj-global-indices, obj-float-exponent, udim-import) ; FUZZ=<n> pour le nombre de mutations
 .tests/fbx.sh [dossier de travail]     # import FBX (patch fbx-split) : splits = upstream, UDIM, matériaux, fuzz ; FUZZ=<n>
 .tests/udim_app.sh [dossier]           # UDIM dans l'app (lot D0) : import OBJ/FBX, refus, ajout, 70 tuiles (atlas, peinture, export), conseil de résolution
-.tests/sg.sh [dossier de travail]     # ShotGrid hors app : sidecar (C2), noms des exports (B3), moteur (C3), publish (C4) ; Toolkit de .shotgrid/
+.tests/sg.sh [dossier de travail]     # ShotGrid hors app : sidecar (C2), noms des exports (B3), moteur (C3), publish (C4), mode dégradé et file d'attente (C5) ; Toolkit de .shotgrid/
 .tests/publish_app.sh [dossier]        # publish ShotGrid (C4) dans l'app, site simulé : op publish, puis fenêtre Publish (Qt offscreen) ; copie publiée rouverte sans le dossier de travail ; PY=<python PySide6>
+.tests/sg_context_app.sh [dossier]     # contexte et mode dégradé ShotGrid (C5) dans l'app, site simulé : contexte gardé dans le .arm, site coupé (mode fichier, retour trouvé au repos), coupure en plein publish (file rejouée), journal d'audit
 .tests/arm_paths_app.sh [dossier]      # chemins enregistrés dans les .arm (patch arm-relative-paths) : relatifs, normalisés, rouverts sans l'ancien dossier
 python3 .tests/arm_paths.py <projet.arm> [fichier...]   # chemins des fichiers d'un .arm ; avec des fichiers, vérifie qu'il les désigne, relatifs et normalisés
 .tests/export.sh [dossier de travail]  # export studio (B2, B4, B5) hors app : encodeurs relus par libpng/libtiff (patches sdefl-bound, encode-image-overflow), expressions, presets, préflight, conseil de résolution UDIM ; FUZZ=<n>
@@ -1117,6 +1245,9 @@ ArmorPaint) essaient des variantes du site : `STUDIO_TEST_UDIM_DEFAULT=0` (clé 
 `STUDIO_TEST_CHANNEL_FILTER=<filtre>` (`filter_by` de la clé du canal), `STUDIO_TEST_TEXTURES_COPY=0` (textures
 publiées en place). Dans l'app, le site simulé remplace le vrai sidecar avec
 `STUDIO_SG_BRIDGE=<external>/.tests/sg_fixture.py STUDIO_TEST_WORKDIR=<dossier> STUDIO_TEST_TK_CORE=<tk-core>`.
+Le site simulé coupe aussi le réseau à la demande (C5) : `STUDIO_TEST_OFFLINE_FLAG=<fichier>`, injoignable tant que
+ce fichier existe ; `STUDIO_TEST_OFFLINE_AT=create:PublishedFile:2`, le deuxième de ces appels échoue et crée le
+fichier (`STUDIO_TEST_LOST_AT` : pareil, mais l'appel a eu lieu, réponse perdue).
 
 `publish_app.sh` lance ArmorPaint sur ce site (scénario `demo`, avec tk-multi-publish2), le hook du sidecar
 `publish_app_hook.py` relevant ce qui est publié ; la fenêtre Publish y est pilotée comme par l'artiste. Le site

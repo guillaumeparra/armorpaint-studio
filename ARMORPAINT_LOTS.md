@@ -509,12 +509,27 @@ ShotGrid > Publish..., Ctrl/Cmd+Alt+P ; op `publish` du sidecar pour publier san
 
 **Tests** : `sg.sh`, 9 tests du publish contre un faux ArmorPaint (séquences UDIM, clé sans default, nom refusé avec et sans Publish Template, sources des réglages, textures sans version, validation qui ne publie rien, projet d'un autre contexte, export en échec) ; 34 tests du sidecar en tout, 238 contrôles du superviseur. `publish_app.sh`, dans ArmorPaint : op `publish`, puis fenêtre Publish pilotée comme par l'artiste (Qt offscreen), copie publiée rouverte sans le dossier de travail ; 19 contrôles, dont 2 échouent sans `project-copy`. `arm_paths_app.sh` : 5 contrôles, dont 4 échouent sans `arm-relative-paths`.
 
-### C5 — Contexte & résilience · **5 j**
+### C5 — Contexte & résilience · **5 j** — ✅ **fait le 2026-09-27** (macOS ; validé sur site simulé)
 
-- Persister le contexte SG dans le `.arm` (champ custom) — un projet rouvert sait d'où il vient
-- **Mode dégradé obligatoire** : si ShotGrid est injoignable, l'app reste pleinement utilisable en mode fichier. Aucun blocage.
-- File d'attente de publishes en échec, rejouables
-- Journal d'audit local
+Sans nouveau patch upstream : le contexte va dans une entrée du `.arm` par `project-entries` (A5) ; le reste est dans
+`external/` (`studio_sg_context.c`, `studio_sg_offline.c`, `studio_audit.c`) et dans le sidecar
+(`assets/studio_sg_queue.py`, `assets/studio_audit.py`).
+
+- ✅ **Contexte dans le `.arm`** : entrée `studio_shotgrid.json` (site, projet, entité, étape, tâche, libellé), écrite à chaque enregistrement, relue à l'ouverture. Un projet rouvert par le menu File d'ArmorPaint reprend sa tâche (fenêtres ShotGrid, publish) ; un `.arm` sans contexte le retire, un nouveau projet le garde ; le contexte d'un autre site est gardé dans le fichier mais ignoré par le sidecar. Titre de la fenêtre : `robot.v003 - Demo / robot / Texture / texturing - ArmorPaint`.
+- ✅ **Mode dégradé** : chaque réponse du sidecar dit si le site a répondu (champ `sg`) ; connexions avec délai (`STUDIO_SG_NET_TIMEOUT`, 30 s). Hors ligne : dit une fois, titre `(ShotGrid offline)`, menu ShotGrid (Check Connection), fenêtres Toolkit refusées aussitôt, textures aux noms d'ArmorPaint ; ouvrir, peindre, enregistrer et exporter ne changent pas. Le site est réessayé toutes les 120 s (`STUDIO_SG_CHECK_INTERVAL`), **ArmorPaint au repos compris**, par des jobs différés du superviseur (`studio_sg_start_after`) : sans entrée, iron ne rend plus de frame (`IDLE_SLEEP`), et un minuteur à la frame ne serait jamais parti.
+- ✅ **File d'attente des publishes** : si ShotGrid est perdu en plein publish (fichiers déjà écrits), les enregistrements restants vont dans `studio_publish_queue/` (un JSON par publish, avec sa vignette et ses dépendances) et le publish aboutit. Au retour du site, rejeu automatique projet par projet, le parent avant ses enfants ; un publish créé avant l'échec (réponse perdue) est complété, pas dupliqué. Menu : Replay Pending Publishes ; op `discard_publishes`.
+- ✅ **Journal d'audit** : `studio_audit.jsonl` (JSON Lines ; ArmorPaint et le sidecar écrivent dans le même fichier, en ajout). Il trace l'ouverture, l'enregistrement, la copie publiée, les publishes (enregistrés, en file, rejoués, en échec, écartés) et les passages hors ligne et en ligne ; rotation à 10 Mo.
+- ✅ **Défaut trouvé en route** : l'évènement `project_copy` réutilisait le nom du champ commun `source` (champ renommé `from`).
+- Non fait : sonde du site en ligne (une coupure est découverte au prochain appel) ; envoi du journal au site.
+- ⚠️ À valider en C6 sur le vrai site : coupures réelles (DNS, proxy, site lent, session expirée pendant la coupure).
+
+**Tests** :
+- `sg.sh` : 11 tests du sidecar en plus, 46 en tout.
+  - File d'attente : coupure en plein publish puis rejeu, réponse perdue sans doublon, rejeu interrompu et publish écarté, publish sans file, site perdu avant le publish.
+  - Réseau : délai, champ `sg`, site injoignable, suivi de l'état, stockage de la file, audit.
+  - Superviseur : 269 contrôles, jobs différés compris.
+- `sg_context_app.sh`, dans ArmorPaint sur le site simulé : 13 contrôles (contexte gardé et relu ; mode fichier, puis retour du site trouvé au repos ; coupure en plein publish, file rejouée ; audit des deux processus).
+- `export.sh` : journal en ajout et comptage de la file.
 
 ### C6 — Intégration & recette · **5 j**
 
@@ -570,7 +585,7 @@ Décidé le 2026-09-26. Analyse, architecture et détail des phases : **`ARMORPA
 → *Export colorimétriquement juste d'abord ; le viewport ensuite.*
 
 **Phase 4 — industrialisation · 3 semaines**
-`B7` (headless réel) → ✅ `C4` (publish) → `C5` → `B6` → `C6`
+`B7` (headless réel) → ✅ `C4` (publish) → ✅ `C5` (contexte, mode dégradé) → `B6` → `C6`
 
 ### Risques principaux
 
