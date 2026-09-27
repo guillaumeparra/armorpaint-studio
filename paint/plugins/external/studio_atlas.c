@@ -27,10 +27,20 @@ extern char      *ui_box_title;
 extern char      *console_message;
 extern float      console_message_timer;
 extern i32        base_bits;
+extern i32        base_res;
+extern f32        base_res_x;
+extern f32        base_res_y;
+void              layers_on_resized(void);
+void              base_init_undo_layers(void);
 void              layers_set_object_mask(void);
 slot_layer_t     *layers_new_layer(bool clear, i32 position, slot_layer_t *parent);
 void              slot_layer_clear(slot_layer_t *raw, i32 base_color, gpu_texture_t *base_image, f32 occlusion, f32 roughness, f32 metallic);
 void              history_new_layer(void);
+slot_layer_t     *layers_new_mask(bool clear, slot_layer_t *parent, i32 position);
+void              history_new_white_mask(void);
+void              history_new_black_mask(void);
+void              context_set_layer(slot_layer_t *l);
+bool              slot_layer_is_mask(slot_layer_t *raw);
 slot_layer_t     *layers_new_group(void);
 void              history_new_group(void);
 extern f32        layers_default_rough;
@@ -522,6 +532,39 @@ static minic_val_t mn_studio_layer_new(minic_val_t *a, int n) {
 	return minic_val_int(1);
 }
 
+// Nouveau masque du calque courant (du parent si c'est un masque), blanc (white 1) ou noir (0), comme les menus New >
+// White Mask / Black Mask, vidé tout de suite ; il devient le calque courant. 1 si fait.
+static minic_val_t mn_studio_layer_new_mask(minic_val_t *a, int n) {
+	int           white = (int)minic_arg_i(a, n, 0);
+	slot_layer_t *l     = g_context->layer;
+	if (l == NULL) {
+		return minic_val_int(0);
+	}
+	if (slot_layer_is_mask(l)) {
+		l = l->parent;
+	}
+	slot_layer_t *m = layers_new_mask(false, l, -1);
+	if (m == NULL) {
+		return minic_val_int(0);
+	}
+	gpu_texture_t *current = _draw_current;
+	bool           in_use  = gpu_in_use;
+	if (in_use) {
+		draw_end();
+	}
+	slot_layer_clear(m, white ? 0xffffffff : 0x00000000, NULL, 1.0, layers_default_rough, 0.0);
+	if (in_use) {
+		draw_begin(current, false, 0);
+	}
+	if (white) {
+		history_new_white_mask();
+	}
+	else {
+		history_new_black_mask();
+	}
+	return minic_val_int(1);
+}
+
 // Nouveau groupe de calques (vide), devenu le calque courant, comme le bouton New Group. 1 si fait.
 static minic_val_t mn_studio_layer_new_group(minic_val_t *a, int n) {
 	(void)a, (void)n;
@@ -611,6 +654,44 @@ static minic_val_t mn_studio_layer_masks(minic_val_t *a, int n) {
 	return minic_val_ptr(s);
 }
 
+// Position à l'écran (0..1, comme script_paint) d'un point du monde, « x y » ; « - » derrière la caméra. Pour les
+// bancs : viser une tuile précise, le maillage importé gardant ses coordonnées.
+static minic_val_t mn_studio_world_screen(minic_val_t *a, int n) {
+	vec4_t clip = vec4_apply_mat4((vec4_t){(f32)minic_arg_f(a, n, 0), (f32)minic_arg_f(a, n, 1), (f32)minic_arg_f(a, n, 2), 1.0f},
+	                              scene_camera->vp);
+	if (clip.w <= 0.0f) {
+		return minic_val_ptr(string_copy("-"));
+	}
+	return minic_val_ptr(string("%f %f", (clip.x / clip.w + 1.0f) * 0.5f, (-clip.y / clip.w + 1.0f) * 0.5f));
+}
+
+// Résolution du projet : Custom, px × px, calques redimensionnés tout de suite (le menu Resolution de l'onglet Layers
+// attend l'image suivante). Pour les bancs : des projets UDIM légers. 1 si fait.
+static minic_val_t mn_studio_project_res(minic_val_t *a, int n) {
+	int px = (int)minic_arg_i(a, n, 0);
+	if (px < 64 || px > 16384) {
+		return minic_val_int(0);
+	}
+	gpu_texture_t *current = _draw_current;
+	bool           in_use  = gpu_in_use;
+	if (in_use) {
+		draw_end();
+	}
+	base_res   = TEXTURE_RES_CUSTOM;
+	base_res_x = (f32)px;
+	base_res_y = (f32)px;
+	// layers_resize parcourt history_undo_layers, créé à la première frame (base_update) : un script lancé avant
+	base_init_undo_layers();
+	i32 before = (i32)_sys_on_next_frames->length;
+	layers_on_resized();
+	studio_run_next_frames(before);
+	if (in_use) {
+		draw_begin(current, false, 0);
+	}
+	g_context->ddirty = 2;
+	return minic_val_int(1);
+}
+
 #endif
 
 void studio_atlas_init(void) {
@@ -624,11 +705,14 @@ void studio_atlas_init(void) {
 	minic_register("studio_layer_set_object", "i(i)", mn_studio_layer_set_object);
 	minic_register("studio_layer_new", "i()", mn_studio_layer_new);
 	minic_register("studio_layer_new_group", "i()", mn_studio_layer_new_group);
+	minic_register("studio_layer_new_mask", "i(i)", mn_studio_layer_new_mask);
 	minic_register("studio_layer_rename", "i(p)", mn_studio_layer_rename);
 	minic_register("studio_layer_set_visible", "i(i)", mn_studio_layer_set_visible);
 	minic_register("studio_object_rename", "p(i,p)", mn_studio_object_rename);
 	minic_register("studio_meshes_sort", "i()", mn_studio_meshes_sort);
 	minic_register("studio_mesh_set_parent", "i(p,p)", mn_studio_mesh_set_parent);
 	minic_register("studio_layer_masks", "p()", mn_studio_layer_masks);
+	minic_register("studio_project_res", "i(i)", mn_studio_project_res);
+	minic_register("studio_world_screen", "p(f,f,f)", mn_studio_world_screen);
 #endif
 }
