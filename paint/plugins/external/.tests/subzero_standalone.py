@@ -144,6 +144,16 @@ names = files_in(folder)
 check("render suivant, réglages par défaut : textures du rendu précédent (gabarit {size}) supprimées",
       code == 0 and "PlanksCLI_basecolor.png" in names and not any("_128" in n for n in names), (code, names))
 
+p = subprocess.run([PY, "-S", "-B", APP, "render", PLANKS, "-o", out_dir, "--name", "NoQt", "--size", "128", "--format",
+                    "png"], env=ENV, capture_output=True, text=True, timeout=300)  # -S : ni PySide6, ni OCIO, ni numpy
+try:
+    res = json.loads(p.stdout)["result"]
+except (ValueError, KeyError, TypeError):
+    res = {}
+check("render sans PySide6 (python -S) : PNG rendus, décalque non vérifié et signalé", p.returncode == 0
+      and len(res.get("files") or {}) == 6 and any("PySide6" in w for w in res.get("warnings") or []),
+      (p.returncode, res.get("warnings"), p.stderr[-300:]))
+
 code, out, err = cli("render", PLANKS, "-o", out_dir, "--size", "300")
 check("--size 300 : code 2, erreur en JSON", code == 2 and out is not None and not out["ok"] and "300" in out["error"],
       (code, out))
@@ -302,6 +312,17 @@ for label, exe in (("bin/subzero", launcher), ("bin/subzero par un lien symboliq
         if os.path.exists(exe) else None
     check("archive : %s --version" % label, p is not None and p.returncode == 0 and p.stdout.strip() == "subzero " + version,
           p and (p.stdout, p.stderr))
+fake = os.path.join(work, "rezbin")
+os.makedirs(fake)
+with open(os.path.join(fake, "python3"), "w") as f:  # Python d'une résolution rez, qui se signale
+    f.write('#!/bin/sh\ntouch "%s"\nexec "%s" "$@"\n' % (os.path.join(work, "rez_python_used"), PY))
+os.chmod(os.path.join(fake, "python3"), 0o755)
+p = subprocess.run([launcher, "--version"], capture_output=True, text=True, env=dict(
+    ENV, REZ_USED_RESOLVE="python subzero", STUDIO_PYTHON=PY, PATH=fake + os.pathsep + ENV.get("PATH", ""))) \
+    if os.path.isfile(launcher) else None
+check("archive : dans un environnement rez, bin/subzero prend le Python de la résolution (pas $STUDIO_PYTHON)",
+      p is not None and p.returncode == 0 and os.path.isfile(os.path.join(work, "rez_python_used")),
+      p and (p.stdout, p.stderr))
 p = subprocess.run([launcher, "info", PLANKS], capture_output=True, text=True, env=dict(ENV, SUBZERO_PYTHON=PY)) \
     if os.path.isfile(launcher) else None
 check("archive : bin/subzero info", p is not None and p.returncode == 0 and json.loads(p.stdout)["ok"],

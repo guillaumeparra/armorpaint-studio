@@ -1,7 +1,8 @@
-# rez package of subzero (standalone). From the unpacked release folder: rez build --install (or --prefix <repo>).
-# Python and its modules come from the studio's rez packages: add them to requires with the studio's names, for
-# example "PySide6-6.5+", "opencolorio-2.2+" and "numpy" (color management is optional). Without them, bin/subzero
-# takes $SUBZERO_PYTHON or $STUDIO_PYTHON.
+# rez package of subzero (standalone). From the unpacked release folder, `rez build --install` copies it into your
+# local packages path (`rez config local_packages_path`, ~/packages by default): only you see it. `rez release` or
+# `--prefix <shared repo>` publish it for everyone: that is the TD's step.
+# Python comes from the resolve. The window needs PySide6, color management opencolorio and numpy: request them with
+# the studio's package names (rez env subzero PySide6 opencolorio numpy), or add them to requires below.
 
 name = "subzero"
 
@@ -13,7 +14,7 @@ authors = ["armorpaint-studio"]
 
 tools = ["subzero"]
 
-requires = ["python-3.9+<3.13"]
+requires = ["python-3.9+"]
 
 build_command = "python {root}/rezbuild.py {install}"
 

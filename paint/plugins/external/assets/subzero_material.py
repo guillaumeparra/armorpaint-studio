@@ -426,16 +426,23 @@ def render_material(sbsar, graph, folder, tools, outs, values=None, entries=None
                                 entries=dict(entries or {}), size=size, outputs=[o for o, _ in outs], names=names,
                                 fmt=fmt, cancel=cancel)
     files = {ch: res["files"][o] for o, ch in outs}
+    warnings = list(res["warnings"])
     if "base" in files and subzero_render.FORMATS[fmt]["alpha"]:  # décalque : alpha de la couleur vers l'opacité,
         # faute de sortie opacité
         opacity = os.path.join(folder, texture_name(template, prefix, CHANNEL_SUFFIX["opacity"], width)
                                + subzero_render.FORMATS[fmt]["ext"])
-        if split_alpha(files["base"], None if "opacity" in files else opacity) and "opacity" not in files:
+        try:
+            split = split_alpha(files["base"], None if "opacity" in files else opacity)
+        except ImportError:  # `subzero render` sans PySide6 : PNG et TIFF restent tels que sbsrender les écrit
+            split = None
+            warnings.append("decal check skipped: PNG and TIFF need PySide6 (a base color with transparency keeps "
+                            "its alpha)")
+        if split and "opacity" not in files:
             files["opacity"] = opacity
-        elif "opacity" not in files and os.path.isfile(opacity):
+        elif split is not None and "opacity" not in files and os.path.isfile(opacity):
             os.remove(opacity)  # d'un rendu précédent
     spaces, notes, converted = convert_maps(color, files, fmt)
-    return {"files": files, "seconds": res["seconds"], "size": size, "format": fmt, "warnings": res["warnings"],
+    return {"files": files, "seconds": res["seconds"], "size": size, "format": fmt, "warnings": warnings,
             "spaces": spaces, "color_warnings": notes, "converted": converted}
 
 

@@ -14,17 +14,23 @@ which must be installed and licensed on the machine.
 
 ## Install
 
-Requirements: macOS or Linux (tested on macOS 27 and Rocky Linux 9.4), Python 3.9 to 3.12. The window needs PySide6.
-Color management is optional and needs opencolorio and numpy.
+Requirements: macOS or Linux (tested on macOS 27 and Rocky Linux 9.4), Python 3.9 or newer (`setup.sh`: 3.9 to 3.12,
+the versions its pinned wheels cover). The window needs PySide6. Color management is optional and needs opencolorio
+and numpy.
+
+Nothing is installed outside the folder you choose, and no admin rights are needed. Besides the exported materials,
+subzero writes only its cache (`SUBZERO_CACHE`), the library browser's `browser.json` (`SUBZERO_CONFIG_DIR`), and a
+studio.env when **Settings > Save** or **Locate sbsrender...** is used. subzero itself makes no network access.
 
 **Folder (tarball)**. Unpack `subzero-@VERSION@.tar.gz` anywhere, then create its Python (network access to PyPI):
 
     sh subzero-@VERSION@/setup.sh            # venv/ inside the folder, pinned versions of requirements.txt
     subzero-@VERSION@/bin/subzero
 
-`bin/subzero` uses `$SUBZERO_PYTHON`, else that venv, else `$STUDIO_PYTHON`, else `python3`. It can be linked
-into the PATH (`ln -s …/bin/subzero /usr/local/bin/`). On Linux, `share/applications/subzero.desktop` is a desktop
-entry: replace `@ROOT@` with the folder and copy it to `~/.local/share/applications/`.
+`bin/subzero` uses `$SUBZERO_PYTHON`, else that venv, else `$STUDIO_PYTHON`, else `python3` (in a rez environment:
+`$SUBZERO_PYTHON`, else the resolved Python). It can be linked into the PATH (`ln -s …/bin/subzero ~/bin/`). On
+Linux, `share/applications/subzero.desktop` is a desktop entry: replace `@ROOT@` with the folder and copy it to
+`~/.local/share/applications/`.
 
 **pip**. Into any Python 3.9+ environment:
 
@@ -33,8 +39,18 @@ entry: replace `@ROOT@` with the folder and copy it to `~/.local/share/applicati
 
 Extras: `window` (PySide6), `color` (opencolorio, numpy), `all`. Then `subzero` or `python -m subzero`.
 
-**rez**. From the unpacked folder: `rez build --install` (or `--prefix <packages>`). Add the studio's PySide6,
-opencolorio and numpy packages to `requires` in `package.py`, or set `SUBZERO_PYTHON` to a Python that has them.
+**rez**. To try it, nothing needs installing: from the unpacked folder, with your studio's package names,
+
+    rez env python PySide6 opencolorio numpy -- ./bin/subzero
+
+To get a `subzero` package that only you see:
+
+    rez build --install       # copies the package into your local packages path (rez config local_packages_path)
+    rez env subzero PySide6 opencolorio numpy -- subzero
+
+`rez build` also leaves a `build/` folder next to `package.py`. Delete `<local packages path>/subzero/` to remove
+the package. Publishing it for everyone (`rez release`, or `rez build --install --prefix <shared repository>`) is a
+pipeline step: first add the studio's PySide6, opencolorio and numpy packages to `requires` in `package.py`.
 
 ## Window
 
@@ -123,4 +139,5 @@ and can save them to studio.env.
   session does without them.
 - sbsrender writes TGA, EXR, PNG, TIFF and JPEG; previews in the window are TGA files in the cache, at the chosen
   size until the first export.
-- `subzero render` never imports Qt, except to split a decal exported as PNG or TIFF.
+- `subzero render` never imports Qt, except to split a decal exported as PNG or TIFF; without PySide6 that step is
+  skipped with a warning.

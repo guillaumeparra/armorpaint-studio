@@ -1641,8 +1641,9 @@ python3 assets/subzero_app.py locate            # sbsrender et sbscooker trouvé
 - **`render`** : sans Qt, même dossier et même recette que la fenêtre. Sur un dossier de matériau, il le refait sur
   place avec sa recette, que les options modifient ; les textures du rendu précédent qu'il remplace (autre format,
   taille ou nom) sont supprimées. Résultat en JSON sur stdout, messages sur stderr ; code 0, 1 (rendu en échec) ou 2
-  (argument ou réglage invalide). `SUBZERO_EXPORT_TEMPLATE` (`{name}`, `{channel}`, `{size}`) et
-  `SUBZERO_NORMAL_FORMAT=directx` valent pour la fenêtre et `render`.
+  (argument ou réglage invalide). Sans PySide6, le décalque d'un PNG ou d'un TIFF n'est pas séparé (avertissement).
+  `SUBZERO_EXPORT_TEMPLATE` (`{name}`, `{channel}`, `{size}`) et `SUBZERO_NORMAL_FORMAT=directx` valent pour la
+  fenêtre et `render`.
 - **`sbsrender`** : `$SUBZERO_SBSRENDER`, sinon la préférence `subzero.sbsrender` d'ArmorPaint Studio
   (`$STUDIO_PREFS`, sinon son `studio_prefs.json`), sinon Designer là où il s'installe, puis le PATH. `studio.env`
   est lu au démarrage comme par ArmorPaint.
@@ -1651,8 +1652,9 @@ python3 assets/subzero_app.py locate            # sbsrender et sbscooker trouvé
   versions d'ArmorPaint Studio. Version : `__version__` de `subzero_app.py`. Archives reproductibles (dates fixées,
   ordre trié : deux builds donnent les mêmes sommes). Contenu : les modules Python (`python/subzero/`), le lanceur
   `bin/subzero` (Python : `$SUBZERO_PYTHON`, sinon le venv de `setup.sh`, sinon `$STUDIO_PYTHON`, sinon `python3` ;
-  suit un lien symbolique), `setup.sh` (venv aux versions de `requirements.txt` : celles de `tools/setup_subzero.sh`
-  et d'OCIO dans `.ocio/CMakeLists.txt`), `package.py` et `rezbuild.py` (rez), `pyproject.toml`, un fichier
+  suit un lien symbolique ; dans un environnement rez, le Python de la résolution), `setup.sh` (venv aux versions de
+  `requirements.txt` : celles de `tools/setup_subzero.sh` et d'OCIO dans `.ocio/CMakeLists.txt`), `package.py` et
+  `rezbuild.py` (rez : `rez build --install` en fait un paquet personnel), `pyproject.toml`, un fichier
   `.desktop`, `share/studio.env.example` et un README en anglais (`release/subzero/`, gabarit où `@VERSION@` est
   remplacé). La roue installe la commande `subzero` et `python -m subzero`, avec les extras `window`, `color` et `all`.
   Aucun fichier d'Adobe : `sbsrender` reste celui de Designer, installé sur la machine.
@@ -1702,7 +1704,7 @@ python3 .tests/arm_paths.py <projet.arm> [fichier...]   # chemins des fichiers d
 <python PySide6> .tests/subzero_window_ui.py  # fenêtre subzero contre un faux ArmorPaint, vrai sbsrender : règles, décalques par format, fichiers périmés, étagère, envoi, mise à jour, changement de format, recette v0, Duplicate, $SUBZERO_FORMAT, preset, .sbs, sbsrender introuvable puis corrigé ; avec PyOpenColorIO et numpy, couleur (E11) : ACEScg par le panneau Settings (pixels, studio.env écrit), suivi de l'espace, variable verrouillée, espace inconnu, nuanciers et viewport, mode autonome, OCIO coupé
 <python PySide6+OCIO> .tests/subzero_color_check.py  # couleur de subzero (E11) hors fenêtre : studio_env.py = studio_env.c (même fichier, 32 variables), écriture de studio.env, plans d'espaces, affichage et look, conversion EXR half/float = PyOpenColorIO (relue par OpenEXR), PNG/TGA/TIFF/JPEG 8 bits
 .tests/subzero_app.sh [dossier]        # subzero dans l'app, Qt offscreen : studio.env du banc (sbsrender), import d'un .sbsar en EXR, couleur de base en srgb_tx, deux calques de remplissage, .arm rouvert, réédition depuis la recette, passage en PNG (anciennes textures retirées et supprimées), temps ; avec PyOpenColorIO et numpy dans PY (E11) : SUBZERO_OCIO_COLOR=ACEScg par studio.env, pixels dans ArmorPaint = PyOpenColorIO, espace qui suit le réglage, choix de l'artiste gardé ; PY=<python PySide6> (tools/setup_subzero.sh)
-<python PySide6+OCIO> .tests/subzero_standalone.py [dossier]  # subzero seul (E9), vrai sbsrender : --version, locate, info, render (preset, --set, dossier refait sur place en PNG avec {size}, normale DirectX, textures périmées supprimées, codes 1 et 2) ; fenêtre offscreen : 512 par défaut, viewer carré, touches (pavé, AZERTY), exposition/gamma/saturation = PyOpenColorIO au pixel près, export puis mise à jour, SUBZERO_VIEWER=0 ; navigateur : onglets de SUBZERO_LIBRARY, dossier caché, icônes .sbsar/.sbs, dossier ajouté gardé, paquet ouvert, recherche ; paquet : --check, sommes reproductibles, contenu sans fichier d'Adobe, lanceur (et par lien), roue installée sans réseau, rezbuild.py
+<python PySide6+OCIO> .tests/subzero_standalone.py [dossier]  # subzero seul (E9), vrai sbsrender : --version, locate, info, render (preset, --set, dossier refait sur place en PNG avec {size}, normale DirectX, textures périmées supprimées, codes 1 et 2) ; fenêtre offscreen : 512 par défaut, viewer carré, touches (pavé, AZERTY), exposition/gamma/saturation = PyOpenColorIO au pixel près, export puis mise à jour, SUBZERO_VIEWER=0 ; navigateur : onglets de SUBZERO_LIBRARY, dossier caché, icônes .sbsar/.sbs, dossier ajouté gardé, paquet ouvert, recherche ; paquet : --check, sommes reproductibles, contenu sans fichier d'Adobe, lanceur (et par lien, et Python de rez), rendu sans PySide6, roue installée sans réseau, rezbuild.py
 .tests/sets_app.sh [dossier]           # jeux de textures, nom des fichiers et UDIM dans l'app, avec les maillages de udim_gen.py ; PY=<python PySide6>
 .tests/atlas_order_app.sh [dossier]    # jeux de textures quand l'onglet Meshes trie, réapparente ou supprime des objets (patch atlas-objects-order)
 .tests/masks_app.sh [dossier]          # masques empilés (patch mask-multiply) : flatten, Apply Mask, Merge Down, Merge Group et export multiplient les masques comme la vue
