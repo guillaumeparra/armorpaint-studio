@@ -29,22 +29,6 @@ index b4876935..f03a9712 100644
  	// double t = iron_time(); ////
  	gpu_texture_init_from_bytes(texture, texture_data, width, height, texture_format, true);
  	// iron_log("gpu_texture_init_from_bytes in %fs\n", iron_time() - t); ////
-diff --git a/paint/sources/io/export_arm.c b/paint/sources/io/export_arm.c
-index 4a9be6f0..e32a3041 100644
---- a/paint/sources/io/export_arm.c
-+++ b/paint/sources/io/export_arm.c
-@@ -403,6 +403,11 @@ void export_arm_run_project(char *path) {
- 		export_arm_pack_sounds(g_project, g_project->_->sounds);
- 	}
- 
-+#ifdef WITH_EXTERNAL // STUDIO-PATCH(ocio-import): the OCIO color space of each texture travels in the file, see external/PATCHES.md
-+	void studio_texture_color_spaces_save(string_array_t *texture_files);
-+	studio_texture_color_spaces_save(texture_files);
-+#endif
-+
- 	buffer_t *buffer = util_encode_project(g_project);
- 	iron_file_save_bytes(path, buffer, buffer->length + 1);
- 	g_project->mesh_assets = mesh_assets_abs; // STUDIO-PATCH(arm-relative-paths)
 diff --git a/paint/sources/io/import_texture.c b/paint/sources/io/import_texture.c
 index f4fed04e..2fff8498 100644
 --- a/paint/sources/io/import_texture.c

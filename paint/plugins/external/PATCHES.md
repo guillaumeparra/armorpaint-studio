@@ -985,8 +985,8 @@ envmap) :
 - `path_to_relative()` normalise les deux chemins (`path_normalize`, qui retire les `dossier/..`) avant de les
   comparer. Seul `export_arm.c` l'appelle.
 
-Deux patches touchent `export_arm_run_project()` : [project-copy](#project-copy) (`relative_to`, plus haut) et
-celui-ci, indépendants. Pour régénérer celui-ci : `git diff 209bae06^ 209bae06 -- base/sources/iron_path.c
+Trois patches touchent `export_arm_run_project()` : [project-copy](#project-copy) (`relative_to`, plus haut),
+[project-entries](#project-entries) (juste avant `util_encode_project()`) et celui-ci, indépendants. Pour régénérer celui-ci : `git diff 209bae06^ 209bae06 -- base/sources/iron_path.c
 paint/sources/io/export_arm.c` (ou le commit qui l'a refait).
 
 **Test.** `.tests/arm_paths_app.sh` : ArmorPaint en `--background`, chemins lus dans les `.arm` par
@@ -1033,7 +1033,8 @@ projet ouvert ne change pas : `export_arm_run_project()` s'arrête avant les fic
 le projet ouvert.
 
 Pour régénérer : `git diff 1256a538^ 1256a538 -- paint/sources/io/export_arm.c` (un seul hunk ; ceux
-d'[arm-relative-paths](#arm-relative-paths), plus bas dans la même fonction, sont dans son propre `.patch`).
+d'[arm-relative-paths](#arm-relative-paths) et de [project-entries](#project-entries), plus bas dans la même
+fonction, sont dans leurs propres `.patch`).
 
 **Test.** `.tests/publish_app.sh`, étape 3. Le site simulé range `work/armorpaint/` et `publish/armorpaint/` à la
 même profondeur, comme tk-config-default2 : un fichier rangé ailleurs (`src/`) a le même chemin relatif depuis les
@@ -1099,10 +1100,10 @@ RGBA 8 bits).
 
 | | |
 |---|---|
-| Fichiers | `base/sources/iron.h` (`iron_texture_decoded`, `gpu_create_texture_from_bytes`, `gpu_create_texture_from_encoded_bytes`), `paint/sources/io/import_texture.c` (`import_texture_run`), `paint/sources/io/export_arm.c` (`export_arm_run_project`), `paint/sources/ui/tab_textures.c` (`tab_textures_draw`, `tab_textures_draw_context_menu`) |
+| Fichiers | `base/sources/iron.h` (`iron_texture_decoded`, `gpu_create_texture_from_bytes`, `gpu_create_texture_from_encoded_bytes`), `paint/sources/io/import_texture.c` (`import_texture_run`), `paint/sources/ui/tab_textures.c` (`tab_textures_draw`, `tab_textures_draw_context_menu`) |
 | Commit studio | `2e532915` sur la branche `studio` |
 | Validé contre | upstream `85f6cf1c` (2026-09-27) |
-| Injection | `iron.h` : un pointeur de fonction nul par défaut et deux appels (10 lignes, sans dépendance à `external/`) ; le reste en 7 blocs sous `#ifdef WITH_EXTERNAL` (30 lignes) — l'app compile toujours sans `external/` |
+| Injection | `iron.h` : un pointeur de fonction nul par défaut et deux appels (10 lignes, sans dépendance à `external/`) ; le reste en 6 blocs sous `#ifdef WITH_EXTERNAL` (25 lignes) — l'app compile toujours sans `external/` |
 
 **Motif.** Le lot A4 interprète chaque texture importée dans son espace couleur source (sRGB, ACEScg, donnée…) et
 convertit ses pixels vers l'espace de travail OCIO. ArmorPaint décode les images dans
@@ -1118,16 +1119,15 @@ ne voit les pixels avant l'envoi, ni ne sait à quelle texture importée ils app
   `studio_texture_import(path, fn)`, qui l'appelle dans une portée : les pixels décodés pendant l'appel sont ceux de
   la texture `path`. Tous les imports de texture passent par là : import d'asset, de dossier, projet rouvert,
   matériaux et brosses d'un `.arm`, Reimport, calques d'un PSD, captures.
-- `export_arm.c` : `studio_texture_color_spaces_save(texture_files)`, juste avant `util_encode_project()`, écrit
-  l'espace de chaque texture dans l'entrée `studio_color_spaces.json` du paquet d'assets du `.arm`.
+- L'espace de chaque texture est écrit dans l'entrée `studio_color_spaces.json` du paquet d'assets du `.arm` par
+  [project-entries](#project-entries) : le hunk de `export_arm.c` d'origine (lot A4) a été remplacé par ce point
+  d'injection commun au lot A5.
 - `tab_textures.c` : l'infobulle d'une texture donne son espace et sa source ; « Color Space... » dans le menu
   contextuel ouvre le choix de l'espace.
 
-Trois patches touchent `export_arm_run_project()` : [project-copy](#project-copy),
-[arm-relative-paths](#arm-relative-paths) et celui-ci (un hunk juste avant `util_encode_project()`), indépendants ;
 `import_texture_run()` porte aussi [import-null-guards](#import-null-guards). Pour régénérer celui-ci :
-`git diff 2e532915^ 2e532915 -- base/sources/iron.h paint/sources/io/import_texture.c paint/sources/io/export_arm.c
-paint/sources/ui/tab_textures.c` (ou le commit qui l'a refait).
+`git diff 2e532915^ 2e532915 -- base/sources/iron.h paint/sources/io/import_texture.c paint/sources/ui/tab_textures.c`
+(ou le commit qui l'a refait).
 
 **Test.** `.tests/ocio_import_app.sh` : ArmorPaint en `--background`, pixels relus par `studio_texture_dump` et
 comparés à PyOpenColorIO par `ocio_import_check.py` : PNG, TIFF, PSD à plat et à calques en 8 bits, EXR float et
@@ -1188,3 +1188,79 @@ remaniée : rejouer la section 5 sans le patch.
 **Non couvert.** Seule la conversion gamma 2.2 d'ArmorPaint est corrigée : l'option ne passe pas par OCIO (pour une
 texture importée, c'est l'espace choisi par texture, lot A4, qui convertit). Sans le lot A4 (`STUDIO_OCIO_IMPORT=0`
 ou build sans `external/`), Auto ne convertit jamais, comme l'upstream.
+
+---
+
+## preferences-tab
+
+| | |
+|---|---|
+| Fichier | `paint/sources/ui/box_preferences.c` (`box_preferences_add_tab`, `box_preferences_show_box`) |
+| Commit studio | `f3c88ab3` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-27) |
+| Injection | 22 lignes, point d'injection générique, sans dépendance à `external/` (compile sans `WITH_EXTERNAL`) |
+
+**Motif.** La boîte des préférences d'ArmorPaint a ses onglets codés en dur (un `ui_tab` par onglet dans
+`box_preferences_show_box()`, `preferences_tab_t` dans `enums.h`). Aucun plugin ne peut y ajouter un onglet. Le lot
+A5 y veut l'onglet Color : configuration OCIO, espace de travail des nouveaux projets.
+
+**Correctif.** `i32 box_preferences_add_tab(char *label, void (*draw)(void))` enregistre au plus 4 onglets,
+affichés après Plugins. Elle rend l'index de l'onglet, à mettre dans `box_preferences_tab` avant
+`box_preferences_show()` pour l'ouvrir (il suit `PREFERENCES_TAB_PLUGINS`, le dernier de l'enum), ou -1 quand c'est
+plein. `draw` dessine le contenu avec les widgets d'iron, comme un onglet upstream. Le plugin déclare le prototype
+lui-même (`external/studio_ocio_prefs.c`) : aucun header upstream n'est touché.
+
+**Test.** À l'écran : Color > Color Preferences... (ou `studio_ocio_prefs_show()` en script) ouvre les préférences
+sur l'onglet Color, après Plugins ; vérifié le 2026-09-27 par une capture de la fenêtre. Sans appel à
+`box_preferences_add_tab`, la boîte est identique à l'upstream. Les réglages de l'onglet sont testés par leurs
+fonctions, sans l'interface : `.tests/ocio_prefs_app.sh`.
+
+**Signes que l'upstream l'a corrigé.** Une API d'onglets de préférences pour les plugins, ou `preferences_tab_t`
+qui gagne une valeur après `PLUGINS` (ou un onglet conditionnel avant Plugins) : dans ce dernier cas, **l'index
+des onglets ajoutés entre en collision** avec le nouveau, et il faut refaire le patch. Si une API existe, y porter
+`studio_ocio_prefs_init()` et retirer le patch.
+
+**Non couvert.** Rien de plus que l'upstream : un onglet ajouté a la taille de la boîte et défile comme les autres.
+
+---
+
+## project-entries
+
+| | |
+|---|---|
+| Fichier | `paint/sources/io/export_arm.c` (`export_arm_run_project`) |
+| Commit studio | `b7fba27a` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-27) |
+| Injection | un bloc de 4 lignes sous `#ifdef WITH_EXTERNAL`, juste avant `util_encode_project()` |
+
+**Motif.** Des modules du studio gardent des données d'un projet dans son `.arm` : l'espace couleur de chaque
+texture (lot A4), l'espace de travail du projet (lot A5), le contexte ShotGrid ensuite (lot C5). Le format `.arm`
+n'a pas de champ libre ; le paquet d'assets (`packed_assets`) accepte n'importe quel fichier, et ArmorPaint sans
+studio le relit et le réécrit tel quel. Le lot A4 y écrivait son entrée par un hunk à lui ; un hunk par module
+aurait multiplié les injections dans la même fonction.
+
+**Correctif.** Un seul appel, `studio_project_save_entries(texture_files)` (`external/studio_project.c`), juste
+avant `util_encode_project()` : il détecte d'abord un projet ouvert ou remplacé depuis la dernière frame, puis
+appelle les modules inscrits par `studio_project_on_save()`, qui écrivent leur entrée par
+`studio_project_set_entry(name, text)`. Remplace le hunk d'[ocio-import](#ocio-import) : `studio_color_spaces.json`
+passe aussi par là.
+
+Trois patches touchent `export_arm_run_project()` : [project-copy](#project-copy),
+[arm-relative-paths](#arm-relative-paths) et celui-ci (un hunk juste avant `util_encode_project()`), indépendants.
+`git diff upstream studio -- paint/sources/io/export_arm.c` les mêle, et le commit `b7fba27a` montre le
+remplacement du hunk d'ocio-import. Pour régénérer celui-ci : retirer le bloc `STUDIO-PATCH(project-entries)` (et
+la ligne vide qui le suit) d'une copie du fichier, placer la copie en `a/paint/sources/io/export_arm.c` et le
+fichier en `b/paint/sources/io/export_arm.c`, puis `git diff --no-index --no-prefix a/paint/sources/io/export_arm.c
+b/paint/sources/io/export_arm.c`.
+
+**Test.** `.tests/ocio_import_app.sh` (entrée `studio_color_spaces.json` écrite, relue, gardée avec
+`STUDIO_OCIO_IMPORT=0`) et `.tests/ocio_prefs_app.sh` (entrée `studio_ocio.json` écrite à l'enregistrement, absente
+sans OCIO, relue à l'ouverture, dans un `.arm` à paquet d'assets). Au 2026-09-27, tout passe. Sans le patch,
+aucune entrée n'est écrite et ces contrôles échouent.
+
+**Signes que l'upstream l'a changé.** Un conflit dans `export_arm_run_project()` (enregistrement remanié : garder
+l'appel après le remplissage de `packed_assets` et avant l'encodage), ou un format `.arm` avec des métadonnées
+libres : y porter les entrées et retirer le patch.
+
+**Non couvert.** L'export d'un matériau ou d'une brosse seuls (`export_arm_run_material`, `_brush`) n'écrit pas
+d'entrée : ils ne portent pas l'état du projet.

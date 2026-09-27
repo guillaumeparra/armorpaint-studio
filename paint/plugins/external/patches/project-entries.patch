@@ -1,0 +1,16 @@
+diff --git a/paint/sources/io/export_arm.c b/paint/sources/io/export_arm.c
+index 4a9be6f..a94348b 100644
+--- a/paint/sources/io/export_arm.c
++++ b/paint/sources/io/export_arm.c
+@@ -403,6 +403,11 @@ void export_arm_run_project(char *path) {
+ 		export_arm_pack_sounds(g_project, g_project->_->sounds);
+ 	}
+ 
++#ifdef WITH_EXTERNAL // STUDIO-PATCH(project-entries): studio modules write their entries in the packed assets, see external/PATCHES.md
++	void studio_project_save_entries(string_array_t *texture_files);
++	studio_project_save_entries(texture_files);
++#endif
++
+ 	buffer_t *buffer = util_encode_project(g_project);
+ 	iron_file_save_bytes(path, buffer, buffer->length + 1);
+ 	g_project->mesh_assets = mesh_assets_abs; // STUDIO-PATCH(arm-relative-paths)

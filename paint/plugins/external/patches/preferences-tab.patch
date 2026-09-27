@@ -1,0 +1,40 @@
+diff --git a/paint/sources/ui/box_preferences.c b/paint/sources/ui/box_preferences.c
+index d05c7098..45ab7977 100644
+--- a/paint/sources/ui/box_preferences.c
++++ b/paint/sources/ui/box_preferences.c
+@@ -1038,6 +1038,23 @@ void box_preferences_show_on_hide() {
+ 	config_save();
+ }
+ 
++// STUDIO-PATCH(preferences-tab): tabs added by a plugin after Plugins (paint/plugins/external)
++#define BOX_PREFERENCES_EXTRA_MAX 4
++static char *box_preferences_extra_labels[BOX_PREFERENCES_EXTRA_MAX];
++static void (*box_preferences_extra_draw[BOX_PREFERENCES_EXTRA_MAX])(void);
++static i32 box_preferences_extra_count = 0;
++
++// Returns the index of the tab for box_preferences_tab, -1 when full
++i32 box_preferences_add_tab(char *label, void (*draw)(void)) {
++	if (box_preferences_extra_count == BOX_PREFERENCES_EXTRA_MAX) {
++		return -1;
++	}
++	box_preferences_extra_labels[box_preferences_extra_count] = label;
++	box_preferences_extra_draw[box_preferences_extra_count]   = draw;
++	box_preferences_extra_count++;
++	return PREFERENCES_TAB_PLUGINS + box_preferences_extra_count;
++}
++
+ void box_preferences_show_box() {
+ 	if (ui_tab(&box_preferences_tab, tr("Interface"), true, -1, false)) {
+ 		box_preferences_interface_tab();
+@@ -1075,6 +1092,11 @@ void box_preferences_show_box() {
+ 	if (ui_tab(&box_preferences_tab, tr("Plugins"), true, -1, false)) {
+ 		box_preferences_plugins_tab();
+ 	}
++	for (i32 i = 0; i < box_preferences_extra_count; ++i) { // STUDIO-PATCH(preferences-tab)
++		if (ui_tab(&box_preferences_tab, tr(box_preferences_extra_labels[i]), true, -1, false)) {
++			box_preferences_extra_draw[i]();
++		}
++	}
+ }
+ 
+ void box_preferences_show() {
