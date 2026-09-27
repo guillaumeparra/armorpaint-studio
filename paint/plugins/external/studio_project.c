@@ -1,5 +1,6 @@
 #include "studio_project.h"
 #include "iron_array.h"
+#include "iron_draw.h"
 #include "iron_gpu.h"
 #include "iron_map.h"
 #include "iron_obj.h"
@@ -13,8 +14,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Cœur ArmorPaint (paint/sources/globals.h)
+// Cœur ArmorPaint (paint/sources/globals.h, util/util_layer.c)
 extern project_t *g_project;
+extern i32                   base_bits;
+extern slot_layer_t_array_t *history_undo_layers; // NULL en --background : l'historique n'est créé qu'avec l'UI
+void                         slot_layer_resize_and_set_bits(slot_layer_t *l);
+void                         make_material_parse_paint_material(bool bake_previews);
 
 #define LISTENERS_MAX 8
 
@@ -38,8 +43,54 @@ static void on_update(void *data) {
 	studio_project_check();
 }
 
+// ---- Scripting (minic) -----------------------------------------------------------------------------------------------
+
+#ifdef WITH_EVAL
+
+#include "minic.h"
+
+// Profondeur des calques du projet : 8, 16 ou 32 bits (base_bits). ArmorPaint ne la règle que dans la boîte d'export
+// upstream (combo Color) ; les scripts et les bancs en ont besoin pour peindre en flottant (valeurs HDR, lot A6).
+static minic_val_t mn_bits(minic_val_t *a, int n) {
+	(void)a, (void)n;
+	return minic_val_int(base_bits == TEXTURE_BITS_BITS8 ? 8 : base_bits == TEXTURE_BITS_BITS16 ? 16 : 32);
+}
+
+// Change la profondeur des calques (et de l'historique), comme la boîte d'export : les calques sont recopiés au nouveau
+// format, les valeurs gardées (bornées à [0, 1] en 8 bits). 1 si fait, 0 pour une autre valeur que 8, 16 ou 32.
+// layers_set_bits() d'upstream n'est pas appelé : il lit l'historique sans le tester, NULL en --background.
+static minic_val_t mn_set_bits(minic_val_t *a, int n) {
+	int bits = (int)minic_arg_i(a, n, 0);
+	if (bits != 8 && bits != 16 && bits != 32) {
+		return minic_val_int(0);
+	}
+	base_bits              = bits == 8 ? TEXTURE_BITS_BITS8 : bits == 16 ? TEXTURE_BITS_BITS16 : TEXTURE_BITS_BITS32;
+	gpu_texture_t *current = _draw_current; // comme script_project_open : les copies de calques hors d'un autre dessin
+	bool           in_use  = gpu_in_use;
+	if (in_use) {
+		draw_end();
+	}
+	slot_layer_t_array_t *lists[] = {g_project->_->layers, history_undo_layers};
+	for (int k = 0; k < 2; k++) {
+		for (int i = 0; lists[k] != NULL && i < (int)lists[k]->length; i++) {
+			slot_layer_resize_and_set_bits(lists[k]->buffer[i]);
+		}
+	}
+	make_material_parse_paint_material(true); // pipeline de peinture compilé pour le format des calques
+	if (in_use) {
+		draw_begin(current, false, 0);
+	}
+	return minic_val_int(1);
+}
+
+#endif
+
 void studio_project_init(void) {
 	sys_notify_on_update(on_update, NULL);
+#ifdef WITH_EVAL
+	minic_register("studio_project_bits", "i()", mn_bits);
+	minic_register("studio_project_set_bits", "i(i)", mn_set_bits);
+#endif
 }
 
 void studio_project_on_change(void (*fn)(bool opened)) {

@@ -24,6 +24,8 @@ ko() { echo "FAIL $1"; FAIL=1; }
 check() { if eval "$2"; then ok "$1"; else ko "$1"; fi; }
 has() { grep -qxF "$2" "$1"; }
 app() { perl -e 'alarm 120; exec @ARGV' "$APP" "$@" -ApplePersistenceIgnoreState YES; }
+# Commande de contrôle, sortie indentée ; rend son propre code (dans un pipe vers sed, le code serait celui de sed).
+indented() { "$@" > "$W/.indented" 2>&1 && r=0 || r=$?; sed 's/^/     /' "$W/.indented"; return $r; }
 unset OCIO STUDIO_OCIO_WORKING_SPACE STUDIO_OCIO_LIB STUDIO_OCIO_VIEWPORT STUDIO_OCIO_DISPLAY STUDIO_OCIO_VIEW STUDIO_OCIO_LOOK
 
 rm -rf "$W/cfg"
@@ -100,7 +102,8 @@ check "rechargement : choix gardé s il existe" 'has "$W/run.log" "t: reload cg=
 check "configuration sans espace de travail : inactif, filmique" 'has "$W/run.log" "t: reload tst=1" && has "$W/run.log" "t: tst enabled=1 active=0" && grep -q "^t: tst status=OCIO viewport unavailable: working space unknown" "$W/run.log"'
 check "retour à la configuration par défaut" 'has "$W/run.log" "t: back enabled=1 active=1" && has "$W/run.log" "t: back choice=$ACES"'
 echo "-- compositeur (GPU) contre PyOpenColorIO"
-if grep -E "^[pa] " "$W/run.log" | "$PY" "$T/ocio_view_check.py" | sed 's/^/     /'; then
+grep -E "^[pa] " "$W/run.log" > "$W/probes.txt" || true
+if indented "$PY" "$T/ocio_view_check.py" < "$W/probes.txt"; then
 	ok "compositeur = PyOpenColorIO, aux tolérances de la LUT"
 else
 	ko "compositeur = PyOpenColorIO, aux tolérances de la LUT"

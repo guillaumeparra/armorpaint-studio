@@ -34,6 +34,8 @@ codes() {
 }
 code() { grep -q "^t: code $2=[0-9]" "$1"; }
 app() { perl -e 'alarm 120; exec @ARGV' "$APP" "$@" -ApplePersistenceIgnoreState YES; }
+# Commande de contrôle, sortie indentée ; rend son propre code (dans un pipe vers sed, le code serait celui de sed).
+indented() { "$@" > "$W/.indented" 2>&1 && r=0 || r=$?; sed 's/^/     /' "$W/.indented"; return $r; }
 unset OCIO STUDIO_OCIO_WORKING_SPACE STUDIO_OCIO_LIB
 
 rm -rf "$W/presets" "$W/out_"* "$W/cfg"
@@ -129,7 +131,7 @@ check "préflight : linéaire en 8 bits (lin8)" 'code "$W/run.log" linear_8bit'
 check "préflight : pas d avertissement pour srgb_tx en 8 bits" 'grep -q "^t: srgb8_8bit=-1" "$W/run.log"'
 check "espace inconnu : bloquant, rien d écrit" 'code "$W/run.log" ocio_unknown_colorspace && grep -q "^t: bad=0" "$W/run.log" && [ ! -e "$W/out_bad" ]'
 echo "-- pixels et manifeste (PyOpenColorIO)"
-if "$PY" "$T/ocio_export_check.py" "$W/out_ocio" untitled | sed 's/^/     /'; then
+if indented "$PY" "$T/ocio_export_check.py" "$W/out_ocio" untitled; then
 	ok "pixels et manifeste = PyOpenColorIO"
 else
 	ko "pixels et manifeste = PyOpenColorIO"

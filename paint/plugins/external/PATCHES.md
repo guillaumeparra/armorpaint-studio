@@ -1558,3 +1558,48 @@ ses masques elle-même, mais pas le changement d'ordre des atlas utilisés qu'el
 l'ajout de forme (`util_mesh_duplicate_object`, `tab_meshes_append_shape`) n'ajoutent pas d'entrée : `atlas_objects`
 devient trop court et les jeux retombent sur un seul (comme après un import qui ajoute des objets). L'annulation
 (historique) n'enregistre ni l'ordre des objets ni ces remappages.
+
+---
+
+## metal-target-format
+
+| | |
+|---|---|
+| Fichiers | `base/sources/backends/metal_gpu.h` (`gpu_pipeline_impl_t`), `base/sources/backends/metal_gpu.m` (`gpu_set_pipeline_internal`, `gpu_execute_and_wait`, `gpu_pipeline_compile`, `gpu_pipeline_destroy_internal`, nouveaux `pipeline_for_target`, `pipeline_release_targets`) |
+| Commit studio | `05af9b6a` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-27) |
+| Trouvé | 2026-09-27, banc du lot A6 (`.tests/ocio_validation_app.sh`) : un export EXR de calques 32 bits sortait `-inf`, NaN ou 0 |
+| Constaté | présent en `85f6cf1c` ; depuis quand : non recherché |
+
+**Bug.** Sur Metal, un pipeline est compilé pour un format de cible fixe (`color_attachment`, RGBA32 par défaut,
+`MTLPixelFormatBGRA8Unorm`) ; dessiner avec lui dans une cible d'un autre format donne un résultat indéfini, sans
+erreur. paint/ le fait dès que les calques ou les images d'export sont en 16 ou 32 bits (RGBA64, RGBA128) :
+`export_texture_run_layers` aplatit les calques dans `layers_expa/b/c` et `layers_temp_image` avec `pipes_copy`,
+`pipes_merge` et `pipes_merge_r/g/b` ; `layers_merge_layer` et l'aplatissement de `util_layer.c` font de même ;
+`draw_image` utilise les pipelines d'iron_draw, eux aussi en RGBA32. Constaté : `ArmorPaint --background cube.obj
+--export-textures exr32 generic <dossier>` écrit une couleur de base à `-inf`, une occlusion à 0 ; en `exr16`, NaN et
+1791. L'export studio d'un projet en calques 16/32 bits est faux de la même façon. Les bancs `export_app.sh` et
+`ocio_export_app.sh` ne le voyaient pas : ils comptent les fichiers ou comparent deux exports faux de la même façon.
+
+**Correctif.** Dans le backend Metal seulement. `gpu_pipeline_compile` garde le descripteur du pipeline
+(`impl.desc`). Au moment de lier un pipeline à une seule cible (`gpu_set_pipeline_internal`, et la reprise du
+pipeline courant dans `gpu_execute_and_wait`), `pipeline_for_target` compare le format de la cible à celui du
+pipeline : s'ils diffèrent, il utilise une variante compilée pour le format de la cible (copie du descripteur,
+`pixelFormat` changé), créée au premier usage et gardée dans `impl.target_pipeline[format]`. Mêmes shaders, mêmes
+masques d'écriture et même mélange : seule la conversion de sortie change. Les pipelines à plusieurs cibles et ceux
+déjà au bon format ne sont pas touchés. `gpu_pipeline_destroy_internal` libère les variantes ; une recompilation les
+oublie sans les libérer (`gpu_pipeline_destroy` travaille sur une copie de la structure, dont les champs restent),
+comme upstream pour `impl.pipeline`. Pour régénérer : `git diff 05af9b6a^ 05af9b6a -- base/sources/backends/`.
+
+**Test.** `.tests/ocio_validation_app.sh`, étape 4 : `--export-textures png`, `exr16` et `exr32` sur un plan ; chaque
+map EXR doit égaler le PNG à 1/255 près. Sans le patch : `-inf`, NaN, 0 (échec) ; avec : 0 à 0,56/255. Les étapes 1 à 3
+peignent et exportent des mires en calques 16 et 32 bits (écart relatif ≤ 2·10⁻³ et 1,6·10⁻⁴ contre oiiotool). Au
+2026-09-27, les 15 bancs dans l'app (`.tests/*_app.sh`) passent avec le patch.
+
+**Signes que l'upstream l'a corrigé.** `color_attachment` réglé selon `base_bits` pour `pipes_merge`/`pipes_copy`
+(ou des variantes 64/128 de ces pipelines utilisées dans `export_texture_run_layers`), ou un backend Metal qui adapte
+le pipeline à la cible. Rejouer l'étape 4 du banc sans le patch.
+
+**Non couvert.** Windows (Direct3D 12) et Linux (Vulkan) : leurs pipelines ont aussi un format de cible fixe, et le
+même code de paint/ y dessine en RGBA32 dans des cibles 16/32 bits. À vérifier au portage : le banc A6 le montre. Les
+pipelines à plusieurs cibles (MRT) ne sont pas adaptés : ceux de paint/ déclarent déjà leurs formats.

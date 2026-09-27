@@ -153,7 +153,8 @@ OCIO est du C++ ; le projet est du C. Il faut une couche `extern "C"`.
   - La LUT `.cube` d'upstream n'est pas modifiée : la LUT OCIO a sa propre texture half et sa propre lecture.
   - Menu Color dans la barre de menus plutôt que la barre de statut (le point d'injection `menubar-hook` existait).
   - Le choix n'est pas mémorisé : préférences et projet au lot A5. Les sphères d'environnement gardent leur tonemap
-    filmique. Traduire le shader GPU d'OCIO en kong (sans erreur de LUT) reste une piste pour A6, si un show en a besoin.
+    filmique. Traduire le shader GPU d'OCIO en kong (sans erreur de LUT) reste une piste, si un show en a besoin
+    (A6 : la LUT est déjà plus précise qu'une LUT `ociobakelut`).
 
 ### A3 — Export : transform par texture · **6 j** — ✅ **fait le 2026-09-26** (macOS)
 
@@ -286,11 +287,30 @@ OCIO est du C++ ; le projet est du C. Il faut une couche `extern "C"`.
     calque) : ce qui est peint garde ses valeurs, lues dans le nouvel espace. Le sélecteur de couleur et les couleurs
     des nœuds ne passent pas par OCIO : leurs valeurs sont celles de l'espace de travail.
 
-### A6 — Validation · **4 j**
+### A6 — Validation · **4 j** — ✅ **fait le 2026-09-27** (macOS)
 
 - Jeu de mires : rampe linéaire, ColorChecker, valeurs > 1 (spéculaires HDR).
 - Comparaison numérique contre `ociobakelut` / `oiiotool --colorconvert` sur les mêmes entrées.
 - Round-trip : import sRGB → peinture → export ACEScg → relecture Nuke.
+
+✅ **Fait le 2026-09-27** (macOS). Banc `.tests/ocio_validation_app.sh`, écarts dans le README (« Validation (A6) »).
+- **Mires** : rampe et ColorChecker sRGB 8 bits, HDR linéaire (0,0028 → 92), ColorChecker ACEScg, couleurs ACEScg
+  hors gamut Rec.709. Importées dans leur espace, posées sur un calque, exportées vers quatre espaces ; calques 32, 16
+  et 8 bits, puis espace de travail ACEScg. Références : `oiiotool --colorconvert` (OpenImageIO 3.1, son propre OCIO).
+- **Résultats** : sources 8 bits à 0,56/255 (demi-pas de la texture ré-encodée en 8 bits) ; flottant à 1,6·10⁻⁴ en
+  calques 32 bits, 1,8·10⁻³ en 16 bits (half), HDR sans écrêtage. Viewport : 0,06/255 sur les gris, 0,09/255 sur le
+  ColorChecker, 1,6/255 en HDR, mieux qu'une LUT `ociobakelut` 65³ (0,14 ; 0,99 ; 3,7). Nuke 17.1 relit l'export
+  ACEScg à 0,52/255 de la mire sRGB, et son affichage ACES 2.0 (OCIO 2.4, config v3) égale oiiotool.
+- **Trouvé.** (1) Bug d'upstream sur Metal : un pipeline compilé pour RGBA32 écrivait des valeurs aberrantes dans les
+  cibles RGBA64/RGBA128 (export `--export-textures exr16`/`exr32`, aplatissement et fusions des calques 16/32 bits).
+  Patch `metal-target-format` : variante du pipeline compilée au format de la cible. (2) Limite : en espace de travail
+  Rec.709, une couleur hors de son gamut perd ses composantes négatives (couleur de base stockée en gamma 2.2) ; le
+  rouge ACEScg ressort désaturé. Un show à textures ACEScg prend ACEScg comme espace de travail : exact.
+  (3) En espace ACEScg, les textures 8 bits sont quantifiées en AP1 : jusqu'à 4,7/255 sur un canal sombre en sRGB.
+  Les garder en half à l'import (mémoire × 2) si un show le demande.
+- **Différent du plan** : le shader GPU exact d'OCIO en kong n'est pas fait. La LUT 129³ est déjà plus précise que
+  la LUT d'affichage d'un DCC ; il reste une piste si un show en a besoin. API ajoutée pour le banc :
+  `studio_project_bits`, `studio_project_set_bits` (profondeur des calques par script).
 
 | Chantier A — total | **33 j** (voie A) · **~18 j** (voie B) |
 |---|---|
@@ -731,7 +751,7 @@ En C dans `external/`, sur le modèle de `studio_export_window.c` et de `studio_
 → *Un artiste ouvre depuis ShotGrid, peint, sauve en version, exporte au bon nom au bon endroit.*
 
 **Phase 3 — couleur · 6 semaines**
-✅ `A0` → ✅ `A1` → ✅ `A3` (export, prioritaire sur le viewport) → ✅ `A2` → ✅ `A4` → ✅ `A5` → `A6`
+✅ `A0` → ✅ `A1` → ✅ `A3` (export, prioritaire sur le viewport) → ✅ `A2` → ✅ `A4` → ✅ `A5` → ✅ `A6`
 → *Export colorimétriquement juste d'abord ; le viewport ensuite.*
 
 **Phase 4 — industrialisation · 3 semaines**

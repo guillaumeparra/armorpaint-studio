@@ -46,7 +46,7 @@ Modules, un par lot (voir `ARMORPAINT_LOTS.md` à la racine d'armorpaint) :
 | `studio_ocio_view`, `studio_ocio_lut` | A2 | ✅ viewport : transformation display/view/look d'OCIO en LUT 3D dans le compositeur, menu Color (macOS) |
 | `studio_ocio_import` | A4 | ✅ textures importées : espace source par texture (nom, file_rule, format, choix de l'artiste), pixels convertis vers l'espace de travail au décodage, espaces dans le `.arm` (macOS) |
 | `studio_prefs`, `studio_project`, `studio_ocio_prefs` | A5 | ✅ réglages couleur : préférences studio (`studio_prefs.json`, onglet Color), espace de travail gardé dans le `.arm`, textures reconverties quand il change (macOS) |
-| `studio_ocio` (shader exact) | A6 | à faire |
+| `.tests/ocio_validation_app.sh`, `.tests/ocio_validation.py` | A6 | ✅ validation de la chaîne couleur contre oiiotool, ociobakelut et Nuke 17 : mires, calques 8/16/32 bits, espace de travail ACEScg, viewport ; export upstream en EXR corrigé sur Metal (macOS) |
 | `studio_sg`, `studio_shotgrid`, `studio_json`, `assets/studio_sg_*.py` | C2 | ✅ sidecar ShotGrid (Toolkit), superviseur, API de scripting (macOS ; validé sur site simulé) |
 | `studio_workfiles`, `tk-armorpaint/` | C3 | ✅ Workfiles (tk-multi-workfiles2) et menu ShotGrid, par le moteur Toolkit tk-armorpaint (macOS ; validé sur site simulé) |
 | `studio_publish`, `tk-armorpaint/hooks/tk-multi-publish2/` | C4 | ✅ publish ShotGrid par tk-multi-publish2 : projet copié par ArmorPaint, textures exportées puis publiées, séquences `<UDIM>`, vignette du viewport (macOS ; validé sur site simulé) |
@@ -883,7 +883,7 @@ aplatis (`png`/`jpg` : 8 bits, `exr16` : half, `exr32` : float), comme dans l'up
 
 Point d'injection upstream : `STUDIO-PATCH(studio-export)` (PATCHES.md).
 
-## Gestion couleur OCIO (A0, A1, A2, A3, A4, A5)
+## Gestion couleur OCIO (A0 à A6)
 
 **Décision A0 : le vrai OpenColorIO**, pas une réimplémentation. Version épinglée dans `.ocio/CMakeLists.txt`
 (`STUDIO_OCIO_TAG`, aujourd'hui `v2.5.2`, VFX Reference Platform CY2026), construite depuis ses sources avec ses
@@ -963,8 +963,9 @@ couleurs saturées, 19 stops, albédos éclairés ; `.tests/ocio_view_test.c`, c
 
 Les gris et les couleurs courantes sont exacts à mieux qu'un code 8 bits. Les écarts maximaux viennent des couleurs
 très saturées au bord du gamut : la vue ACES 2.0 y compresse le gamut selon la teinte, une courbe que l'interpolation
-d'une LUT lisse. Dans l'app, le compositeur (GPU) est à 0,14/255 d'OCIO sur les couleurs sondées. La traduction
-exacte du shader GPU d'OCIO en kong reste une piste (lot A6), si un show en a besoin.
+d'une LUT lisse. Dans l'app, le compositeur (GPU) est à 0,14/255 d'OCIO sur les couleurs sondées. La LUT est plus
+précise qu'une LUT d'affichage baked par `ociobakelut` (voir « Validation (A6) ») ; traduire le shader GPU d'OCIO en
+kong reste une piste, si un show en a besoin.
 
 **Non couvert.** Les sphères d'environnement (menu Viewport, désactivées par défaut) gardent le tonemap filmique.
 
@@ -1152,6 +1153,49 @@ refusée, bibliothèque absente) ou un espace de travail introuvable, et dit où
   affichées telles quelles.
 - Deux instances d'ArmorPaint écrivent le même fichier de préférences sans verrou : la dernière écriture l'emporte.
 
+### Validation (A6)
+
+`.tests/ocio_validation_app.sh` fait passer des mires par toute la chaîne (import, calque, export) et compare les
+fichiers écrits à des outils qui ne partagent pas le code d'ArmorPaint : `oiiotool --colorconvert` (OpenImageIO 3.1,
+avec son propre OCIO 2.5.1), `ociobakelut`, et Nuke 17.1 s'il est installé (OCIO 2.4, configuration
+`fn-nuke_studio-config-v3.0.0_aces-v2.0_ocio-v2.4`, de la même famille ACES 2.0).
+
+**Mires.** Rampe sRGB 8 bits (256 niveaux), ColorChecker 24 en sRGB 8 bits, 32 valeurs HDR linéaires (gris de
+0,0028 à 92, couleurs saturées jusqu'à 64), ColorChecker en ACEScg (EXR float), 8 couleurs ACEScg hors du gamut
+Rec.709. Chaque mire est importée dans son espace (`studio_texture_set_color_space`), posée sur un calque de
+remplissage et exportée en EXR 32 vers l'espace de travail, ACEScg, sRGB - Texture et Linear P3-D65 : calques 32,
+16 et 8 bits (`studio_project_set_bits`) en Linear Rec.709, puis calques 32 bits en espace de travail ACEScg.
+
+**Écarts mesurés** (2026-09-27, maximum sur tous les espaces d'export) :
+
+| Mire | 32 bits | 16 bits | 8 bits | 32 bits, espace ACEScg |
+|---|---|---|---|---|
+| Rampe et ColorChecker sRGB 8 bits (/255, après la courbe sRGB) | 0,56 | 0,58 | 0,56 | 0,56, sauf 4,7 en sRGB - Texture ¹ |
+| HDR et ColorChecker ACEScg (écart relatif) | 1,6·10⁻⁴ | 1,8·10⁻³ (half) | — | 1,6·10⁻⁴ |
+| Couleurs ACEScg hors gamut Rec.709 | faussées ² | faussées ² | — | 4,7·10⁻⁴ |
+
+| Autres contrôles | Écart max |
+|---|---|
+| Aller-retour : ColorChecker sRGB → ArmorPaint → export ACEScg → Nuke → sRGB | 0,52/255 |
+| Viewport (LUT 129³) contre OCIO exact : gris, ColorChecker, HDR de 0,0028 à 92 | 0,06, 0,09, 1,6 /255 |
+| Même vue en LUT `ociobakelut` 65³ (entrée ACEScct), pour comparaison | 0,14, 0,99, 3,7 /255 |
+| Affichage ACES 2.0 de Nuke contre oiiotool | 0,0007/255 |
+
+Les textures 8 bits importées sont ré-encodées en gamma 2.2 sur 8 bits dans l'espace de travail : l'écart de
+0,56/255 est ce demi-pas de quantification. Les couleurs flottantes et les valeurs > 1 passent sans écrêtage en
+calques 16 et 32 bits (en 8 bits, le calque écrête à 1).
+
+1. En espace de travail ACEScg, cette quantification se fait en primaires AP1. Revenue en sRGB, elle passe par la
+   matrice AP1 → Rec.709 et par la pente de la courbe sRGB près du noir : le canal rouge du cyan du ColorChecker
+   (8/255) ressort à 12,7/255.
+2. **Limite.** Le calque stocke la couleur de base encodée gamma 2.2, sans signe : en espace de travail Rec.709,
+   une couleur hors de son gamut perd ses composantes négatives. Le rouge ACEScg (1, 0, 0) ressort en
+   (1,09, 0,24, 0,07). **Un show qui peint avec des textures à gamut large (ACEScg) doit prendre ACEScg comme espace
+   de travail** (préférences, projet ou `STUDIO_OCIO_WORKING_SPACE`) : ces couleurs sont alors exactes.
+
+Le banc a aussi trouvé un bug d'upstream sur Metal : l'export `--export-textures exr16`/`exr32` et l'aplatissement
+des calques 16/32 bits écrivaient des valeurs aberrantes (patch `metal-target-format`, voir `PATCHES.md`).
+
 ### Scripts (minic)
 
 ```c
@@ -1189,6 +1233,9 @@ int   studio_texture_set_color_space(char *file, char *color_space);  // nom, al
                                                  // texture de ce chemin dans le projet, le choix vaut pour son import
 int   studio_texture_dump(char *file, char *out);  // pour les bancs : pixels relus du GPU ("STX1", largeur, hauteur, format)
 int   studio_project_pack_assets(int on);        // option Pack Assets du menu File : 1/0, -1 pour lire ; rend la valeur d'avant
+int   studio_project_bits(void);                 // profondeur des calques : 8, 16 ou 32
+int   studio_project_set_bits(int bits);         // calques recopiés à cette profondeur, valeurs gardées (bornées à [0, 1] en 8
+                                                 // bits) ; 0 pour une autre valeur que 8, 16 ou 32
 
 // Réglages (A5)
 char *studio_prefs_path(void);                   // fichier des préférences studio (ignoré en --background sans $STUDIO_PREFS)
@@ -1228,6 +1275,7 @@ python3 .tests/arm_paths.py <projet.arm> [fichier...]   # chemins des fichiers d
 .tests/ocio_export_app.sh [dossier]    # export OCIO (A3) dans l'app : pixels = PyOpenColorIO, préflight, manifeste, cas bloquants
 .tests/ocio_view_app.sh [dossier]      # viewport OCIO (A2) dans l'app : compositeur = PyOpenColorIO, menu (API), rechargement, variables
 .tests/ocio_import_app.sh [dossier]    # textures importées (A4) dans l'app : pixels = PyOpenColorIO par format, choix par texture, .arm rouvert et paquet d'assets, STUDIO_OCIO_IMPORT=0, nœud Image Texture
+.tests/ocio_validation_app.sh [dossier]  # validation couleur (A6) dans l'app : mires importées, peintes, exportées (8/16/32 bits, espace ACEScg) = oiiotool ; viewport = oiiotool et ociobakelut ; aller-retour Nuke ; export upstream exr16/exr32 = png (patch metal-target-format) ; NUKE=<binaire>
 .tests/ocio_prefs_app.sh [dossier]     # réglages couleur (A5) dans l'app : fichier des préférences, espace de travail du projet (.arm rouvert, autre configuration, erreurs), textures reconverties = PyOpenColorIO, viewport
 .tests/export_window_app.sh [dossier]  # fenêtre d'export (B6) dans l'app, Qt offscreen : état, préflight, export, fichiers décochés, blocage, réouverture, bits et résolution par map, sidecar, preset du projet ; PY=<python PySide6>
 <python PySide6> .tests/export_window_ui.py [dossier]  # fenêtre d'export contre un faux ArmorPaint : liste groupée (tuiles UDIM, objets), cases, décomptes, problèmes affichés, tableau des maps, sidecar, nom des fichiers, jeux de textures
@@ -1267,6 +1315,14 @@ repris à la réouverture quels que soient la préférence et l'environnement, a
 configuration signalée, espace inconnu en erreur. Il change l'espace de travail (ACEScg, puis l'automatique) et
 compare les pixels des textures reconverties à PyOpenColorIO (`ocio_import_check.py --working=`). Même venv que
 `ocio_export_app.sh`.
+
+`ocio_validation_app.sh` écrit ses mires, son maillage (un plan d'UV 0..1), son preset et ses scripts avec
+`ocio_validation.py make`, lance ArmorPaint quatre fois (calques 32, 16, 8 bits, puis 32 bits en espace de travail
+ACEScg), puis compare avec `ocio_validation.py check`, qui écrit `report.md` (écarts mesurés, tableau de
+« Validation (A6) »). Les références sont calculées par `oiiotool` et `ociobakelut` de `.ocio/venv`
+(`pip install OpenImageIO` ; `ociobakelut` vient de la roue OpenColorIO). Nuke est cherché dans
+`/Applications/Nuke17*` ; `NUKE=` (vide) s'en passe, `NUKE=<binaire>` en désigne un autre (Nuke 17 ou plus, pour
+ACES 2.0). Environ 10 s avec Nuke.
 
 `export.sh` requiert libpng et libtiff (`brew install libpng libtiff`) ; `export_app.sh`, Pillow et `tiffinfo`.
 
