@@ -39,7 +39,8 @@ Modules, un par lot (voir `ARMORPAINT_LOTS.md` à la racine d'armorpaint) :
 | `studio_ocio`, `studio_ocio_lib.h`, `.ocio/`, `tools/build_ocio.sh` | A0, A1 | ✅ OpenColorIO 2.5.2 embarqué : configuration, espaces, displays/views, transformations CPU, API de scripting (macOS ; Linux écrit, non testé) |
 | `studio_ocio`, `studio_export` (color_space OCIO) | A3 | ✅ export : chaque texture convertie vers un espace OCIO de la configuration, préflight, manifeste (macOS) |
 | `studio_ocio_view`, `studio_ocio_lut` | A2 | ✅ viewport : transformation display/view/look d'OCIO en LUT 3D dans le compositeur, menu Color (macOS) |
-| `studio_ocio` (import, préférences, shader exact) | A4-A6 | à faire |
+| `studio_ocio_import` | A4 | ✅ textures importées : espace source par texture (nom, file_rule, format, choix de l'artiste), pixels convertis vers l'espace de travail au décodage, espaces dans le `.arm` (macOS) |
+| `studio_ocio` (préférences, shader exact) | A5, A6 | à faire |
 | `studio_sg`, `studio_shotgrid`, `studio_json`, `assets/studio_sg_*.py` | C2 | ✅ sidecar ShotGrid (Toolkit), superviseur, API de scripting (macOS ; validé sur site simulé) |
 | `studio_workfiles`, `tk-armorpaint/` | C3 | ✅ Workfiles (tk-multi-workfiles2) et menu ShotGrid, par le moteur Toolkit tk-armorpaint (macOS ; validé sur site simulé) |
 | `studio_publish`, `tk-armorpaint/hooks/tk-multi-publish2/` | C4 | ✅ publish ShotGrid par tk-multi-publish2 : projet copié par ArmorPaint, textures exportées puis publiées, séquences `<UDIM>`, vignette du viewport (macOS ; validé sur site simulé) |
@@ -79,6 +80,7 @@ upstream sans rebuild ; les réglages destinés aux artistes passeront par l'UI 
 | `STUDIO_OCIO_LIB` | chemin de `libstudio_ocio` pour un build sans liaison statique (bancs de test, Linux) |
 | `STUDIO_OCIO_VIEWPORT=0` | viewport au tonemap filmique d'ArmorPaint au démarrage (réactivable par le menu Color) |
 | `STUDIO_OCIO_DISPLAY`, `STUDIO_OCIO_VIEW`, `STUDIO_OCIO_LOOK` | transformation d'affichage du viewport au démarrage ; défaut : display et view par défaut de la configuration, sans look. Une valeur inconnue est journalisée et remplacée par le défaut |
+| `STUDIO_OCIO_IMPORT=0` | textures importées sans conversion OCIO (upstream) ; l'entrée des espaces d'un `.arm` n'est ni lue ni réécrite ; voir « Textures importées (A4) » |
 
 ## Exécution (C1)
 
@@ -717,7 +719,7 @@ aplatis (`png`/`jpg` : 8 bits, `exr16` : half, `exr32` : float), comme dans l'up
 
 Point d'injection upstream : `STUDIO-PATCH(studio-export)` (PATCHES.md).
 
-## Gestion couleur OCIO (A0, A1, A2, A3)
+## Gestion couleur OCIO (A0, A1, A2, A3, A4)
 
 **Décision A0 : le vrai OpenColorIO**, pas une réimplémentation. Version épinglée dans `.ocio/CMakeLists.txt`
 (`STUDIO_OCIO_TAG`, aujourd'hui `v2.5.2`, VFX Reference Platform CY2026), construite depuis ses sources avec ses
@@ -726,7 +728,7 @@ dépendances (expat, yaml-cpp, pystring, Imath, zlib, minizip-ng) par `tools/bui
 sur une machine neuve, puis rebuild d'ArmorPaint.
 
 OCIO est en C++ et amake ne compile que du C : le shim `.ocio/studio_ocio_lib.cpp` expose une ABI C
-(`studio_ocio_lib.h`, 26 fonctions, version `STUDIO_OCIO_LIB_ABI`). Aucune exception ne la traverse : chaque
+(`studio_ocio_lib.h`, 27 fonctions, version `STUDIO_OCIO_LIB_ABI`). Aucune exception ne la traverse : chaque
 erreur devient un retour NULL/0/-1 et un message (`studio_ocio_lib_error()`, par thread).
 
 - **macOS : liaison statique.** `build_ocio.sh` fusionne le shim, OCIO et ses dépendances en un seul objet
@@ -833,6 +835,90 @@ Le manifeste note, pour chaque fichier OCIO, l'espace canonique (un alias est r�
 de la configuration et l'espace de travail ; `null` si aucune texture n'en dépend. L'identifiant de conversion
 change si la configuration change : deux exports au même identifiant ont subi la même conversion.
 
+### Textures importées (A4)
+
+Chaque texture importée a un **espace source** OCIO. Ses pixels sont convertis vers l'espace de travail au
+décodage, avant l'envoi au GPU (patch `ocio-import`), et rangés comme ArmorPaint les attend. En 8 bits, ils restent
+encodés gamma 2.2, la convention des couleurs d'ArmorPaint : décodés depuis l'espace source, convertis, réencodés et
+arrondis au code le plus proche. En flottant (EXR, HDR), ils restent linéaires. Un espace de donnée (`Raw`) n'est
+pas converti ; l'alpha ne passe jamais par OCIO. La conversion tourne sur tous les cœurs, par bandes de 65 536
+pixels.
+
+**Espace source**, dans l'ordre :
+
+1. le choix enregistré pour la texture : celui de l'artiste, ou l'espace retenu à son premier import. Un projet
+   rouvert est décodé comme il l'a été, même si la configuration a changé ses règles entre-temps ;
+2. `.k` (format d'ArmorPaint) : pas de conversion ;
+3. un nom de donnée : les étiquettes de l'import de dossier d'ArmorPaint (`normal`, `nor`, `ao`, `rough`,
+   `metallic`, `height`, `opacity`…, `iron_path.c`) et `mask`, sur le nom sans extension ni numéro de tuile UDIM :
+   l'espace de donnée de la configuration (rôle `data`, `Raw`). Une étiquette de couleur de base l'emporte
+   (`wood_basecolor_normal` reste une couleur) ;
+4. une `file_rule` de la configuration autre que `Default` : dans les configurations studio et CG, un `.exr` est
+   en `ACES2065-1` ;
+5. le défaut du format : 8 bits → `sRGB Encoded Rec.709 (sRGB)`, l'équivalent de `srgb_tx` trouvé comme l'espace
+   de travail (le rôle `texture_paint` le désigne aussi dans ces configurations, mais une configuration de show peut
+   le mettre ailleurs : il n'est pas lu) ; `.hdr` → `Linear Rec.709 (sRGB)` ; autre flottant → `scene_linear`
+   (`ACEScg`).
+
+La règle `Default` n'est pas suivie : dans les configurations studio et CG, elle désigne `sRGB - Display`, un espace
+d'affichage qu'OCIO convertirait par la vue inverse (ACES 2.0), pas par la courbe sRGB. Le log le dit pour chaque
+texture :
+
+```
+studio: texture /shows/demo/tex/wood_normal.png: Raw (name), data, not converted
+```
+
+**Choisir l'espace.** Clic droit sur une texture de l'onglet Textures, « Color Space... », ou menu Color, « Texture
+Color Spaces... » pour toutes les textures du projet. Chaque ligne donne l'espace retenu et sa source (`chosen`,
+`data name`, `file rule`, `default` ; « not converted » sans conversion) et un menu : « Automatic » (l'ordre
+ci-dessus) ou un espace de la configuration. La texture est rechargée depuis son fichier et convertie avec son
+nouvel espace ; environnement, matériaux et calques de remplissage suivent. L'infobulle d'une texture dans l'onglet
+ajoute son espace et sa source. Le choix se fait par texture et non par nœud : ce sont les pixels qui sont convertis
+au chargement.
+
+**Nœud Image Texture.** Son option d'espace (Auto, Linear, sRGB) n'est qu'une conversion gamma 2.2 d'ArmorPaint,
+sans OCIO. Elle convertissait à l'envers : Linear sur la couleur de base décodait au lieu d'encoder, sRGB sur une
+autre entrée encodait au lieu de décoder (patch `image-texture-color-space`). Corrigée, elle change le rendu des
+projets qui la réglaient à Linear ou sRGB. Auto sur une texture qui garde des couleurs linéaires (flottante, d'un
+espace couleur) vaut désormais Linear : un EXR de couleur de base n'a plus besoin de l'option.
+
+**Dans le `.arm`.** Les espaces voyagent dans le projet, dans l'entrée `studio_color_spaces.json` du paquet
+d'assets, qu'ArmorPaint sans studio garde telle quelle. Chemins relatifs au `.arm`, comme ses textures :
+
+```json
+{
+	"version": 1,
+	"config": "studio-config-v4.0.0_aces-v2.0_ocio-v2.5",
+	"working_space": "Linear Rec.709 (sRGB)",
+	"textures": [
+		{"file": "ramp.png", "color_space": "ACEScg", "source": "user", "float": false, "linear": false}
+	]
+}
+```
+
+Rouvert avec une autre configuration, le projet le signale dans la console ; un espace absent de la configuration
+repasse en automatique, signalé aussi.
+
+**Pack Assets** (menu File). Un projet enregistré avec ses assets relit ses textures du paquet, dont les pixels sont
+déjà convertis : elles ne sont pas converties une seconde fois. Sans le fichier sur le disque, leur espace ne peut
+plus changer (« packed » dans la fenêtre, réimporter le fichier) ; avec lui, changer l'espace retire la copie du
+paquet, que le prochain enregistrement avec Pack Assets refait. Le paquet d'ArmorPaint redessine chaque texture en
+RGBA 8 bits : une texture flottante y perd sa précision (upstream). Ce chemin débordait le tas à l'encodage des PNG,
+patch `encode-image-overflow`.
+
+**Désactiver** : `STUDIO_OCIO_IMPORT=0` au lancement. Pas de conversion, et l'entrée du `.arm` n'est ni lue ni
+réécrite (celle d'un projet ouvert est gardée telle quelle).
+
+**Non couvert.**
+- Les couleurs hors de [0, 1] après conversion sont bornées en 8 bits (une couleur ACEScg saturée hors du gamut
+  Rec.709, par exemple) ; en half, bornées à ±65 504 ; une valeur non finie devient 0.
+- Les calques d'un PSD prennent l'espace du fichier à l'import ; leur espace ne se change pas ensuite (pas de
+  fichier à relire).
+- Les textures des matériaux ou brosses importés d'un autre `.arm` sont résolues comme un import : les choix
+  enregistrés dans cet autre `.arm` ne sont pas lus.
+- Une texture déjà dans le cache d'ArmorPaint (capture du viewport) n'est pas décodée à nouveau : ses pixels
+  restent tels quels. Les vignettes du navigateur de fichiers ne sont pas converties.
+
 ### Scripts (minic)
 
 ```c
@@ -859,6 +945,17 @@ char *studio_ocio_view_look(void);               // "" : aucun
 char *studio_ocio_view_status(void);
 char *studio_ocio_view_apply_rgb(float r, float g, float b);  // la LUT sur une couleur de l'espace de travail : "r g b" ; "" si inactif
 char *studio_ocio_view_probe(int argb);          // diagnostic : 0xAARRGGBB passé par le vrai compositeur (grain et vignette coupés) : "r g b"
+
+// Textures importées (A4) ; file : chemin de la texture (asset), comme dans le projet
+int   studio_ocio_import_enabled(void);          // 0 avec STUDIO_OCIO_IMPORT=0
+char *studio_texture_color_space(char *file);    // espace source retenu ; "" sans conversion (.k, OCIO indisponible, désactivé)
+char *studio_texture_color_space_source(char *file);  // "user", "name", "rule", "default" ; "" sans conversion
+int   studio_texture_is_linear(char *file);      // 1 : couleurs gardées linéaires (flottante, espace couleur)
+int   studio_texture_set_color_space(char *file, char *color_space);  // nom, alias ou rôle ; "" : automatique. Recharge
+                                                 // la texture ; 0 si l'espace est inconnu ou le fichier absent. Sans
+                                                 // texture de ce chemin dans le projet, le choix vaut pour son import
+int   studio_texture_dump(char *file, char *out);  // pour les bancs : pixels relus du GPU ("STX1", largeur, hauteur, format)
+int   studio_project_pack_assets(int on);        // option Pack Assets du menu File : 1/0, -1 pour lire ; rend la valeur d'avant
 ```
 
 ## Tests
@@ -873,12 +970,13 @@ char *studio_ocio_view_probe(int argb);          // diagnostic : 0xAARRGGBB pass
 .tests/publish_app.sh [dossier]        # publish ShotGrid (C4) dans l'app, site simulé : op publish, puis fenêtre Publish (Qt offscreen) ; copie publiée rouverte sans le dossier de travail ; PY=<python PySide6>
 .tests/arm_paths_app.sh [dossier]      # chemins enregistrés dans les .arm (patch arm-relative-paths) : relatifs, normalisés, rouverts sans l'ancien dossier
 python3 .tests/arm_paths.py <projet.arm> [fichier...]   # chemins des fichiers d'un .arm ; avec des fichiers, vérifie qu'il les désigne, relatifs et normalisés
-.tests/export.sh [dossier de travail]  # export studio (B2, B4, B5) hors app : encodeurs relus par libpng/libtiff, expressions, presets, préflight, conseil de résolution UDIM ; FUZZ=<n>
+.tests/export.sh [dossier de travail]  # export studio (B2, B4, B5) hors app : encodeurs relus par libpng/libtiff (patches sdefl-bound, encode-image-overflow), expressions, presets, préflight, conseil de résolution UDIM ; FUZZ=<n>
 .tests/export_app.sh [dossier]         # export studio dans l'app : scripts, --export-textures, pixels = upstream, manifeste, atomicité
 .tests/ocio.sh [dossier de travail]    # OCIO (A1) hors app : ABI, module, références PyOpenColorIO, threads, erreurs ; OCIO_TEST_CONFIGS=<configs>
 .tests/ocio_app.sh [dossier]           # OCIO dans l'app : configuration par défaut, $OCIO, $OCIO invalide, API de scripting
 .tests/ocio_export_app.sh [dossier]    # export OCIO (A3) dans l'app : pixels = PyOpenColorIO, préflight, manifeste, cas bloquants
 .tests/ocio_view_app.sh [dossier]      # viewport OCIO (A2) dans l'app : compositeur = PyOpenColorIO, menu (API), rechargement, variables
+.tests/ocio_import_app.sh [dossier]    # textures importées (A4) dans l'app : pixels = PyOpenColorIO par format, choix par texture, .arm rouvert et paquet d'assets, STUDIO_OCIO_IMPORT=0, nœud Image Texture
 .tests/export_window_app.sh [dossier]  # fenêtre d'export (B6) dans l'app, Qt offscreen : état, préflight, export, fichiers décochés, blocage, réouverture, bits et résolution par map, sidecar, preset du projet ; PY=<python PySide6>
 <python PySide6> .tests/export_window_ui.py [dossier]  # fenêtre d'export contre un faux ArmorPaint : liste groupée (tuiles UDIM, objets), cases, décomptes, problèmes affichés, tableau des maps, sidecar, nom des fichiers, jeux de textures
 .tests/sets_app.sh [dossier]           # jeux de textures, nom des fichiers et UDIM dans l'app, avec les maillages de udim_gen.py ; PY=<python PySide6>
@@ -901,6 +999,13 @@ chargé par dlopen, avec de fausses bibliothèques (ABI différente, symbole man
 PNG 8, à 1, 3 et 4 canaux, vers ACEScg, ACEScct, sRGB - Texture, Raw et des alias. `ocio_export_check.py` relit
 chaque fichier et le compare à PyOpenColorIO appliqué à la texture brute : identique au bit près (au code près en
 8 et 16 bits). Il demande, dans `.ocio/venv` : `pip install numpy OpenEXR tifffile pillow`.
+
+`ocio_import_app.sh` écrit des images de test avec `ocio_import_check.py` (rampes et bruit en PNG, TIFF, PSD à plat
+et à calques ; EXR float et half aux valeurs extrêmes, NaN et infinis compris ; `.hdr`), les importe dans ArmorPaint,
+relit les pixels envoyés au GPU (`studio_texture_dump`) et les compare à PyOpenColorIO appliqué au fichier : au code
+près en 8 bits (99 % exacts), à 1 ulp en half. Il vérifie aussi le `.arm` (entrée des espaces, réouverture, paquet
+d'assets sans les fichiers) et le nœud Image Texture (export d'un gris linéaire par un calque de remplissage). Même
+venv que `ocio_export_app.sh`.
 
 `export.sh` requiert libpng et libtiff (`brew install libpng libtiff`) ; `export_app.sh`, Pillow et `tiffinfo`.
 

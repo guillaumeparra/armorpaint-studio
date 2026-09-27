@@ -344,6 +344,10 @@ Recherche exhaustive : zéro occurrence de OCIO, OpenColorIO, ACES, ACEScg, chro
 
 Ce qui existe :
 - Un enum `color_space_t` à 4 valeurs (`enums.h:452`) : AUTO, LINEAR, SRGB, DIRECTX_NORMAL_MAP — utilisé pour l'**import**
+  *(précision du 2026-09-27 : c'est l'option du nœud Image Texture, appliquée dans le shader par
+  `parser_material_texture_store()`, pas une conversion des pixels importés. Ses branches Linear et sRGB
+  convertissaient à l'envers, corrigé par le patch `image-texture-color-space` ; la conversion OCIO des textures
+  importées est le lot A4, `external/studio_ocio_import.c`)*
 - À l'export, **2 choix** seulement : `linear` ou `srgb` (`main.c:250`)
 - Le « srgb » est un **gamma 2.2 pur** (`export_texture.c:3` : `export_texture_gamma = 1.0/2.2`, puis `math_pow(value, gamma)`), pas la courbe sRGB par morceaux. Écart mesurable dans les noirs.
 - Le viewport applique un tonemap **Filmic Hable/Uncharted2 en dur** (`shaders/compositor_pass.kong:41`), non configurable

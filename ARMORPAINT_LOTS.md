@@ -194,7 +194,7 @@ OCIO est du C++ ; le projet est du C. Il faut une couche `extern "C"`.
   - L'espace de travail vient de la configuration ou d'une variable d'environnement ; le stocker dans le `.arm` va
     au lot A5.
 
-### A4 — Import : interprétation des textures entrantes · **4 j**
+### A4 — Import : interprétation des textures entrantes · **4 j** — ✅ **fait le 2026-09-27** (macOS)
 
 - À l'import d'une texture ([import_texture.c](paint/sources/io/import_texture.c)), proposer un colorspace source (avec heuristique : `_basecolor`→sRGB, `_nor`/`_rough`/`_metal`→Raw).
 - Transformer vers le working space à l'import.
@@ -202,6 +202,49 @@ OCIO est du C++ ; le projet est du C. Il faut une couche `extern "C"`.
 - Node `Image Texture` : exposer le colorspace dans les boutons du nœud.
 
 **Livrable** : une texture importée est interprétée correctement.
+
+✅ **Fait le 2026-09-27** (macOS).
+- **Conversion au décodage.** Chaque texture importée a un espace source OCIO ; ses pixels sont convertis vers
+  l'espace de travail juste avant l'envoi au GPU, sur tous les cœurs : en 8 bits réencodés gamma 2.2 (la convention
+  d'ArmorPaint), en flottant gardés linéaires ; un espace de donnée n'est pas converti, l'alpha jamais. Patch
+  upstream `ocio-import` : un pointeur de fonction dans `iron.h`, appelé au décodage ; l'import de texture enveloppé
+  (`import_texture.c`) ; l'entrée du `.arm` écrite à l'enregistrement (`export_arm.c`) ; infobulle et menu
+  contextuel (`tab_textures.c`).
+- **Espace source**, dans l'ordre : choix enregistré (de l'artiste, ou de l'import précédent : un projet rouvert se
+  décode comme avant), `.k` sans conversion, nom de donnée (étiquettes d'ArmorPaint et `mask`) → `Raw`, `file_rule`
+  autre que `Default` (`.exr` → ACES2065-1 dans les configurations studio et CG), défaut du format (8 bits → sRGB,
+  `.hdr` → Linear Rec.709, autre flottant → `scene_linear`).
+- **UI** : « Color Space... » dans le menu contextuel de l'onglet Textures, « Texture Color Spaces... » dans le menu
+  Color (toutes les textures) : « Automatic » ou un espace de la configuration, texture rechargée depuis son
+  fichier ; espace et source dans l'infobulle. `STUDIO_OCIO_IMPORT=0` désactive le lot. API minic.
+- **Projet** : les espaces voyagent dans le `.arm`, entrée `studio_color_spaces.json` du paquet d'assets (qu'ArmorPaint
+  sans studio garde), avec la configuration et l'espace de travail ; un changement de configuration est signalé à la
+  réouverture.
+- **Tests.** `.tests/ocio_import_app.sh`, dans l'app : pixels relus du GPU et comparés à PyOpenColorIO
+  (`ocio_import_check.py`) pour PNG, TIFF, PSD à plat et à calques, EXR float et half (valeurs extrêmes, NaN,
+  infinis), `.hdr`, donnée ; choix par texture, vignette du navigateur, `.arm` rouvert, paquet d'assets sans les
+  fichiers, désactivation, nœud Image Texture : 31 contrôles, tous passent.
+- ✅ **Bugs trouvés en route, corrigés** :
+  - nœud Image Texture (upstream, depuis 2023) : ses options Linear et sRGB convertissaient à l'envers (patch
+    `image-texture-color-space`) ; Auto vaut désormais Linear sur une texture flottante convertie. **Change le rendu
+    des projets qui réglaient Linear ou sRGB.**
+  - encodage PNG/JPEG (upstream, depuis 2024) : débordement de tas dans `_encode_image` (tampon de `w * h * 4`
+    octets), qui corrompait les textures du paquet d'assets (Pack Assets) et faisait planter leur réouverture (patch
+    `encode-image-overflow`).
+  - tinyexr (vendoré) : un bloc deflate à 19 codes de distance était décodé faux (des EXR ZIP d'OpenEXR 3.5 ne
+    s'importaient pas) ; l'Adler-32 n'était pas vérifié (correctifs `deflate-hdist-19`, `zlib-adler32`).
+- **Différent du plan.**
+  - Pas d'espace OCIO dans les boutons du nœud Image Texture, ni d'enum `color_space_t` étendu : le choix se fait par
+    texture, puisque ce sont les pixels qui sont convertis au chargement. L'option du nœud reste la conversion gamma
+    2.2 d'ArmorPaint (corrigée).
+  - Pas de question à l'import : l'heuristique décide seule (nom, file_rule, format), l'artiste corrige ensuite.
+  - La règle `Default` des file_rules n'est pas suivie (elle désigne `sRGB - Display`, qu'OCIO convertirait par la
+    vue inverse) ; le rôle `texture_paint` n'est pas lu (défaut 8 bits : l'équivalent de `srgb_tx`).
+  - Le numéro de tuile UDIM est retiré du nom avant la reconnaissance des données.
+  - Limites : couleurs bornées à [0, 1] en 8 bits après conversion ; textures du paquet d'assets déjà converties
+    (leur espace ne change qu'avec le fichier) et redessinées en 8 bits par ArmorPaint, flottantes comprises
+    (upstream) ; calques d'un PSD dans l'espace du fichier ; choix d'un autre `.arm` (matériaux, brosses importés)
+    non lus.
 
 ### A5 — Config, persistance, UI · **3 j**
 
@@ -489,7 +532,7 @@ Décidé le 2026-09-26. Analyse, architecture et détail des phases : **`ARMORPA
 → *Un artiste ouvre depuis ShotGrid, peint, sauve en version, exporte au bon nom au bon endroit.*
 
 **Phase 3 — couleur · 6 semaines**
-`A0` → `A1` → `A3` (export, prioritaire sur le viewport) → `A2` → `A4` → `A5` → `A6`
+✅ `A0` → ✅ `A1` → ✅ `A3` (export, prioritaire sur le viewport) → ✅ `A2` → ✅ `A4` → `A5` → `A6`
 → *Export colorimétriquement juste d'abord ; le viewport ensuite.*
 
 **Phase 4 — industrialisation · 3 semaines**
