@@ -618,7 +618,7 @@ Ce chantier remplace la feuille de route E0-E11 de l'étude pour la v1.
 **Objectif (v0)** : un outil qui ouvre un .sbs ou un .sbsar, liste ses paramètres exposés comme Painter les montre, les rend par `sbsrender` et crée ou met à jour le matériau correspondant dans ArmorPaint.
 
 **Choix d'architecture.**
-- **Moteur** : `sbsrender` et `sbscooker` de Designer, moteur `mtl` (par défaut ; c'est celui qu'affichent Designer et Painter). Un processus par rendu, toutes les sorties utiles dans le même appel. Mesuré sur le M4 : 1,40 s en 2048 pour colorful_planks, 0,6 à 0,9 s en 512.
+- **Moteur** : `sbsrender` et `sbscooker` de Designer, moteur `mtl` (par défaut ; c'est celui qu'affichent Designer et Painter). Un processus par format de fichier, toutes les sorties de ce format dans le même appel. Mesuré sur le M4 (E1) : colorful_planks, 6 sorties, 1,17 s en 2048 et 0,68 s en 512.
 - **Chemin de `sbsrender`** : préférence `subzero.sbsrender` (fichier des préférences studio, `studio_prefs_*`), réglée dans un onglet **subzero** de la boîte Préférences (`box_preferences_add_tab`, patch `preferences-tab` déjà posé, comme l'onglet Color d'OCIO).
   - Préférence vide : détection dans `/Applications/Adobe Substance 3D Designer/*.app/Contents/MacOS/`.
   - Sur le poste de Guillaume, la préférence vise la **copie isolée** `~/Desktop/code/sbsrender/MacOS/sbsrender` (E0) : figée, elle ne bouge pas avec les mises à jour de Designer.
@@ -655,11 +655,11 @@ Ce chantier remplace la feuille de route E0-E11 de l'étude pour la v1.
     - même vitesse.
   - `mtl` n'est pas déterministe d'un rendu à l'autre (quelques niveaux sur 0,2 % des octets). C'est sans importance pour Guillaume ; les comparaisons au pixel près se font en `neon --cpu-count 1`.
 
-### E1 — Description et rendu, en ligne de commande · **2-3 j**
+### E1 — Description et rendu, en ligne de commande · **2-3 j** · ✅ fait (2026-09-27)
 
-En Python, testable sans ArmorPaint.
+En Python, testable sans ArmorPaint. Banc : `.tests/subzero.sh` (20 matériaux de l'étagère tirés au sort ; `SUBZERO_RENDER_ALL=1` pour les 107).
 
-- `subzero_meta.py` (reprise de `sbsar_meta.py` et `sevenz.py`) :
+- `subzero_meta.py` et `subzero_7z.py` (reprises de `sbsar_meta.py` et `sevenz.py`) :
   - graphes ;
   - entrées : types, défauts, bornes, pas, widgets, libellés, descriptions, groupes, `visibleif`, usages ;
   - sorties : usage, format, `disable` ;
@@ -669,7 +669,9 @@ En Python, testable sans ArmorPaint.
   - rendu par `--input-graph`, `--set-value` (dont `$outputsize` et `$randomseed`), `--use-preset`, `--set-entry` pour les entrées image, `--input-graph-output` pour les seules sorties liées ;
   - **`--memory-budget` toujours explicite.** Sans lui, `sbsrender` lance `system_profiler SPDisplaysDataType` pour lire la VRAM et l'attend 0,3 s. Avec, sur colorful_planks (M4, `mtl`), l'aperçu 512 passe de 1,00 à 0,65 s et le 2048 de 1,42 à 1,08 s, pixels inchangés. **La vitesse est la priorité de Guillaume.** Il reste un coût fixe d'environ 0,6 s par processus, dont 0,14 s de chargement des bibliothèques par dyld et environ 0,2 s de moteur ; l'écart entre 16 px et 512 px ne dépasse pas 0,05 s ;
   - dossier de sortie créé avant l'appel : `sbsrender` ne le crée pas (code 47). Le rapport JSON qu'il écrit sur stdout (fichier de chaque sortie) sert à la vérification ;
-  - formats : TGA 8 bits ; normale et hauteur en EXR half si le projet est en 16 ou 32 bits (`--set-output-format`, `--set-output-bit-depth`). Jamais de PNG : 7,5 s au lieu de 1,4 s en 2048 ;
+  - formats : TGA 8 bits ; normale et hauteur en EXR half si le projet est en 16 ou 32 bits. Jamais de PNG : 7,5 s au lieu de 1,4 s en 2048 ;
+  - **un format par appel.** Un même appel qui écrit deux formats (TGA et EXR, ou TGA et TIFF) échoue au hasard, environ 1 fois sur 8 : « Result cannot be saved », code 47. Avec un format par appel, aucun échec sur 47 essais. Les sorties EXR partent donc dans un second processus, lancé en même temps que le premier. Chacun recalcule le graphe, ce qui coûte environ 0,5 s en 2048 ; d'où l'EXR réservé aux projets en 16 ou 32 bits ;
+  - **EXR sans compression** : tout en EXR, 1,32 s au lieu de 1,73 s en zip (piz : 1,61 s). Le TGA « 16 bits » n'existe pas : `sbsrender` l'écrit en 8 bits sans rien dire ;
   - **vérification** que chaque fichier attendu existe, et lecture de stderr. `sbsrender` rend le code 0 sur une sortie introuvable ou un bitmap manquant (image noire) ;
   - annulation par kill du groupe de processus.
 
@@ -679,6 +681,14 @@ En Python, testable sans ArmorPaint.
 - wood_plain (sortie « ambientocclusion » introuvable) donne une erreur lisible, jamais une image noire ;
 - colorful_planks.sbs est cuit puis rendu ;
 - un chemin de `sbsrender` faux ou vide donne un message qui dit quoi régler.
+
+**Résultats** (M4, copie isolée, `mtl`) :
+- 977 .sbsar lus en 0,8 s, descriptions identiques à celles de l'étude ; 40 tirés au sort décrits comme par `sbsrender info` ; 1 784 conditions `visibleif` compilées et évaluées ;
+- les 107 matériaux de l'étagère rendus en 2048 avec toutes leurs sorties image : 1 004 fichiers en 110 s ;
+- wood_plain : erreur lisible, rien d'écrit à destination ;
+- colorful_planks.sbs cuit en 1,1 s puis rendu, cuisson reprise du cache à la deuxième ouverture ;
+- colorful_planks, 6 sorties : **0,68 s en 512, 1,17 s en 2048** en TGA ; 1,64 s avec la hauteur en EXR ;
+- annulation : rendu tué en moins de 0,5 s, destination intacte.
 
 ### E2 — Fenêtre de réglage · **4-6 j**
 
@@ -725,13 +735,13 @@ En C dans `external/`, sur le modèle de `studio_export_window.c` et de `studio_
   - chemin de `sbsrender` vide, faux, puis corrigé dans les préférences sans relancer ArmorPaint ;
   - mise à jour d'un matériau utilisé par 2 calques ;
   - projet rouvert sans le plugin, avec un aspect identique.
-- **Critère chronométré** : colorful_planks en 2048, « Envoyer » → calque à jour en ≤ 2,5 s (rendu seul : 1,08 s avec `--memory-budget`).
+- **Critère chronométré** : colorful_planks en 2048, « Envoyer » → calque à jour en ≤ 2,5 s (rendu seul, 6 sorties en TGA : 1,17 s).
 
 | Chantier E (v0) — total | **11-16 j** |
 |---|---|
 
 **Compromis acceptés en v0.**
-- **Pas de temps réel.** Aperçu 512 en 0,6 à 0,9 s dans la fenêtre ; le viewport ne change qu'à « Envoyer » ou « Mettre à jour » (≈ 1,5 à 2 s en 2048). Tout le graphe est recalculé à chaque réglage.
+- **Pas de temps réel.** Aperçu 512 en 0,7 s environ dans la fenêtre ; le viewport ne change qu'à « Envoyer » ou « Mettre à jour » (≈ 1,5 à 2 s en 2048). Tout le graphe est recalculé à chaque réglage.
 - **Fenêtre séparée**, pas un onglet de la barre latérale : les paramètres ne s'affichent pas à la simple sélection du calque, il faut « Rééditer ».
 - **Un matériau = un jeu de réglages.** Deux calques qui partagent le matériau partagent ses textures, comme partout dans ArmorPaint ; pour des réglages différents, « Dupliquer ».
 - **Ctrl+Z n'annule pas une mise à jour de textures**, comme « Reimport Textures » d'ArmorPaint.
