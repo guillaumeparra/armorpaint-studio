@@ -874,9 +874,10 @@ ne le peignent pas. ArmorPaint peint toutes les tuiles dans chaque texture de ca
 carrée du nombre de tuiles arrondie au-dessus, 8 au plus, soit 64 tuiles) : une tuile a la résolution du projet divisée
 par ce côté (projet 4096, 6 tuiles → grille 3 × 3 → 1365 pixels par tuile). Après l'import, la barre d'état le dit,
 avec la résolution de projet qu'il faut pour 2048 et 4096 pixels par tuile et la mémoire d'un calque
-(`studio_udim.c` ; dans la console seule si l'import a affiché un avertissement). Per UDIM Tile découpe la tuile et la
-remet à la résolution de la map : les fichiers ont la taille demandée (`<resolution>`), pas plus de détail. En
-Visible, un maillage UDIM donne la grille entière (avertissement du préflight). Au-delà de 64 tuiles (objets
+(`studio_udim.c` ; dans la console seule si l'import a affiché un avertissement). Lot D2 (branche `d2`) : chaque
+tuile a ses propres textures, à la résolution du projet ; la grille et ce message de résolution disparaissent au
+sous-lot D2f. Per UDIM Tile écrit chaque tuile à sa résolution, sans recadrage ni ré-agrandissement (D2d). En Visible,
+un maillage UDIM donne la grille entière, chaque tuile réduite dans sa case (avertissement du préflight). Au-delà de 64 tuiles (objets
 `nom.1xxx` ajoutés ou renommés), les suivantes ne sont ni peintes ni exportées : message, et le préflight bloque
 l'export studio (patch udim-tile-limit).
 
@@ -943,6 +944,7 @@ int   studio_layer_op(char *op);                     // "duplicate", "delete", "
 int   studio_layer_set_parent(int i, int group);     // met le calque i dans le groupe d'indice group (-1 : hors groupe), comme un glisser-déposer
 int   studio_mesh_override(int object, int material); // onglet Meshes : matériau glissé sur le maillage (-1 : aucun), que le flatten dessine par-dessus les calques
 int   studio_colorid_mask(char *path, int rgb);      // outil ColorID, To Mask : carte d'id path, couleur piquée 0xRRGGBB ; indice du masque créé sur le calque courant
+int   studio_mask_export(int i, char *dir, char *name); // menu Export du masque i : dir/name.png, un fichier <name>.<tuile>.png par tuile d'un masque à tuiles ; 1 si fait
 int   studio_project_res(int px);                    // résolution Custom px × px, calques redimensionnés tout de suite
 char *studio_world_screen(float x, float y, float z); // position à l'écran (0..1) d'un point du monde, « x y » ; « - » derrière la caméra
 char *studio_rt_pixel(char *target, float x, float y, float z); // pixel « r g b a » d'une cible de rendu (gbuffer1...) là où le point se projette
@@ -1428,7 +1430,7 @@ int   studio_ocio_import_reconvert(void);        // recharge et reconvertit les 
 .tests/obj.sh [dossier de travail]     # import OBJ (patches obj-global-indices, obj-float-exponent, udim-import) ; FUZZ=<n> pour le nombre de mutations
 .tests/fbx.sh [dossier de travail]     # import FBX (patch fbx-split) : splits = upstream, UDIM, matériaux, fuzz ; FUZZ=<n>
 .tests/udim_app.sh [dossier]           # UDIM dans l'app (lot D0) : import OBJ/FBX, refus, ajout, 70 tuiles (atlas, peinture, export), conseil de résolution, layer() par tuile
-.tests/udim_tiles_app.sh [dossier]     # jeu de textures par tuile (lot D2, patch udim-tiles) : opérations de calque, undo, table qui change (D2a) ; peinture à la couture, undo par pas, ortho, xray, symétrie, cartes, pipettes, remplissages, clone, bakes par tuile et high poly (D2b, patch bake-derivative) ; flatten, fusions, masques, groupes, surcharges de matériau, ColorID → masque par tuile (D2c)
+.tests/udim_tiles_app.sh [dossier]     # jeu de textures par tuile (lot D2, patch udim-tiles) : opérations de calque, undo, table qui change (D2a) ; peinture à la couture, undo par pas, ortho, xray, symétrie, cartes, pipettes, remplissages, clone, bakes par tuile et high poly (D2b, patch bake-derivative) ; flatten, fusions, masques, groupes, surcharges de matériau, ColorID → masque par tuile (D2c) ; export par tuile identique au bit près à un projet d'une tuile, Visible en grille, par objet, Selected, masque exporté par tuile (D2d)
 .tests/sg.sh [dossier de travail]     # ShotGrid hors app : sidecar (C2), noms des exports (B3), moteur (C3), publish (C4), mode dégradé et file d'attente (C5) ; Toolkit de .shotgrid/
 .tests/publish_app.sh [dossier]        # publish ShotGrid (C4) dans l'app, site simulé : op publish, fenêtre Publish (Qt offscreen), op publish en --background ; Versions de review ; copie publiée rouverte sans le dossier de travail ; PY=<python PySide6>
 .tests/sg_context_app.sh [dossier]     # contexte et mode dégradé ShotGrid (C5) dans l'app, site simulé : contexte gardé dans le .arm, site coupé (mode fichier, retour trouvé au repos), coupure en plein publish (file rejouée), journal d'audit, sonde en ligne et journal envoyé au site

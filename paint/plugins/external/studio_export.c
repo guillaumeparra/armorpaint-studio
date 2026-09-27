@@ -67,6 +67,8 @@ i32                     slot_layer_get_object_mask(slot_layer_t *raw);
 i32                     layers_udim_tile_slot(slot_layer_t *l);
 bool                    util_mesh_udim_layer(slot_layer_t *l);
 i32                     util_mesh_atlas_stride(void);
+bool                    util_udim_layer_tiled(slot_layer_t *l);
+void                    util_udim_atlas_texture(slot_layer_t *l, gpu_texture_t *view, gpu_texture_t *target);
 slot_layer_t_array_t   *slot_layer_get_filters(slot_layer_t *raw, bool include_group_filters);
 i32                     config_get_texture_res_x(void);
 i32                     config_get_texture_res_y(void);
@@ -1779,9 +1781,22 @@ static uint8_t *read_layer(slot_layer_t *l, const char *variant, const char *til
 	int   stride = util_mesh_atlas_stride();
 	float cw     = tex->width / (float)stride;
 	float ch     = tex->height / (float)stride;
-	draw_begin(t, true, 0x00000000);
-	draw_set_pipeline(pipes_copy);
-	if (slot >= 0 && util_mesh_udim_layer(l)) { // calque partagé : la case de la tuile, à la taille entière
+	// Calque en tuiles (lot D2d) : la tuile du contexte, posée par l'upstream pour une tuile exportée seule, ou chaque
+	// tuile dans sa case pour la grille entière
+	bool tiled = util_udim_layer_tiled(l);
+	if (tiled && slot < 0) {
+		util_udim_atlas_texture(l, tex, t);
+	}
+	else {
+		draw_begin(t, true, 0x00000000);
+		draw_set_pipeline(pipes_copy);
+	}
+	if (tiled) {
+		if (slot >= 0) {
+			draw_image(tex, 0, 0);
+		}
+	}
+	else if (slot >= 0 && util_mesh_udim_layer(l)) { // calque partagé : la case de la tuile, à la taille entière
 		draw_scaled_sub_image(tex, (slot % stride) * cw, (slot / stride) * ch, cw, ch, 0, 0, tex->width, tex->height);
 	}
 	else if (slot < 0 && tile_slot >= 0) { // calque d'une tuile, export de la grille entière : dans sa case
@@ -1790,8 +1805,10 @@ static uint8_t *read_layer(slot_layer_t *l, const char *variant, const char *til
 	else {
 		draw_image(tex, 0, 0);
 	}
-	draw_set_pipeline(NULL);
-	draw_end();
+	if (!tiled || slot >= 0) {
+		draw_set_pipeline(NULL);
+		draw_end();
+	}
 	buffer_t *pixels = gpu_get_texture_pixels(t);
 	uint8_t  *copy   = pixels != NULL && pixels->buffer != NULL ? malloc(size) : NULL;
 	if (copy != NULL) {

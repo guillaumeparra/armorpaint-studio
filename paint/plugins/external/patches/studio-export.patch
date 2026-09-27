@@ -2,7 +2,7 @@ diff --git a/paint/sources/io/export_texture.c b/paint/sources/io/export_texture
 index 96e9a0b1..91298774 100644
 --- a/paint/sources/io/export_texture.c
 +++ b/paint/sources/io/export_texture.c
-@@ -375,6 +375,12 @@ static void export_texture_run_layers(char *path, slot_layer_t_array_t *layers,
+@@ -443,6 +443,12 @@ static void export_texture_run_layers(char *path, slot_layer_t_array_t *layers,
  		}
  	}
  
@@ -15,7 +15,7 @@ index 96e9a0b1..91298774 100644
  	gpu_texture_t *texpaint      = layers_expa;
  	gpu_texture_t *texpaint_nor  = layers_expb;
  	gpu_texture_t *texpaint_pack = layers_expc;
-@@ -590,6 +596,12 @@ void export_texture_run(char *path, bool bake_material) {
+@@ -703,6 +709,12 @@ void export_texture_run(char *path, bool bake_material) {
  	if (box_export_preset == NULL) {
  		box_export_parse_preset();
  	}
@@ -28,10 +28,10 @@ index 96e9a0b1..91298774 100644
  
  	if (bake_material) {
  		export_texture_run_bake_material(path);
-@@ -708,6 +720,12 @@ void export_texture_run(char *path, bool bake_material) {
- 		}
+@@ -835,6 +847,12 @@ void export_texture_run(char *path, bool bake_material) {
  	}
  
+ 	util_udim_export_end(); // STUDIO-PATCH(udim-tiles): the tile of the context put back
 +#ifdef WITH_EXTERNAL // STUDIO-PATCH(studio-export): files renamed into place and manifest written, or export failed
 +	bool studio_export_end(void);
 +	if (!studio_export_end()) {

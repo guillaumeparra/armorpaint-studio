@@ -1688,6 +1688,161 @@ bool util_udim_view2d_tile() {
 	return true;
 }
 
+// Export (lot D2d)
+
+static bool udim_export_set   = false; // A tile exported alone set in the context, until util_udim_export_end()
+static i32  udim_export_saved = -1;
+
+// The tile of an object mask, -1 for none (shared layer, texture set, object without a tile)
+static i32 udim_mask_tile(slot_layer_t *l) {
+	i32 mask = slot_layer_get_object_mask(l);
+	if (mask <= 0 || mask > g_project->_->paint_objects->length) {
+		return -1;
+	}
+	return util_mesh_udim_tile(g_project->_->paint_objects->buffer[mask - 1]->base->name);
+}
+
+void util_udim_export_tile(char *object_name, slot_layer_t *selected) {
+	util_udim_sync(); // The layers follow the rule: no frame rendered yet since the table changed (scripts)
+	if (udim_store_count == 0 || udim_table_count < 2) {
+		return;
+	}
+	i32 tile = util_mesh_udim_tile(object_name);
+	if (tile < 0 && selected != NULL) {
+		tile = udim_mask_tile(selected);
+	}
+	if (tile < 0 || udim_table_index(tile) < 0) {
+		return;
+	}
+	if (!udim_export_set) {
+		udim_export_saved = udim_cur;
+		udim_export_set   = true;
+	}
+	util_udim_set_tile(tile);
+}
+
+void util_udim_export_end() {
+	if (udim_export_set) {
+		util_udim_set_tile(udim_export_saved);
+		udim_export_set = false;
+	}
+}
+
+static gpu_texture_t *udim_atlas_a    = NULL;
+static gpu_texture_t *udim_atlas_b    = NULL;
+static gpu_texture_t *udim_atlas_c    = NULL;
+static gpu_texture_t *udim_atlas_mask = NULL;
+static gpu_texture_t *udim_atlas_temp = NULL; // Masks of a tile merged
+
+static gpu_texture_t *udim_atlas_target(gpu_texture_t **t, gpu_texture_t *like) {
+	if (*t != NULL && ((*t)->width != like->width || (*t)->height != like->height || (*t)->format != like->format)) {
+		gpu_delete_texture(*t);
+		*t = NULL;
+	}
+	if (*t == NULL) {
+		*t = gpu_create_render_target(like->width, like->height, like->format);
+	}
+	return *t;
+}
+
+// The tiles of l in the atlas: every tile with a cell, or the tile of its object for a layer limited to one
+static bool udim_atlas_has(slot_layer_t *l, i32 tile) {
+	i32 own = udim_mask_tile(l);
+	return util_mesh_udim_slot(tile) >= 0 && (own < 0 || own == tile);
+}
+
+// The content of the view on each tile of l, drawn into its cell of target (cleared)
+static void udim_atlas_draw(slot_layer_t *l, gpu_texture_t *view, gpu_texture_t *target) {
+	i32 saved  = udim_cur;
+	i32 stride = util_mesh_atlas_stride();
+	f32 cw     = target->width / (f32)stride;
+	f32 ch     = target->height / (f32)stride;
+	draw_begin(target, true, 0x00000000);
+	draw_end();
+	for (i32 i = 0; i < udim_table_count; ++i) {
+		i32 tile = udim_table[i];
+		if (!udim_atlas_has(l, tile)) {
+			continue;
+		}
+		i32 slot = util_mesh_udim_slot(tile);
+		util_udim_set_tile(tile);
+		draw_begin(target, false, 0);
+		draw_set_pipeline(pipes_copy);
+		draw_scaled_image(view, (slot % stride) * cw, (slot / stride) * ch, cw, ch);
+		draw_set_pipeline(NULL);
+		draw_end();
+	}
+	util_udim_set_tile(saved);
+}
+
+void util_udim_atlas_texture(slot_layer_t *l, gpu_texture_t *view, gpu_texture_t *target) {
+	udim_atlas_draw(l, view, target);
+}
+
+slot_layer_t *util_udim_atlas_layer(slot_layer_t *l, gpu_texture_t **mask) {
+	static slot_layer_t atlas;
+	atlas               = *l;
+	atlas.texpaint      = udim_atlas_target(&udim_atlas_a, l->texpaint);
+	atlas.texpaint_nor  = udim_atlas_target(&udim_atlas_b, l->texpaint_nor);
+	atlas.texpaint_pack = udim_atlas_target(&udim_atlas_c, l->texpaint_pack);
+	udim_atlas_draw(l, l->texpaint, atlas.texpaint);
+	udim_atlas_draw(l, l->texpaint_nor, atlas.texpaint_nor);
+	udim_atlas_draw(l, l->texpaint_pack, atlas.texpaint_pack);
+	slot_layer_t_array_t *masks = slot_layer_get_masks(l, true);
+	if (mask != NULL && masks != NULL) {
+		// The masks merged on each tile, as export_texture_run_layers() merges them on the tile of the context
+		gpu_texture_t *temp   = udim_atlas_target(&udim_atlas_temp, *mask);
+		gpu_texture_t *merged = udim_atlas_target(&udim_atlas_mask, *mask);
+		i32            saved  = udim_cur;
+		i32            stride = util_mesh_atlas_stride();
+		f32            cw     = merged->width / (f32)stride;
+		f32            ch     = merged->height / (f32)stride;
+		draw_begin(merged, true, 0x00000000);
+		draw_end();
+		slot_layer_t *tl = ALLOC_INIT(slot_layer_t, {.texpaint = temp});
+		for (i32 i = 0; i < udim_table_count; ++i) {
+			i32 tile = udim_table[i];
+			if (!udim_atlas_has(l, tile)) {
+				continue;
+			}
+			i32 slot = util_mesh_udim_slot(tile);
+			util_udim_set_tile(tile);
+			draw_begin(temp, true, 0xffffffff);
+			draw_end();
+			for (i32 j = 0; j < masks->length; ++j) {
+				layers_merge_layer(tl, masks->buffer[j], false);
+			}
+			draw_begin(merged, false, 0);
+			draw_set_pipeline(pipes_copy);
+			draw_scaled_image(temp, (slot % stride) * cw, (slot / stride) * ch, cw, ch);
+			draw_set_pipeline(NULL);
+			draw_end();
+		}
+		free(tl);
+		util_udim_set_tile(saved);
+		*mask = merged;
+	}
+	return &atlas;
+}
+
+bool util_udim_export_mask(slot_layer_t *l, char *file) {
+	if (gpu_in_use || !util_udim_layer_tiled(l)) {
+		return false;
+	}
+	char *base  = ends_with(file, ".png") ? substring(file, 0, string_length(file) - 4) : file;
+	i32   saved = udim_cur;
+	for (i32 i = 0; i < udim_table_count; ++i) {
+		i32 tile = udim_table[i];
+		if (!udim_atlas_has(l, tile)) {
+			continue;
+		}
+		util_udim_set_tile(tile);
+		iron_write_png(string("%s.%d.png", base, tile), gpu_get_texture_pixels(l->texpaint), l->texpaint->width, l->texpaint->height, 3); // RRR1
+	}
+	util_udim_set_tile(saved);
+	return true;
+}
+
 char *util_udim_stats() {
 	i32 partial  = 0;
 	i32 contents = 0;

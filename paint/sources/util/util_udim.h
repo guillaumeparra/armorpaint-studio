@@ -89,6 +89,17 @@ bool util_udim_merge_layer(slot_layer_t *l0, slot_layer_t *l1, bool use_mask); /
 bool util_udim_apply_mask(slot_layer_t *l, slot_layer_t *m);                    // layers_apply_mask() on a tiled l
 bool util_udim_draw_mesh_materials(char *context);                               // Flatten: mesh material overrides of the tile
 
+// Export (lot D2d). A tile exported alone (per udim tile, per object of a tile, the selected layer of a tile's object)
+// is set in the context until util_udim_export_end(), at the end of the export: the tiled layers are read there at their
+// resolution. A tiled layer exported with the whole atlas (Visible export) is composed from its tiles, each into its
+// cell (the tile of its object only for a layer limited to one), its masks merged on each tile. util_udim_export_tile()
+// first syncs the layers with the table (a script exporting right after an import, no frame rendered).
+void          util_udim_export_tile(char *object_name, slot_layer_t *selected);
+void          util_udim_export_end();
+slot_layer_t *util_udim_atlas_layer(slot_layer_t *l, gpu_texture_t **mask);
+void          util_udim_atlas_texture(slot_layer_t *l, gpu_texture_t *view, gpu_texture_t *target); // One texture of l
+bool          util_udim_export_mask(slot_layer_t *l, char *file); // Layer > Export of a tiled mask: "<file>.<tile>.png"
+
 // 2d view (lot D2b): a tiled layer shows and paints the tile of the context, the 2d plane with the material uvs of that
 // tile. util_udim_view2d_tile() draws the combo choosing it, false when the layer is not tiled.
 bool util_udim_view2d_tile();

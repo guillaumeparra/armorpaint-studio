@@ -526,6 +526,10 @@ void tab_layers_draw_layer_context_menu_export_on_file_picked(char *path) {
 	if (!ends_with(f, ".png")) {
 		f = string("%s.png", f);
 	}
+	// STUDIO-PATCH(udim-tiles): a tiled mask, a file per tile ("<name>.<tile>.png"), see paint/sources/util/util_udim.h
+	if (util_udim_export_mask(l, string("%s%s%s", path, PATH_SEP, f))) {
+		return;
+	}
 	iron_write_png(string("%s%s%s", path, PATH_SEP, f), gpu_get_texture_pixels(l->texpaint), l->texpaint->width, l->texpaint->height, 3); // RRR1
 }
 

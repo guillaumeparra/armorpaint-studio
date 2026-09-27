@@ -2,7 +2,7 @@
 
 > **Décision 2026-09-26 : option B retenue** (un jeu de textures par tuile, « contexte de tuile », §6). Les options C et D sont écartées ; C reste une évolution possible de B si le nombre de draws devenait un problème (100+ tuiles).
 > **2026-09-27 : lots D0 et D1 faits** (§3, §7). D1 garde un objet de peinture par tuile : la tuile-donnée, le maillage à plages et la migration passent au lot D2 (§7, « Lot D1 »).
-> **2026-09-27 : lot D2 lancé** (go sans la recette C6), plan au §7 « Lot D2 ». Le maillage à plages et la tuile-donnée passent en D3. Sous-lots D2a à D2c faits (§7, « Lot D2a » à « Lot D2c »).
+> **2026-09-27 : lot D2 lancé** (go sans la recette C6), plan au §7 « Lot D2 ». Le maillage à plages et la tuile-donnée passent en D3. Sous-lots D2a à D2d faits (§7, « Lot D2a » à « Lot D2d »).
 > Document de réflexion à l'origine ; le §7 sert désormais de plan (chantier D de `ARMORPAINT_LOTS.md`). Il fait l'état des UDIM après le commit upstream `99156dfc` (« paint: paint across udims », 2026-09-15), liste les limites, compare quatre architectures et propose une feuille de route.
 > Base : branche `studio` au commit `fbde517a`. Estimations en **jours-homme**, avec les mêmes hypothèses que `ARMORPAINT_LOTS.md`.
 > ⚠️ **§5.2 de `ARMORPAINT_ANALYSE.md` est en partie périmé.** Depuis `99156dfc`, on peut peindre à travers les tuiles et les calques partagés ne sont plus dupliqués par tuile. Ce document le remplace pour tout ce qui touche aux UDIM.
@@ -678,6 +678,32 @@ section 11 : 59 contrôles en tout.
     le dernier créé, le plus haut, remplace les autres, alors que la vue 3D les multiplie. Le banc le vérifie, pour
     voir si l'upstream le change ;
   - upstream, non corrigé : l'Undo d'un Merge Group ne rend pas le calque de base (même sans UDIM).
+
+### Lot D2d (2026-09-27) : fait
+
+Patch `udim-tiles` (points d'appel D2d, dans `export_texture.c` et `tab_layers.c`), `util_udim.c` (patch `udim-core`)
+et `studio_export.c`. Banc `.tests/udim_tiles_app.sh`, section 12 : 65 contrôles en tout.
+- **Une tuile exportée seule** (Per UDIM Tile, par objet pour un objet de tuile, Selected pour un calque limité à
+  l'objet d'une tuile) est posée dans le contexte pendant son fichier (`util_udim_export_tile`), et la tuile d'avant
+  est remise à la fin de l'export (`util_udim_export_end`). Les calques à tuiles y sont lus à leur résolution : plus
+  de recadrage dans une case ni de ré-agrandissement. L'export de la 1001 d'un projet à cinq tuiles est identique au
+  bit près, sur ses cinq maps, à celui d'un projet d'une seule tuile rempli du même bruit.
+- **Visible** (toute la grille) : chaque calque à tuiles est composé de ses tuiles, chacune réduite dans sa case
+  (`util_udim_atlas_layer`), ses masques fusionnés tuile par tuile comme le fait le flatten. Un calque limité à
+  l'objet d'une tuile ne va que dans sa case ; les cases sans tuile sont vides (noires).
+- **Calques non encore passés aux tuiles.** Un script qui exporte juste après un import n'a rendu aucune image : les
+  calques n'ont pas suivi la règle (`util_udim_sync`, d'ordinaire avant chaque rendu). `util_udim_export_tile` les
+  aligne d'abord.
+- **Presets studio** : `layer()` lit un calque à tuiles de la même façon (`studio_export.c`, `read_layer`). Les
+  contrôles d'export de `.tests/udim_app.sh` passent sur les calques à tuiles, sauf l'export après réouverture
+  (le `.arm` n'enregistre que la tuile du contexte, D2e).
+- **Export d'un masque** (menu du calque) : un fichier par tuile, `<nom>.<tuile>.png`, à la résolution des tuiles
+  (`util_udim_export_mask`).
+- **Script pour les bancs** (`studio_atlas.c`) : `studio_mask_export`.
+- **Non traités** : l'export OBJ des calques de sculpt (leurs masques lus sur la tuile du contexte) et Apply
+  Displacement (`util_mesh_apply_displacement`, que l'upstream limite déjà au premier objet).
+- **Pour D2f** : le conseil de résolution affiché après l'import (`studio_udim.c`) parle encore de la grille de
+  l'atlas (« 3x3 grid in the 128 px layers: 42 px per tile ») ; chaque tuile a désormais la résolution du projet.
 
 ---
 

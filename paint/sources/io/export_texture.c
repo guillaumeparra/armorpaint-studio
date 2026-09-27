@@ -302,6 +302,9 @@ static void export_texture_run_layers(char *path, slot_layer_t_array_t *layers, 
 			udim_slot = layers_udim_tile_slot(layers->buffer[0]);
 		}
 	}
+	// STUDIO-PATCH(udim-tiles): a tile exported alone is set in the context, the tiled layers read there at their
+	// resolution (put back by util_udim_export_end() in export_texture_run())
+	util_udim_export_tile(object_name, export_selected ? layers->buffer[0] : NULL);
 
 	// Clear export layer
 	_gpu_begin(layers_expa, NULL, NULL, GPU_CLEAR_COLOR, color_from_floats(0.0, 0.0, 0.0, 0.0), 0.0);
@@ -359,8 +362,15 @@ static void export_texture_run_layers(char *path, slot_layer_t_array_t *layers, 
 		if (!bake_material && udim_slot < 0 && !export_selected && layers_udim_tile_slot(l1) == -2) {
 			continue;
 		}
+		// STUDIO-PATCH(udim-tiles): a tiled layer is read on the tile of the context (a tile exported alone), or composed
+		// from its tiles when exporting the whole atlas
+		if (!bake_material && util_udim_layer_tiled(l1)) {
+			if (udim_slot < 0) {
+				l1 = util_udim_atlas_layer(l1, l1masks != NULL ? &mask : NULL);
+			}
+		}
 		// Shared layers of udim tiles are cropped out of the atlas, tile layers go into the atlas when exporting it whole
-		if (!bake_material && udim_slot >= 0 && util_mesh_udim_layer(l1)) {
+		else if (!bake_material && udim_slot >= 0 && util_mesh_udim_layer(l1)) {
 			l1 = layers_udim_remap(l1, l1masks != NULL ? &mask : NULL, udim_slot, true);
 		}
 		else if (!bake_material && udim_slot < 0 && layers_udim_tile_slot(l1) >= 0) {
@@ -836,6 +846,7 @@ void export_texture_run(char *path, bool bake_material) {
 		}
 	}
 
+	util_udim_export_end(); // STUDIO-PATCH(udim-tiles): the tile of the context put back
 #ifdef WITH_EXTERNAL // STUDIO-PATCH(studio-export): files renamed into place and manifest written, or export failed
 	bool studio_export_end(void);
 	if (!studio_export_end()) {

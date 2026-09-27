@@ -103,6 +103,9 @@ extern any_map_t *render_path_render_targets;
 void              tab_meshes_set_linked_override(mesh_object_t *o, i32 mat_index);
 void              ui_header_draw_tool_properties_import(char *path);
 void              ui_header_draw_tool_properties_to_mask(slot_layer_t *m);
+extern slot_layer_t *tab_layers_l;
+extern char        *ui_files_filename;
+void                tab_layers_draw_layer_context_menu_export_on_file_picked(char *path);
 
 #define DEFAULT_NAME "Atlas 1"
 #define MAX_NAME     64
@@ -1144,6 +1147,21 @@ static minic_val_t mn_studio_colorid_mask(minic_val_t *a, int n) {
 	return minic_val_int(array_index_of((any_array_t *)g_project->_->layers, m));
 }
 
+// Menu Export du masque i, fichier name dans dir, comme le sélecteur de fichiers. 1 si fait.
+static minic_val_t mn_studio_mask_export(minic_val_t *a, int n) {
+	int                   i      = (int)minic_arg_i(a, n, 0);
+	char                 *dir    = minic_arg_p(a, n, 1);
+	char                 *name   = minic_arg_p(a, n, 2);
+	slot_layer_t_array_t *layers = g_project->_->layers;
+	if (i < 0 || i >= (int)layers->length || !slot_layer_is_mask(layers->buffer[i]) || dir == NULL || name == NULL) {
+		return minic_val_int(0);
+	}
+	tab_layers_l      = layers->buffer[i];
+	ui_files_filename = name;
+	tab_layers_draw_layer_context_menu_export_on_file_picked(dir);
+	return minic_val_int(1);
+}
+
 // Calque courant = calque i. 1 si fait.
 static minic_val_t mn_studio_layer_select(minic_val_t *a, int n) {
 	int                   i      = (int)minic_arg_i(a, n, 0);
@@ -1261,5 +1279,6 @@ void studio_atlas_init(void) {
 	minic_register("studio_layer_op", "i(p)", mn_studio_layer_op);
 	minic_register("studio_mesh_override", "i(i,i)", mn_studio_mesh_override);
 	minic_register("studio_colorid_mask", "i(p,i)", mn_studio_colorid_mask);
+	minic_register("studio_mask_export", "i(i,p,p)", mn_studio_mask_export);
 #endif
 }

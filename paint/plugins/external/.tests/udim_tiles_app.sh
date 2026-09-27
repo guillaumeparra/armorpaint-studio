@@ -26,7 +26,11 @@
 #  10. 70 tuiles : le pinceau au-delà des 64 tenues ne peint rien ;
 #  11. opérations de calques (lot D2c) : flatten par tuile ; Merge Down, undo, redo ; masques (et leur empilement
 #      upstream), Apply Mask, undo ; groupe à masque de groupe, Merge Group ; surcharge de matériau d'un maillage dans
-#      le flatten de sa tuile ; ColorID → masque sur toutes les tuiles.
+#      le flatten de sa tuile ; ColorID → masque sur toutes les tuiles ;
+#  12. export (lot D2d) : par tuile, chaque fichier à la résolution des tuiles, identique au bit près à celui d'un
+#      projet d'une seule tuile ; Visible, le composite en grille (une case par tuile, masques fusionnés par tuile, le
+#      calque limité à un objet dans sa case seule) ; Selected et par objet, la tuile de l'objet ; Export d'un masque :
+#      un fichier par tuile.
 #
 #   sh .tests/udim_tiles_app.sh [dossier de travail]
 #   APP=<binaire ArmorPaint> pour un autre build (défaut : build Release de paint/).
@@ -62,6 +66,7 @@ def quads(name, cells):
 
 open("strip.obj", "w").write(quads("strip", ((0, 0), (1, 0), (2, 0), (3, 0), (0, 1))))
 open("extra.obj", "w").write(quads("extra", ((1, 1),)))
+open("single.obj", "w").write(quads("single", ((0, 0),)))  # La 1001 du ruban seule, sans tuile
 
 STRIP = ((0, 0), (1, 0), (2, 0), (3, 0), (0, 1))
 
@@ -773,5 +778,122 @@ check "Merge Group : un calque, chaque tuile fusionnée, le masque de groupe app
 check "surcharge de matériau du maillage de la 1002 : son flatten prend le matériau, les autres tuiles non ; retirée, le calque revient" '[ "$(line override override)" = 1 ] && [ "$(line override flatov)" = "$R | 0.800 0.800 0.800 1.000 | $Y | $Y | $B" ] && [ "$(line override flatnoov)" = "$(line override flat0)" ] && [ "$(line override flat0)" = "$R | $G | $Y | $Y | $B" ]'
 check "ColorID → masque : la carte lue dans les uv de chaque tuile, blanc à gauche (rouge piqué), rien à droite, sur les 5 tuiles" '[ "$(line override cid)" = 1 ] && [ "$(line override cidleft)" = "$H | $H | $H | $H | $H" ] && [ "$(line override cidright)" = "$Z | $Z | $Z | $Z | $Z" ]'
 
+echo "== 12. export : par tuile à la résolution des tuiles, Visible en grille, Selected, par objet"
+# Bruit sur les uv (UV Map > Noise Texture > couleur de base), rempli dans le calque courant
+NOISE='slot_material_t *m = script_material_create("noise");
+	ui_node_t *uv = script_material_create_node_at("UVMAP", -800.0, 0.0);
+	ui_node_t *noise = script_material_create_node_at("TEX_NOISE", -400.0, 0.0);
+	ui_node_t *out = script_material_get_node("OUTPUT_MATERIAL_PBR");
+	script_material_set_float(noise, 1, 1, 3.0);
+	script_material_set_float(noise, 1, 2, 0.0);
+	script_material_connect(uv, 0, noise, 0);
+	script_material_connect(noise, 1, out, 0);
+	script_material_update();
+	script_material_set(m);'
+mkdir -p "$W/out_noise" "$W/out_single" "$W/out_tiles" "$W/out_visible" "$W/out_selected" "$W/out_object" "$W/out_fresh" "$W/out_mask"
+script export_fresh <<EOF
+int main() {
+	studio_project_res(128);
+	studio_import_mesh("$W/strip.obj", 2);
+	studio_export_run("$W/out_fresh", "", 0);
+	return 0;
+}
+EOF
+script export_noise <<EOF
+int main() {
+	studio_project_res(128);
+	studio_import_mesh("$W/strip.obj", 2);
+	$NOISE
+	script_fill_layer();
+	studio_export_run("$W/out_noise", "", 3);
+	return 0;
+}
+EOF
+script export_single <<EOF
+int main() {
+	studio_project_res(128);
+	studio_import_mesh("$W/single.obj", 0);
+	$NOISE
+	script_fill_layer();
+	studio_export_run("$W/out_single", "", 0);
+	return 0;
+}
+EOF
+# Calque 1 : 1001 rouge, 1002 vert, 1011 bleu, masqué par la carte d'id (blanc à gauche) ; calque 2, limité à
+# strip.1004 : magenta sur la 1004
+script export_cells <<EOF
+int main() {
+	studio_project_res(128);
+	studio_import_mesh("$W/strip.obj", 2);
+	studio_layer_new();
+	studio_udim_fill(1, 0, 1001, 1.0, 0.0, 0.0, 1.0);
+	studio_udim_fill(1, 0, 1002, 0.0, 1.0, 0.0, 1.0);
+	studio_udim_fill(1, 0, 1011, 0.0, 0.0, 1.0, 1.0);
+	studio_layer_select(1);
+	console_log(string("t: cid %d", studio_colorid_mask("$W/cid.png", 0xff0000)));
+	studio_layer_select(2);
+	studio_layer_new();
+	int o = -1;
+	for (int i = 0; i < 8; i++) {
+		if (string_equals(studio_object_rename(i, ""), "strip.1004")) {
+			o = i;
+		}
+	}
+	console_log(string("t: limit %d", studio_layer_set_object(o)));
+	int l = 3;
+	studio_udim_fill(l, 0, 1004, 1.0, 0.0, 1.0, 1.0);
+	console_log(string("t: names %s", studio_layer_masks()));
+	studio_export_run("$W/out_tiles", "", 3);
+	studio_export_run("$W/out_visible", "", 0);
+	studio_export_run("$W/out_object", "", 2);
+	studio_layer_select(l);
+	studio_export_run("$W/out_selected", "", 1);
+	console_log(string("t: mask %d", studio_mask_export(1, "$W/out_mask", "cid")));
+	return 0;
+}
+EOF
+python3 - "$W" > "$W/exports.out" <<'EOF'
+import glob, os, sys
+from PIL import Image
+
+w = sys.argv[1]
+one = lambda pattern: (glob.glob(os.path.join(w, pattern)) + [None])[0]
+maps = lambda d, tag: {os.path.basename(f).rsplit(tag, 1)[0].rsplit("_", 1)[-1]: f for f in glob.glob(os.path.join(w, d, "*" + tag))}
+# Par tuile contre une seule tuile : les maps de la 1001 et du projet d'une tuile, pixel à pixel
+tiles, single = maps("out_noise", ".1001.png"), maps("out_single", ".png")
+same = sorted(k for k in tiles if k in single and Image.open(tiles[k]).tobytes() == Image.open(single[k]).tobytes())
+print("noise %s | %s | %s" % (" ".join(same), " ".join(sorted(single)), Image.open(tiles["base"]).size if "base" in tiles else "-"))
+print("noise_colors %d" % len(set(Image.open(tiles["base"]).convert("RGB").getdata())) if "base" in tiles else "noise_colors 0")
+print("noise_1002 %d" % (Image.open(one("out_noise/*_base.1002.png")).tobytes() != Image.open(tiles["base"]).tobytes()))
+hue = lambda p: {(255, 0, 0): "R", (0, 255, 0): "G", (0, 0, 255): "B", (255, 0, 255): "M", (0, 0, 0): "0"}.get(p[:3], "Y" if abs(p[0] - 127) <= 1 and p[0] == p[1] == p[2] else "?")
+px = lambda f, x, y: hue(Image.open(f).convert("RGB").getpixel((x, y))) if f else "-"
+# Par tuile : gauche (x 10) et droite (x 100) de chaque tuile
+files = lambda d, tag: " ".join("%s%s" % (px(one("%s/*_base.%d.png" % (d, t)), 10, 64), px(one("%s/*_base.%d.png" % (d, t)), 100, 64)) for t in (1001, 1002, 1003, 1004, 1011))
+print("tiles %s" % files("out_tiles", ""))
+print("tiles_size %s" % " ".join("%dx%d" % Image.open(one("out_tiles/*_base.%d.png" % t)).size for t in (1001, 1011)))
+# Visible : la grille 3 x 3, case s en (s % 3, s // 3), un quart et trois quarts de la case
+vis = one("out_visible/*_base.png")
+c = 128 / 3.0
+print("visible %s" % " ".join("%s%s" % (px(vis, int((s % 3 + 0.25) * c), int((s // 3 + 0.5) * c)), px(vis, int((s % 3 + 0.75) * c), int((s // 3 + 0.5) * c))) for s in range(9)))
+print("visible_files %d" % len(os.listdir(os.path.join(w, "out_visible"))))
+fresh = one("out_fresh/*_base.png")
+print("fresh %s" % " ".join(px(fresh, int((s % 3 + 0.5) * c), int((s // 3 + 0.5) * c)) for s in range(9)))
+# Par objet : l'upstream n'exporte que les objets des calques limités (strip.1004) ; Selected : le calque limité seul
+print("object %s %d" % (" ".join("%s%s" % (px(one("out_object/*strip.%d_base.png" % t), 10, 64), px(one("out_object/*strip.%d_base.png" % t), 100, 64)) for t in (1001, 1002, 1003, 1004, 1011)), len(os.listdir(os.path.join(w, "out_object")))))
+# Export du masque : un fichier par tuile, blanc à gauche
+mask = lambda t: one("out_mask/cid.%d.png" % t)
+white = lambda f, x: "W" if f and Image.open(f).convert("RGB").getpixel((x, 64)) == (255, 255, 255) else "K" if f and Image.open(f).convert("RGB").getpixel((x, 64)) == (0, 0, 0) else "-"
+print("mask %s %d %s" % (" ".join(white(mask(t), 10) + white(mask(t), 100) for t in (1001, 1002, 1003, 1004, 1011)), len(os.listdir(os.path.join(w, "out_mask"))), "%dx%d" % Image.open(mask(1011)).size if mask(1011) else "-"))
+sel = one("out_selected/*_base.png")
+print("selected %s %s %s" % (os.path.basename(sel).rsplit("_", 1)[0].split("_", 1)[-1] if sel else "-", px(sel, 10, 64) + px(sel, 100, 64), "%dx%d" % Image.open(sel).size if sel else "-"))
+EOF
+cat "$W/exports.out"
+check "par tuile : les maps de la 1001 identiques au bit près à celles d'un projet d'une seule tuile, 128 px" 'line exports noise | awk -F" [|] " "{ exit !(\$1 == \$2 && \$1 != \"\" && \$3 == \"(128, 128)\") }" && [ $(line exports noise_colors) -gt 1000 ] && [ "$(line exports noise_1002)" = 1 ]'
+check "par tuile : chaque tuile avec son calque, son masque (gauche seule) et le calque limité à la 1004" '[ "$(line export_cells cid) $(line export_cells limit)" = "1 1" ] && [ "$(line export_cells names)" = "Layer 1=0 Mask 3=0 Layer 2=0 Layer 4=5 filter=0" ] && [ "$(line exports tiles)" = "RY GY YY MM BY" ] && [ "$(line exports tiles_size)" = "128x128 128x128" ]'
+check "Visible : la grille des tuiles (1001, 1002, 1003 ; 1004, 1011 ; cases vides), masque par tuile, calque limité dans sa case" '[ "$(line exports visible)" = "RY GY YY MM BY 00 00 00 00" ] && [ "$(line exports visible_files)" = 5 ]'
+check "Visible juste après l'import (sans frame) : les calques passés aux tuiles d'abord, cases vides noires" '[ "$(line exports fresh)" = "Y Y Y Y Y 0 0 0 0" ]'
+check "par objet : strip.1004 seul (l'objet du calque limité), sa tuile ; Selected : le calque limité seul, à la résolution des tuiles" '[ "$(line exports object)" = "-- -- -- MM -- 5" ] && line exports selected | grep -q "strip.1004 MM 128x128$"'
+
+check "Export d'un masque : un fichier par tuile (<nom>.<tuile>.png), 128 px, blanc à gauche" '[ "$(line export_cells mask)" = 1 ] && [ "$(line exports mask)" = "WK WK WK WK WK 5 128x128" ]'
 [ $FAIL -eq 0 ] && echo "== OK" || echo "== FAIL"
 exit $FAIL
