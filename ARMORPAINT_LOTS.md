@@ -581,7 +581,7 @@ Le kit de recette est prêt, dans `external/` :
 - ✅ **Défauts trouvés en route** :
   - sur macOS, préférences studio, journal d'audit et **file des publishes** allaient dans l'app (comme `config.json` d'ArmorPaint), même en lecture seule, ce qui est le cas au studio (B6) : la file de C5 n'aurait pas pu s'écrire. Ils vont maintenant dans le dossier de sauvegarde d'ArmorPaint (`~/Library/Application Support/ArmorPaint/`) quand l'app n'est pas inscriptible, et le journal le dit au démarrage (contrôle ajouté à `ocio_prefs_app.sh`, en échec sans le correctif). Une app inscriptible qu'on remplace les efface encore : parade au déploiement dans le runbook et le README ;
   - un enregistrement de la file pouvait désigner une vignette hors de la file (supprimée ou déplacée au rejeu ou à l'écart) : nom de fichier seul exigé, test ajouté.
-- ⏳ **Reste** : dérouler `docs/RECETTE_C6.md` sur le vrai site du studio (une demi-journée, un TD et un artiste). **Préalable à D2.**
+- ⏳ **Reste** : dérouler `docs/RECETTE_C6.md` sur le vrai site du studio (une demi-journée, un TD et un artiste). Ce n'est plus un préalable à D2 (go du 2026-09-27) ; la recette sera faite par un TD.
 
 | Chantier C — total | **37 j** |
 |---|---|
@@ -596,8 +596,8 @@ Décidé le 2026-09-26. Analyse, architecture et détail des phases : **`ARMORPA
 |---|---|---|
 | D0 | ✅ **fait le 2026-09-27** (macOS) — Correctifs sans regret : importeurs OBJ/FBX (UV négatives, u ≥ 10, triangles à cheval coupés, plafond FBX levé), erreur > 64 tuiles, conseil de résolution à l'import. Patches `udim-import`, `fbx-split`, `udim-tile-limit`. Reportés : UV matériau réelles en D1, gouttière entre cases en D2 (`ARMORPAINT_UDIM.md` §7) | 8-12 j |
 | D1 | ✅ **fait le 2026-09-27** (macOS), en partie — UV matériau réelles (L8) ; split par matériau et par tuile, un jeu de textures par matériau ; export jeux × tuiles (et deux bugs upstream des masques de jeu) ; renommage qui garde la tuile. Patches `udim-core`, `udim-material-uv`, `udim-export-sets`, `udim-tile-name`, partie D1 d'`udim-import` et `fbx-split`. **Passés en D2** : tuile-donnée dans le `.arm`, maillage à plages d'index, migration (un objet par tuile gardé : `.arm` inchangé, lisible par l'upstream). Trouvé : L17, cases d'atlas décalées quand la table des tuiles change, corrigée par D2 (`ARMORPAINT_UDIM.md` §7) | 10-15 j |
-| D2 | Jeu de textures par tuile, `layers_set_tile`, nouveau format `.arm` + migration ; de D1 : tuile-donnée, maillage à plages d'index — **point de non-retour du fork**, après la recette C6 et un go / no-go | 20-30 j (+ reste de D1) |
-| D3 | Résolution par tuile, export natif | 6-10 j |
+| D2 | 🟡 **lancé le 2026-09-27** (go sans la recette C6, branche `d2`) — Jeu de textures par tuile par échange de contenu des textures (contexte de tuile), boucles par tuile (peinture, flatten, masques, cartes, export), nouveau format `.arm` + migration de l'atlas (fixture `.tests/fixtures/udim_atlas`) ; corrige L17. Sous-lots D2a à D2f (`ARMORPAINT_UDIM.md` §7, « Lot D2 »). **Passés en D3** : tuile-donnée, maillage à plages d'index — **point de non-retour du fork** | 20-30 j |
+| D3 | Résolution par tuile, export natif ; de D2 : tuile-donnée, maillage à plages d'index, onglet Meshes par tuile | 6-10 j (+ reste de D2) |
 | D4 | Mémoire : allocation paresseuse, undo par tuile, éviction LZ4 | 12-20 j |
 
 | Chantier D — total | **56-87 j** |

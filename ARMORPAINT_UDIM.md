@@ -2,6 +2,7 @@
 
 > **Décision 2026-09-26 : option B retenue** (un jeu de textures par tuile, « contexte de tuile », §6). Les options C et D sont écartées ; C reste une évolution possible de B si le nombre de draws devenait un problème (100+ tuiles).
 > **2026-09-27 : lots D0 et D1 faits** (§3, §7). D1 garde un objet de peinture par tuile : la tuile-donnée, le maillage à plages et la migration passent au lot D2 (§7, « Lot D1 »).
+> **2026-09-27 : lot D2 lancé** (go sans la recette C6), plan au §7 « Lot D2 ». Le maillage à plages et la tuile-donnée passent en D3.
 > Document de réflexion à l'origine ; le §7 sert désormais de plan (chantier D de `ARMORPAINT_LOTS.md`). Il fait l'état des UDIM après le commit upstream `99156dfc` (« paint: paint across udims », 2026-09-15), liste les limites, compare quatre architectures et propose une feuille de route.
 > Base : branche `studio` au commit `fbde517a`. Estimations en **jours-homme**, avec les mêmes hypothèses que `ARMORPAINT_LOTS.md`.
 > ⚠️ **§5.2 de `ARMORPAINT_ANALYSE.md` est en partie périmé.** Depuis `99156dfc`, on peut peindre à travers les tuiles et les calques partagés ne sont plus dupliqués par tuile. Ce document le remplace pour tout ce qui touche aux UDIM.
@@ -466,6 +467,104 @@ sans le correctif (mutations), leurs contrôles échouent.
 - Vue 2D : le plan 2D n'est pas un objet de tuile ; les matériaux y gardent l'espace de la case.
 - La tuile vient toujours du nom : un objet `truc.1005` hors UDIM reste une tuile (L4).
 - Onglet Meshes : les tuiles d'un objet ne sont pas regroupées sous lui (§6.10).
+
+### Lot D2 (2026-09-27) : plan
+
+Go donné le 2026-09-27, sans attendre la recette C6. Branche `d2`, fusionnée dans `studio` quand tous les bancs passent.
+
+**Périmètre.** Un jeu de textures par tuile pour chaque calque, résolution uniforme (celle du projet). Le `.arm` change
+et la migration des projets atlas se fait à l'ouverture. **Reportés en D3**, avec l'onglet Meshes et la résolution par
+tuile :
+- le maillage à plages d'index. iron ne dessine qu'un index buffer entier, et il faudrait un draw à plage dans les
+  trois backends. Le contexte de tuile n'en dépend pas : chaque objet de tuile a déjà son draw ;
+- la tuile-donnée (`udim_tiles` dans le `.arm`). La table reste déduite des noms d'objets. Les données d'un calque
+  sont rangées par numéro de tuile, pas par case : L17 disparaît quand même.
+
+**Contexte de tuile par échange de contenu.** Le pointeur `gpu_texture_t *` d'une texture de calque est recopié
+partout : `_image` de la render target, emplacements d'undo, calques live, caches. Le rendre variable par tuile
+toucherait tous ces endroits. On garde donc le pointeur comme une **vue** stable, et c'est son contenu qui change :
+- `util_udim.c` tient, pour chaque vue, un magasin `tiles[t]` de contenus `gpu_texture_t` (par valeur), indexé par
+  numéro de tuile ;
+- `util_udim_set_tile(t)` range le contenu courant dans son emplacement et met celui de `t` à sa place, dans toutes
+  les vues, après avoir vidé les barrières en attente sur les cibles de rendu ;
+- le code existant (peinture, flatten, fusion, dilatation, échanges d'undo) travaille sans changement sur la tuile
+  courante ;
+- `gpu_texture_destroy` copie déjà le contenu de la structure : le contenu fait office d'identité de la ressource ;
+- le code qui remplace le pointeur d'une vue (`slot_layer_invert_mask`, `slot_layer_resize_and_set_bits`) passe au
+  remplacement de contenu.
+
+**Calques à tuiles** : calques et masques quand l'UDIM est actif et `uv_map != 1`, sauf ceux limités à un objet hors
+tuile.
+- Quand l'UDIM devient actif, la texture existante va à la première tuile, et les autres sont allouées puis vidées ; les
+  calques de remplissage sont re-remplis.
+- Une tuile qui apparaît dans la table est allouée, une qui disparaît est libérée.
+- Toutes les tuiles d'un calque sont allouées d'emblée (l'allocation paresseuse est pour D4). Même mémoire que l'atlas
+  à résolution de tuile égale, mais un projet 4K à 5 tuiles pèse 5 fois plus qu'avant : la résolution du projet
+  devient celle de chaque tuile. Les emplacements d'undo et `texpaint_blend0/1` n'allouent que les tuiles touchées.
+
+**Viewport.** Le shader de maillage échantillonne en `tex_coord` (UV locale), et `tex_coord_atlas` disparaît. Les
+liens des calques à tuiles (`_texpaint<i>`, `_nor`, `_pack`, `_texpaint_vert`) sont résolus par objet, d'après sa
+tuile : la vue si c'est la tuile courante, l'emplacement du magasin sinon. L'aperçu live du pinceau ne s'affiche pas sur
+les calques à tuiles en D2.
+
+**Peinture.** `render_path_paint_commands_paint` boucle sur les tuiles touchées, pour la seule branche de peinture (pas
+les pipettes). Pour chaque tuile : `set_tile`, instantané d'undo et de blend si besoin, corps inchangé, puis dessin des
+seuls objets de la tuile. UV matériau = UV locale + `_udim_tile`.
+- Tri des tuiles pour les outils en forme de pinceau :
+  - mode monde : les 8 coins de la boîte de la tuile projetés à l'écran, rectangle comparé au segment du trait élargi
+    du rayon écran majoré ;
+  - caméra orthographique : rayon écran exact ;
+  - mode aligné caméra : borne prise sur la profondeur minimale de la scène ;
+  - xray, décal, texte, particules, remplissage, bake : toutes les tuiles.
+- La symétrie reprend tous les objets de la tuile.
+- Le clone d'une tuile à l'autre n'est pas pris en charge (documenté).
+
+**Undo.** Un pas de peinture prend un instantané de la tuile au premier passage et n'échange que les tuiles qu'il
+tient. Les pas génériques échangent les vues entières, donc toutes les tuiles. Un emplacement réutilisé pour un pas de
+peinture libère les tuiles qu'il ne tient plus.
+
+**Cartes et pipettes.**
+- Dilatation, carte UV, carte des triangles et îlots UV sont calculés par tuile, depuis les objets de la tuile, chacun
+  avec sa validité.
+- Le gbuffer de pick écrit le numéro de tuile. La pipette de calque ou de masque le lit, et refait sa passe sur la bonne
+  tuile.
+
+**Maillage fusionné.** Il garde ses UV d'atlas, seulement comme proxy du raytrace et du bake raytrace : un flatten par
+tuile, rangé dans les cases du proxy. Les pipettes dessinent encore le maillage fusionné.
+
+**Calques et export.**
+- Le flatten, la fusion de calques, les masques et l'export tournent tuile par tuile.
+- L'export Per UDIM Tile se fait à la résolution native, sans recadrage ni ré-agrandissement.
+- L'export Visible d'un projet UDIM sort le composite en atlas.
+
+**`.arm`.**
+- Chaque calque gagne un tableau `tiles` (`{tile, texpaint, texpaint_nor, texpaint_pack}`), ajouté après `path_text`.
+- Le blob d'origine reçoit le composite en atlas, à la résolution du projet. Un ArmorPaint officiel ouvre donc le
+  fichier, avec la perte de l'atlas.
+- À l'ouverture d'un fichier de l'ère atlas, chaque case est recadrée puis agrandie à la résolution du projet, et les
+  calques d'une tuile vont à leur tuile.
+
+**Sous-lots** : chacun a ses tests, son commit et ses entrées dans `PATCHES.md`.
+
+| Sous-lot | Contenu |
+|---|---|
+| D2a | Magasin, contexte de tuile, viewport ; création, suppression, vidage, duplication et redimensionnement des calques ; undo générique |
+| D2b | Boucle de peinture, tri des tuiles, undo, blend et cartes par tuile, pipettes, remplissage, bake |
+| D2c | Flatten et opérations de calques (fusion, masques, groupes) |
+| D2d | Export |
+| D2e | `.arm` et migration |
+| D2f | Proxy raytrace, nettoyage (`layers_udim_remap` et l'espace atlas UDIM), docs, patches, bancs |
+
+**Tests.**
+- Export par tuile bit à bit identique à celui d'un projet d'une seule tuile.
+- Peinture continue à travers la couture 1001/1002.
+- Undo et redo d'un trait sur deux tuiles, avec les tuiles tenues par chaque pas.
+- Aller-retour save/load.
+- Migration de la fixture `.tests/fixtures/udim_atlas` (projet 256 px, 5 tuiles, écrit par le build D1), comparée à
+  son export d'origine.
+- Blob d'origine = composite en atlas.
+- L17 : la peinture suit son numéro de tuile quand la table change.
+- Sections 4 et 10 d'`udim_app.sh` (propres à l'atlas) réécrites.
 
 ---
 
