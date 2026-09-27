@@ -1723,3 +1723,83 @@ remplissage est dans la base color (grise, uniforme, sans le patch).
 
 **Non couvert.** `project_new` appelé d'ailleurs (menu, `import_arm`) garde le comportement upstream : pas de script
 derrière pour peindre dans la même image.
+
+---
+
+## mask-multiply
+
+| | |
+|---|---|
+| Fichier | `paint/sources/util/util_layer.c` (`layers_merge_layer`, `layers_apply_masks`, `layers_merge_down`, `layers_merge_group` ; `layers_apply_mask_stack` et `layers_bake_mask_opacity` ajoutées) |
+| Commit studio | `37a7b094` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-27) |
+| Constaté | 2026-09-27 ; présent en `85f6cf1c` |
+
+**Bug.** La vue multiplie les masques d'un calque, masques de son groupe compris, chacun pondéré par son opacité :
+`texpaint_mask *= lerp(1, masque, opacité)` (`make_mesh.c`). Les autres chemins fusionnaient les masques en MIX. Un
+masque opaque y remplaçait donc ceux du dessous. Exemple : un masque A noir sur une zone, puis un masque B blanc partout
+créé après lui. La vue cache la zone, mais le flatten et l'export la montrent. Chemins touchés :
+- `layers_flatten`, l'export upstream et studio (`export_texture.c`, même boucle), et tout ce qui aplatit la pile. Le
+  masque temporaire blanc reçoit chaque masque par `layers_merge_layer`, dont la branche masque imposait
+  `BLEND_TYPE_MIX` : seul le masque le plus haut comptait.
+- `layers_apply_masks` (Merge Down d'un calque à masques, masques des enfants au Merge Group) et `layers_merge_group`
+  (masques du groupe). Les masques étaient fusionnés les uns dans les autres par cette même branche, puis le dernier
+  était appliqué. En plus, le masque propre d'un enfant fusionnait dans le masque du groupe, appliqué ensuite à tous
+  les enfants (`slot_layer_apply_mask`) : il masquait aussi ses frères.
+- Merge Down d'un masque sur un autre : MIX aussi.
+
+Les masques n'ont pas de réglage de fusion dans l'interface (`tab_layers.c` ne montre Blending que pour les calques) et
+la vue n'en lit pas : ils se multiplient toujours.
+
+**Correctif.**
+- `layers_merge_layer`, branche masque : `BLEND_TYPE_MULTIPLY` au lieu de `BLEND_TYPE_MIX`. `mask_merge.shader` fait
+  alors `l0 × lerp(1, l1, opacité)`, la formule de la vue. Cela corrige `layers_flatten`, donc l'export, sans toucher
+  `export_texture.c`, ainsi que le Merge Down d'un masque.
+- Nouvelle fonction `layers_apply_mask_stack`, appelée par `layers_apply_masks` et `layers_merge_group`. Elle applique
+  les masques un à un avec `slot_layer_apply_mask`, chacun avec son opacité et en pleine précision du calque, sans
+  masque intermédiaire 8 bits. Un masque de calque va dans son calque, un masque de groupe dans chaque enfant. Un
+  masque caché est retiré sans effet, comme dans la vue.
+- Merge Down d'un masque sur un masque d'opacité < 1 : `layers_bake_mask_opacity` écrit d'abord cette opacité dans les
+  pixels du masque du dessous (`lerp(1, masque, opacité)`) et la remet à 1. Le produit garde ainsi le poids de chacun.
+
+Pour régénérer : `git diff 37a7b094^ 37a7b094 -- paint/sources/util/util_layer.c`. Ce fichier porte aussi
+[udim-tile-limit](#udim-tile-limit), donc `git diff upstream studio` mêle les deux patches.
+
+**Test.** `.tests/masks_app.sh`, 18 vérifications. Calque rouge sur la base grise, masques gris unis, texel du flatten
+comparé au produit attendu (k) :
+1. flatten : A noir puis B blanc (l'exemple), B noir, opacités (0.25 à 80 % × 0.5 à 50 % = 0.3 ; upstream 0.45), masque
+   caché, masque de groupe multiplié avec ceux du calque ;
+2. Apply Mask de B puis de A : flatten inchangé, alpha du calque 0.3 ; Undo ;
+3. Merge Down d'un calque à deux masques : flatten inchangé ;
+4. Merge Down d'un masque sur un masque d'opacité 0.8 : un masque de 0.3 ;
+5. Merge Group : deux masques de groupe sur un enfant ; masque propre d'un enfant sous un masque de groupe, sans effet
+   sur l'autre enfant ;
+6. export `--export-textures png generic` des `.arm` enregistrés : couleur de base = le flatten.
+
+Contre un build sans le patch, 14 des 18 vérifications échouent. Les 4 qui passent ne dépendent pas de la fusion :
+calque sans masque, masque noir au-dessus, Undo, nombre de calques. Au 2026-09-27, les 17 bancs dans l'app
+(`.tests/*_app.sh`, build avec OCIO) passent tous avec le patch, `udim_app.sh` compris (46/46).
+Helpers de script ajoutés à `studio_atlas.c` : `studio_layer_new_mask`, `studio_layer_select`, `studio_layer_set_parent`,
+`studio_layer_set_opacity`, `studio_layer_op`, `studio_project_res`, `studio_udim_pixel`, `studio_udim_fill`. Ce sont
+les fonctions de la branche `d2`, en sous-ensemble (tuile -1 seulement ; opérations `merge_down`, `merge_group`,
+`apply_mask`, `undo`, `redo`), avec le même code.
+
+**Signes que l'upstream l'a corrigé.** `BLEND_TYPE_MIX` remplacé dans la branche masque de `layers_merge_layer`, ou
+`layers_apply_masks`/`layers_merge_group` qui n'enchaînent plus `layers_merge_layer` entre masques. Rejouer
+`masks_app.sh` sans le patch.
+
+**Non couvert.**
+- L'undo d'Apply Mask recrée le masque à l'opacité 1 (`layers_new_mask`, `history.c`). L'undo d'un Merge Down rend
+  aussi le calque du dessous à l'opacité par défaut. Ce sont des limites upstream, hors de ce patch.
+- Fusionner deux calques semi-transparents en MIX n'est pas associatif : un Merge Group de tels enfants change le
+  flatten, avec ou sans masques (upstream).
+- Masques 8 bits : chaque passe arrondit (écart ≤ 1/255 par masque).
+
+**Branche `d2` (UDIM, pas encore fusionnée).** `util_udim.c` y enveloppe `layers_merge_layer` et `layers_apply_mask`
+par tuile. À la fusion :
+- dans `udim_tiles_app.sh`, section 11, la vérification « deux masques : upstream, le dernier remplace les autres »
+  doit attendre le produit, `flatmask2` = `"$B | $Y | $M | $Y | $Y"` au lieu de `$FLAT`, et changer de libellé ;
+- `layers_bake_mask_opacity` écrit `m->texpaint` directement et doit passer dans la boucle de tuiles de d2
+  (`util_udim_loop_begin`/`tile`/`end`, comme `slot_layer_invert_mask`) ;
+- dans `studio_atlas.c`, les conflits se règlent en prenant la version de d2, dont les helpers contiennent ceux-ci.
+  Seul `studio_layer_set_opacity` est à garder.
