@@ -657,7 +657,9 @@ node_shader_context_t *make_mesh_run(material_t *data, i32 layer_pass) {
 		node_shader_write_frag(kong, "output[0] = float4(n.xy, roughness, pack_f32_i16(metallic, uint(float(int(matid * 255.0)) % float(3))));");
 	}
 
-	node_shader_write_frag(kong, string_tmp("output[2] = float4(0.0, 0.0, %s.xy);", tex_coord_layer));
+	// STUDIO-PATCH(udim-tiles): the tile of the object, read under the brush by the pickers (util_udim.h)
+	node_shader_add_constant(kong, "float udim_tile_code", "_udim_tile_code");
+	node_shader_write_frag(kong, string_tmp("output[2] = float4(constants.udim_tile_code, 0.0, %s.xy);", tex_coord_layer));
 
 	parser_material_finalize(con_mesh);
 

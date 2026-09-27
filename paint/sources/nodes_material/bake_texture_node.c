@@ -6,6 +6,9 @@ static render_target_t *_bake_texture_node_rt;
 static int              _bake_texture_node_bits;
 
 static void bake_texture_node_clear(gpu_texture_t *t) {
+	if (util_udim_clear(t, 0xff000000)) { // STUDIO-PATCH(udim-tiles): the bake of a tiled layer, every tile
+		return;
+	}
 	draw_begin(t, true, 0xff000000);
 	draw_end();
 }
@@ -24,6 +27,7 @@ static void bake_texture_node_check_result(ui_node_t *node) {
 		gpu_texture_t   *_image  = rt->_image;
 		rt->format               = "RGBA32";
 		rt->_image               = gpu_create_render_target(rt->width, rt->height, GPU_TEXTURE_FORMAT_RGBA32);
+		util_udim_tile_like(rt->_image, _image); // STUDIO-PATCH(udim-tiles): the bake of a tiled layer, every tile
 		draw_begin(rt->_image, false, 0);
 		draw_scaled_image(_image, 0, 0, _image->width, _image->height);
 		draw_end();
@@ -250,6 +254,14 @@ static char *bake_texture_node_vector(ui_node_t *node, ui_node_socket_t *socket)
 	bind_tex_t *tex      = parser_material_make_bind_tex(rt_name, rt_name);
 	char       *texstore = parser_material_texture_store(node, tex, rt_name, COLOR_SPACE_AUTO);
 	return string_tmp("%s.rgb", texstore);
+}
+
+// STUDIO-PATCH(udim-tiles): the Bake button of a node, for the scripts of the benches (studio_bake,
+// paint/plugins/external/studio_atlas.c)
+void bake_texture_node_bake(ui_node_t *node, i32 bake_type) {
+	bake_texture_node_run(node, bake_type,
+	                      bake_type == BAKE_TYPE_OCCLUSION || bake_type == BAKE_TYPE_LIGHTMAP || bake_type == BAKE_TYPE_BENT_NORMAL ||
+	                          bake_type == BAKE_TYPE_THICKNESS);
 }
 
 void bake_texture_node_init() {

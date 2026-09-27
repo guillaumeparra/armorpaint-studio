@@ -71,9 +71,26 @@ void              history_invert_mask(void);
 void              slot_layer_invert_mask(slot_layer_t *raw);
 void              history_undo(void);
 void              history_redo(void);
+void              viewport_update_camera_type(i32 camera_type);
+void              make_material_parse_paint_material(bool bake_previews);
+void              render_path_base_draw_gbuffer(void);
+void              util_uv_cache_uv_island_map(void);
+i32               util_udim_cursor_tile(void);
+i32               util_udim_picked_tile(void);
+extern bool       util_uv_uvislandmap_cached;
+extern gpu_texture_t *util_uv_uvmap;
+extern gpu_texture_t *util_uv_trianglemap;
+extern gpu_texture_t *util_uv_dilatemap;
+void              util_uv_cache_uv_map(void);
+void              util_uv_cache_triangle_map(void);
+void              util_uv_cache_dilate_map(void);
 extern any_array_t *history_undo_layers;
 i32               color_from_floats(f32 r, f32 g, f32 b, f32 a);
 void              _gpu_begin(gpu_texture_t *render_target, any_array_t *additional, gpu_texture_t *depth_buffer, gpu_clear_t flags, unsigned color, float depth);
+void              bake_texture_node_bake(ui_node_t *node, i32 bake_type);
+extern bool       bake_texture_node_baking;
+extern bool       render_path_paint_baking;
+extern any_map_t *render_path_render_targets;
 
 #define DEFAULT_NAME "Atlas 1"
 #define MAX_NAME     64
@@ -700,6 +717,132 @@ static minic_val_t mn_studio_world_screen(minic_val_t *a, int n) {
 	return minic_val_ptr(string("%f %f", (clip.x / clip.w + 1.0f) * 0.5f, (-clip.y / clip.w + 1.0f) * 0.5f));
 }
 
+// Option de peinture que context_t ne donne pas aux scripts : "camera_align" (pinceau aligné sur la caméra), "ortho"
+// (caméra orthographique), "xray", "sym_x", "sym_y", "sym_z" (symétrie, peinte par la frame : render_path_paint_draw,
+// pas par script_paint_world) ; "fill_type" prend la valeur (0 objet, 1 face, 2 angle, 3 îlot UV). Le matériau de
+// peinture est recompilé. 1 si fait.
+static minic_val_t mn_studio_paint_option(minic_val_t *a, int n) {
+	char *name = minic_arg_p(a, n, 0);
+	bool  on   = minic_arg_i(a, n, 1) != 0;
+	if (name == NULL) {
+		return minic_val_int(0);
+	}
+	if (strcmp(name, "camera_align") == 0) {
+		g_context->brush_camera_align = on;
+	}
+	else if (strcmp(name, "ortho") == 0) {
+		g_context->camera_type = on ? CAMERA_TYPE_ORTHOGRAPHIC : CAMERA_TYPE_PERSPECTIVE;
+		viewport_update_camera_type(g_context->camera_type);
+		camera_object_build_mat(scene_camera); // vp, rebuilt by the next frame otherwise
+	}
+	else if (strcmp(name, "xray") == 0) {
+		g_context->xray = on;
+	}
+	else if (strcmp(name, "sym_x") == 0) {
+		g_context->sym_x = on;
+	}
+	else if (strcmp(name, "sym_y") == 0) {
+		g_context->sym_y = on;
+	}
+	else if (strcmp(name, "sym_z") == 0) {
+		g_context->sym_z = on;
+	}
+	else if (strcmp(name, "fill_type") == 0) {
+		g_context->fill_type = (i32)minic_arg_i(a, n, 1);
+	}
+	else {
+		return minic_val_int(0);
+	}
+	make_material_parse_paint_material(true);
+	g_context->ddirty = 2;
+	return minic_val_int(1);
+}
+
+// Pipettes UDIM au point du monde (x, y, z), gbuffer redessiné : "cursor" donne la tuile sous le pinceau (-1 sans),
+// "islands" calcule la carte des îlots UV comme l'image suivante d'un remplissage UV Island, "picked" rend la tuile de
+// la dernière pipette, la couleur et l'uv lues.
+static minic_val_t mn_studio_udim_pick(minic_val_t *a, int n) {
+	char *op = minic_arg_p(a, n, 0);
+	if (op == NULL) {
+		return minic_val_ptr(string_copy("-"));
+	}
+	if (strcmp(op, "picked") == 0) {
+		i32 c = g_context->picked_color->base;
+		return minic_val_ptr(string("tile=%d rgb=%d %d %d uv=%.3f %.3f", util_udim_picked_tile(), (c >> 16) & 0xff, (c >> 8) & 0xff, c & 0xff,
+		                            g_context->uvx_picked, g_context->uvy_picked));
+	}
+	vec4_t clip = vec4_apply_mat4((vec4_t){(f32)minic_arg_f(a, n, 1), (f32)minic_arg_f(a, n, 2), (f32)minic_arg_f(a, n, 3), 1.0f}, scene_camera->vp);
+	if (clip.w <= 0.0f) {
+		return minic_val_ptr(string_copy("-"));
+	}
+	gpu_texture_t *current = _draw_current;
+	bool           in_use  = gpu_in_use;
+	if (in_use) {
+		draw_end();
+	}
+	g_context->paint_vec.x = (clip.x / clip.w + 1.0f) * 0.5f;
+	g_context->paint_vec.y = (-clip.y / clip.w + 1.0f) * 0.5f;
+	render_path_base_draw_gbuffer();
+	char *out = string_copy("-");
+	if (strcmp(op, "cursor") == 0) {
+		out = string("%d", util_udim_cursor_tile());
+	}
+	else if (strcmp(op, "islands") == 0) {
+		util_uv_cache_uv_island_map();
+		out = string("tile=%d", util_udim_picked_tile());
+	}
+	if (in_use) {
+		draw_begin(current, false, 0);
+	}
+	return minic_val_ptr(out);
+}
+
+// Source du clone : le point du monde (xs, ys, zs) vu depuis la destination (xd, yd, zd), comme le Alt-clic de l'outil
+// Clone. 1 si les deux points sont devant la caméra.
+static minic_val_t mn_studio_clone_source(minic_val_t *a, int n) {
+	f32 sx[2];
+	f32 sy[2];
+	for (int k = 0; k < 2; ++k) {
+		vec4_t clip = vec4_apply_mat4(
+		    (vec4_t){(f32)minic_arg_f(a, n, k * 3), (f32)minic_arg_f(a, n, k * 3 + 1), (f32)minic_arg_f(a, n, k * 3 + 2), 1.0f}, scene_camera->vp);
+		if (clip.w <= 0.0f) {
+			return minic_val_int(0);
+		}
+		sx[k] = (clip.x / clip.w + 1.0f) * 0.5f;
+		sy[k] = (-clip.y / clip.w + 1.0f) * 0.5f;
+	}
+	g_context->clone_delta_x = sx[0] - sx[1];
+	g_context->clone_delta_y = sy[0] - sy[1];
+	return minic_val_int(1);
+}
+
+// Bouton Bake du nœud Bake Texture (type : enum bake_type_t ; high_poly : indice de l'objet high poly), comme dans
+// l'éditeur de nœuds ; le bake court sur les images suivantes, studio_bake_state() dit quand il est fini. L'id du nœud
+// (sa texture : studio_udim_pixel(id, 6, ...)), -1 si rien n'est lancé.
+static minic_val_t mn_studio_bake(minic_val_t *a, int n) {
+	ui_node_t *node = minic_arg_p(a, n, 0);
+	if (node == NULL || strcmp(node->type, "TEX_BAKE") != 0) {
+		return minic_val_int(-1);
+	}
+	g_context->bake_high_poly = (i32)minic_arg_i(a, n, 2);
+	bool in_use               = gpu_in_use;
+	if (!in_use) { // Le nœud change la profondeur des calques dans une passe (bouton de l'interface)
+		draw_begin(NULL, false, 0);
+	}
+	bake_texture_node_bake(node, (i32)minic_arg_i(a, n, 1));
+	if (!in_use) {
+		draw_end();
+	}
+	return minic_val_int(node->id);
+}
+
+// État du bake du nœud : "done" une fois la texture rendue au nœud, "baking" avant.
+static minic_val_t mn_studio_bake_state(minic_val_t *a, int n) {
+	(void)a;
+	(void)n;
+	return minic_val_ptr(string_copy(bake_texture_node_baking || render_path_paint_baking || g_context->pdirty > 0 ? "baking" : "done"));
+}
+
 // Résolution du projet : Custom, px × px, calques redimensionnés tout de suite (le menu Resolution de l'onglet Layers
 // attend l'image suivante). Pour les bancs : des projets UDIM légers. 1 si fait.
 static minic_val_t mn_studio_project_res(minic_val_t *a, int n) {
@@ -780,7 +923,9 @@ static char *pixel_text(gpu_texture_t *t, float *c) {
 }
 
 // Pixel (x, y) de la texture channel (0 base, 1 nor, 2 pack) du calque i sur la tuile tile (-1 : tuile du contexte),
-// « r g b a » de 0 à 1 ; « - » hors bornes.
+// « r g b a » de 0 à 1 ; « - » hors bornes. Channel 3, 4, 5 : cartes UV, des triangles et de dilatation du calque
+// courant, construites au besoin (i ignoré). Channel 6 : texture du nœud Bake Texture d'id i. Channel 7 : i-ème aperçu
+// de nœud du matériau (Curvature Texture...). Channel 8 : base de l'emplacement d'undo i.
 static minic_val_t mn_studio_udim_pixel(minic_val_t *a, int n) {
 	int                   i       = (int)minic_arg_i(a, n, 0);
 	int                   channel = (int)minic_arg_i(a, n, 1);
@@ -788,7 +933,7 @@ static minic_val_t mn_studio_udim_pixel(minic_val_t *a, int n) {
 	int                   x       = (int)minic_arg_i(a, n, 3);
 	int                   y       = (int)minic_arg_i(a, n, 4);
 	slot_layer_t_array_t *layers  = g_project->_->layers;
-	if (i < 0 || i >= (int)layers->length || channel < 0 || channel > 2) {
+	if ((channel <= 2 && (i < 0 || i >= (int)layers->length)) || channel < 0 || channel > 8) {
 		return minic_val_ptr(string_copy("-"));
 	}
 	gpu_texture_t *current = _draw_current;
@@ -800,9 +945,39 @@ static minic_val_t mn_studio_udim_pixel(minic_val_t *a, int n) {
 	if (tile >= 0) {
 		util_udim_set_tile(tile);
 	}
-	slot_layer_t  *l   = layers->buffer[i];
-	gpu_texture_t *t   = channel == 0 ? l->texpaint : channel == 1 ? l->texpaint_nor : l->texpaint_pack;
-	char          *out = string_copy("-");
+	gpu_texture_t *t = NULL;
+	if (channel <= 2) {
+		slot_layer_t *l = layers->buffer[i];
+		t               = channel == 0 ? l->texpaint : channel == 1 ? l->texpaint_nor : l->texpaint_pack;
+	}
+	else if (channel == 3) {
+		util_uv_cache_uv_map();
+		t = util_uv_uvmap;
+	}
+	else if (channel == 4) {
+		util_uv_cache_triangle_map();
+		t = util_uv_trianglemap;
+	}
+	else if (channel == 6) {
+		render_target_t *rt = any_map_get(render_path_render_targets, string("bake_texture_node_%d", i));
+		t                   = rt != NULL ? rt->_image : NULL;
+	}
+	else if (channel == 8) {
+		t = i >= 0 && i < (int)history_undo_layers->length ? ((slot_layer_t *)history_undo_layers->buffer[i])->texpaint : NULL;
+	}
+	else if (channel == 7) {
+		string_array_t *keys = g_context->node_previews != NULL ? (string_array_t *)map_keys(g_context->node_previews) : NULL;
+		t                    = keys != NULL && i >= 0 && i < (int)keys->length ? any_map_get(g_context->node_previews, keys->buffer[i]) : NULL;
+		if (keys != NULL) {
+			array_free(keys);
+			free(keys);
+		}
+	}
+	else {
+		util_uv_cache_dilate_map();
+		t = util_uv_dilatemap;
+	}
+	char *out = string_copy("-");
 	if (t != NULL && x >= 0 && y >= 0 && x < (int)t->width && y < (int)t->height) {
 		buffer_t *b = gpu_get_texture_pixels(t);
 		float     c[4];
@@ -810,6 +985,7 @@ static minic_val_t mn_studio_udim_pixel(minic_val_t *a, int n) {
 		for (int k = 0; k < 4; ++k) {
 			c[k] = t->format == GPU_TEXTURE_FORMAT_RGBA128  ? ((float *)b->buffer)[at * 4 + k]
 			       : t->format == GPU_TEXTURE_FORMAT_RGBA64 ? half_to_float(((uint16_t *)b->buffer)[at * 4 + k])
+			       : t->format == GPU_TEXTURE_FORMAT_R8     ? (k == 0 ? b->buffer[at] / 255.0f : k == 3 ? 1.0f : 0.0f)
 			                                                : b->buffer[at * 4 + k] / 255.0f;
 		}
 		out = pixel_text(t, c);
@@ -981,6 +1157,11 @@ void studio_atlas_init(void) {
 	minic_register("studio_layer_masks", "p()", mn_studio_layer_masks);
 	minic_register("studio_project_res", "i(i)", mn_studio_project_res);
 	minic_register("studio_world_screen", "p(f,f,f)", mn_studio_world_screen);
+	minic_register("studio_paint_option", "i(p,i)", mn_studio_paint_option);
+	minic_register("studio_udim_pick", "p(p,f,f,f)", mn_studio_udim_pick);
+	minic_register("studio_clone_source", "i(f,f,f,f,f,f)", mn_studio_clone_source);
+	minic_register("studio_bake", "i(p,i,i)", mn_studio_bake);
+	minic_register("studio_bake_state", "p()", mn_studio_bake_state);
 	minic_register("studio_udim_stats", "p()", mn_studio_udim_stats);
 	minic_register("studio_udim_layer", "p(i)", mn_studio_udim_layer);
 	minic_register("studio_udim_pixel", "p(i,i,i,i,i)", mn_studio_udim_pixel);

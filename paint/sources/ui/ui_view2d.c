@@ -757,6 +757,11 @@ void ui_view2d_update(void *_) {
 				g_ui->_x += ew + 3;
 				g_ui->_y = 2 + start_y;
 			}
+
+			if (util_udim_view2d_tile()) { // STUDIO-PATCH(udim-tiles): tile of a tiled layer (util_udim.h)
+				g_ui->_x += ew + 3;
+				g_ui->_y = 2 + start_y;
+			}
 		}
 
 		if (ui_view2d_type == VIEW_2D_TYPE_SOUND) {
@@ -801,7 +806,8 @@ void ui_view2d_update(void *_) {
 		g_ui->_y = 2 + start_y;
 
 		// Picked position
-		if (g_context->tool == TOOL_TYPE_PICKER && (ui_view2d_type == VIEW_2D_TYPE_LAYER || ui_view2d_type == VIEW_2D_TYPE_ASSET)) {
+		if (g_context->tool == TOOL_TYPE_PICKER && (ui_view2d_type == VIEW_2D_TYPE_LAYER || ui_view2d_type == VIEW_2D_TYPE_ASSET) &&
+		    (!util_udim_layer_tiled(g_context->layer) || util_udim_picked_tile() == util_udim_tile())) { // STUDIO-PATCH(udim-tiles): picked there
 			gpu_texture_t *cursor_img = resource_get("cursor.k");
 			f32            hsize      = 16 * UI_SCALE();
 			f32            size       = hsize * 2;

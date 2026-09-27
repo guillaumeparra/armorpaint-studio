@@ -1312,7 +1312,7 @@ d'entrée : ils ne portent pas l'état du projet.
 | | |
 |---|---|
 | Fichiers | `paint/sources/util/util_udim.c` et `.h` (nouveaux), `paint/sources/global.h` (include), `paint/sources/main.c` (unity build) |
-| Commit studio | `d2bd0efe` sur la branche `studio` |
+| Commit studio | `d2bd0efe` sur la branche `studio` (lot D1) ; lot D2 sur la branche `d2`, fusionnée dans `studio` à la fin du lot |
 | Validé contre | upstream `85f6cf1c` (2026-09-27) |
 | Injection | deux lignes d'include ; le reste dans un fichier que l'upstream n'a pas |
 
@@ -1333,11 +1333,15 @@ lot D1).
 
 **Contenu (lot D2).** Le contexte de tuile ([udim-tiles](#udim-tiles)) : magasins de contenus par vue et par tuile,
 `util_udim_set_tile`, règle des calques à tuiles, suivi de la table, échanges et sauvegardes d'undo par tuile, boucles
-sur les tuiles des opérations de calque, dessin du gbuffer objet par objet.
+sur les tuiles des opérations de calque, dessin du gbuffer objet par objet (D2a). Peinture tuile par tuile (tuiles
+touchées par le trait, d'après les boîtes des objets à l'écran), undo par copie sur écriture, blend et dilatation par
+tuile peinte, cartes UV par tuile, tuile sous le pinceau pour les pipettes et les remplissages, menu de tuile de la vue
+2D, bakes par tuile : objets de la tuile, high poly choisi par nom (même nom au suffixe de tuile près), aperçus de nœud
+(D2b).
 
 Le commentaire d'en-tête d'`util_udim.h` pose la règle du lot D1 : un maillage UDIM garde un objet de peinture par
 tuile, nommé `<objet>.<tuile>` comme dans le format upstream, pour que le `.arm` reste lisible par ArmorPaint et par
-les builds studio précédents. Pour régénérer : `git diff upstream studio -- paint/sources/util/util_udim.c
+les builds studio précédents. Pour régénérer : `git diff upstream -- paint/sources/util/util_udim.c
 paint/sources/util/util_udim.h paint/sources/global.h paint/sources/main.c` (aucun autre patch dans ces fichiers).
 
 **Test.** Ceux des patches qui l'appellent ([udim-material-uv](#udim-material-uv)). Sans UDIM,
@@ -1378,7 +1382,9 @@ calque partagé.
   dilatation, qui gardent le maillage fusionné.
 
 Pour régénérer : `git diff d2bd0efe^ d2bd0efe -- <les quatre fichiers>` ; `uniforms.c` porte aussi ocio-viewport et
-udim-tile-limit, `util_mesh.c` udim-tile-limit.
+udim-tile-limit, `util_mesh.c` udim-tile-limit. Depuis le lot D2b, [udim-tiles](#udim-tiles) insère une branche juste
+avant le hunk de `make_texcoord.c` : sa section est un diff contre une copie du fichier où ce hunk est défait
+(`patch -R -F3`), pour que le patch se défasse seul sur l'arbre courant.
 
 **Test.** `.tests/udim_app.sh` section 6 : bruit procédural (UV Map → Noise Texture) rempli sur cinq tuiles pleines
 (1001 à 1004, 1011), export par tuile, écart moyen (0-255) entre les bords :
@@ -1730,12 +1736,39 @@ derrière pour peindre dans la même image.
 
 ---
 
+## bake-derivative
+
+| | |
+|---|---|
+| Fichier | `paint/sources/render/render_path_paint.c` (`render_path_paint_draw`) |
+| Commit studio | branche `d2` (lot D2, sous-lot D2b), fusionnée dans `studio` à la fin du lot |
+| Validé contre | upstream `85f6cf1c` (2026-09-27) |
+| Trouvé | 2026-09-27, tests du bake high poly par tuile (lot D2b) |
+| Constaté | présent en `85f6cf1c` ; depuis quand : non recherché |
+
+**Bug.** Le bake Derivative se fait en trois passes : positions du high poly, hauteur du low, puis dérivée de la
+hauteur. `render_path_paint_draw` remplace `bake_type` par la passe du high poly (`BAKE_TYPE_POSITION`) avant de tester
+`bake_type == BAKE_TYPE_DERIVATIVE` pour choisir la suite : le test est toujours faux, la passe de hauteur n'a jamais
+lieu, la dérivée est prise sur les positions. Constaté : un high poly confondu avec le low (hauteur nulle partout) donne
+une dérivée de 0,588 au lieu de 0,5, la même pour un high poly incliné.
+
+**Correctif.** Le test porte sur `_render_path_paint_bake_type`, le bake demandé, gardé à côté juste avant.
+
+**Test.** Bake Derivative d'un low et d'un high poly du même OBJ (`.tests/udim_tiles_app.sh`, section bake) : high
+confondu avec le low, 0,5 partout ; high incliné en u sur une tuile, en v sur une autre, la dérivée sature dans le bon
+axe, 0,5 sur les tuiles planes. Sans le patch : 0,588 partout.
+
+**Signes que l'upstream l'a corrigé.** Le test du bloc high poly de `render_path_paint_draw` ne lit plus `bake_type`
+réécrit (variable gardée, ou suite choisie avant la réécriture). Rejouer le test sans le patch.
+
+---
+
 ## udim-tiles
 
 | | |
 |---|---|
-| Fichiers | `base/sources/iron.h` (`gpu_delete_texture`), `paint/sources/history.c` (`history_copy_to_undo`), `paint/sources/slots/slot_layer.c` (`slot_layer_swap`, `_clear`, `_invert_mask`, `_duplicate`, `_resize_and_set_bits`), `paint/sources/render/make_mesh.c` (`make_mesh_run`), `paint/sources/render/render_path_base.c` (`render_path_base_commands`, `_draw_gbuffer`), `paint/sources/render/render_path_paint.c` (`render_path_paint_bind_layers`, `_unbind_layers`), `paint/sources/util/util_mesh.c` (nouveau `util_mesh_udim_tile_table`) |
-| Commit studio | branche `d2` (lot D2, sous-lot D2a), fusionnée dans `studio` à la fin du lot |
+| Fichiers | `base/sources/iron.h` (`gpu_delete_texture`), `base/sources/iron_gpu.c` et `.h` (`gpu_begin`, nouveau `gpu_target_beginning`), `paint/sources/history.c` (`history_copy_to_undo`, `history_paint`), `paint/sources/slots/slot_layer.c` (`slot_layer_swap`, `_clear`, `_invert_mask`, `_duplicate`, `_resize_and_set_bits`), `paint/sources/render/make_mesh.c` (`make_mesh_run`), `paint/sources/render/make_paint.c` (`make_paint_run_context`), `paint/sources/render/make_texcoord.c` (`make_texcoord_run`), `paint/sources/render/make_clone.c` (`make_clone_run`), `paint/sources/render/make_material.c` (`make_material_bake_node_preview`), `paint/sources/render/render_path_base.c` (`render_path_base_commands`, `_draw_gbuffer`), `paint/sources/render/render_path_paint.c` (`render_path_paint_bind_layers`, `_unbind_layers`, `_commands_paint`, `_commands_live_brush`, `_draw`, `_dilate`), `paint/sources/uniforms.c` (`uniforms_ext_f32_link`), `paint/sources/util/util_uv.c` (`util_uv_cache_uv_map`, `_triangle_map`, `_dilate_map`, `_uv_island_map`), `paint/sources/ui/ui_view2d.c` (`ui_view2d_update`), `paint/sources/nodes_material/bake_texture_node.c` (`bake_texture_node_clear`, `_check_result`, nouveau `bake_texture_node_bake`), `paint/sources/util/util_mesh.c` (nouveau `util_mesh_udim_tile_table`) |
+| Commit studio | branche `d2` (lot D2, sous-lots D2a et D2b), fusionnée dans `studio` à la fin du lot |
 | Validé contre | upstream `85f6cf1c` (2026-09-27) |
 | Injection | points d'appel et boucles sur les tuiles ; la logique dans `util_udim.c` ([udim-core](#udim-core)) |
 
@@ -1761,8 +1794,34 @@ sans tuile). Le code upstream travaille sans changement sur la tuile du contexte
   `util_udim_resize_layer` ; l'échange avec un emplacement d'undo par `util_udim_swap_layers`.
 - `history.c` : `history_copy_to_undo` d'un calque à tuiles sauve toutes ses tuiles (`util_udim_copy_to_undo`, qui
   rappelle la copie upstream pour chaque tuile).
-- `render_path_paint.c` : pas de calque live (aperçu de pinceau, outil Material) sur un calque à tuiles, jusqu'à D2b.
+- `render_path_paint.c` : pas de calque live (aperçu de pinceau, outil Material) sur un calque à tuiles (tout D2).
 - `util_mesh.c` : la table des tuiles triée, pour les magasins.
+
+**Points d'appel (D2b).**
+- `iron_gpu.c` / `.h` : `gpu_begin` prévient `util_udim.c` des cibles qu'il va dessiner (pointeur de fonction
+  `gpu_target_beginning`, `NULL` par défaut, hors d'une passe) : la tuile d'un calque est sauvée dans l'emplacement
+  d'undo du pas à son premier dessin (copie sur écriture). Un pas ne tient que les tuiles qu'il a changées.
+- `history.c` : `history_paint` d'un calque à tuiles passe par `util_udim_paint_undo` (la tuile du contexte sauvée,
+  les autres à leur premier dessin).
+- `render_path_paint.c` : `render_path_paint_commands_paint` peint un calque à tuiles tuile par tuile
+  (`util_udim_paint_tiles`, qui la rappelle pour chaque tuile touchée, avec les objets de la tuile dans leurs uv
+  locales) ; les pipettes de calque et de masque lisent la tuile sous le pinceau (`util_udim_pick_begin`, puis la
+  tuile remise) ; l'outil Material n'y prend pas de calque live ; `texpaint_blend0/1` de chaque tuile peinte libérés
+  en fin de trait (`util_udim_blend_reset`) ; la dilatation passe par les tuiles peintes (`util_udim_dilate`). Le bloc
+  high poly de `render_path_paint_draw` porte aussi [bake-derivative](#bake-derivative).
+- `make_paint.c`, `make_texcoord.c` : un calque à tuiles est peint dans les uv locales de chaque tuile (plus en
+  `atlas_uv`) ; ses matériaux restent dans l'espace UDIM (`_udim_tile`), le bake travaille dans les uv de la tuile.
+- `make_mesh.c`, `uniforms.c` : le gbuffer écrit la tuile de chaque objet (`gbuffer2.r`, `_udim_tile_code` : tuile
+  - 1000, 0 sans tuile), lue sous le pinceau par les pipettes et les remplissages de face et d'îlot UV.
+- `make_clone.c` : une source de clone sur une autre tuile n'est pas liée, rien n'est peint (discard).
+- `util_uv.c` : cartes UV, de triangles et de dilatation par tuile (`util_udim_cache_*_map`) ; les îlots UV sont ceux
+  de la tuile sous le pinceau (`util_udim_island_begin`, puis la tuile remise).
+- `ui_view2d.c` : la vue 2D d'un calque à tuiles montre et peint la tuile du contexte, choisie dans un menu
+  (`util_udim_view2d_tile`) ; le point de la pipette n'y est dessiné que sur la tuile piquée.
+- `bake_texture_node.c` : le nœud Bake Texture d'un calque à tuiles vide et recopie chaque tuile
+  (`util_udim_clear`, `util_udim_tile_like`) ; `bake_texture_node_bake`, le bouton Bake pour les scripts des bancs
+  (`studio_bake`).
+- `make_material.c` : l'aperçu Curvature d'un calque à tuiles est baké tuile par tuile (`util_udim_tile_preview`).
 
 **Règle.** Calques et masques à tuiles quand la table a au moins deux tuiles et `uv_map != 1`, sauf un calque limité
 à un objet sans tuile ; un masque suit son calque. Une tuile qui apparaît reçoit le fond de chaque calque (son texel
@@ -1770,17 +1829,27 @@ sans tuile). Le code upstream travaille sans changement sur la tuile du contexte
 Un emplacement d'undo ne tient que les tuiles qu'il a sauvées ; s'il avait sauvé tout le calque, il reçoit à
 l'échange les tuiles apparues depuis. UDIM coupé : chaque calque revient à une texture.
 
-Pour régénérer : `git diff 06655d76 -- <les sept fichiers>` (`06655d76` : `studio` avant le lot D2) ; `iron.h` porte
-aussi ocio-import, `util_mesh.c` udim-material-uv et udim-tile-limit, `render_path_paint.c` udim-material-uv.
+Pour régénérer : `git diff 06655d76 -- <les dix-sept fichiers>` (`06655d76` : `studio` avant le lot D2), sauf le hunk
+[bake-derivative](#bake-derivative) de `render_path_paint.c` (diff contre une copie du fichier où il est défait) ;
+`iron.h` porte aussi ocio-import, `util_mesh.c` udim-material-uv et udim-tile-limit, `render_path_paint.c`,
+`make_texcoord.c` et `uniforms.c` udim-material-uv, `uniforms.c` aussi ocio-viewport et udim-tile-limit.
 
 **Test.** `.tests/udim_tiles_app.sh` : passage aux tuiles, Clear / Undo / Redo, Duplicate, Delete et Undo (sans
 fuite), résolution du projet, masque et Invert, vue 3D (gbuffer au centre de chaque tuile), maillage ajouté dans une
-nouvelle tuile (L17 : les tuiles gardent leur peinture), UDIM coupé. Au 2026-09-27 : 19 contrôles passent.
+nouvelle tuile (L17 : les tuiles gardent leur peinture), UDIM coupé (D2a) ; peinture continue à la couture de deux
+tuiles, undo et redo pas à pas (chaque pas ne tient que ses tuiles), pinceau aligné sur la caméra, caméra ortho, xray,
+symétrie ; cartes UV, de triangles et de dilatation par tuile ; pipette ; remplissages de face et d'îlot UV ; clone ;
+bakes Texcoord, Position, Object ID, high poly (hauteur, dérivée, normales) et Curvature par tuile ; 70 tuiles, le
+pinceau au-delà des 64 ne peint rien (D2b). Au 2026-09-27 : 48 contrôles passent.
 
-**Signes que l'upstream l'a changé.** `gpu_delete_texture`, `history_copy_to_undo` ou `slot_layer_swap` réécrits ;
-le bloc `tex_coord_atlas` de `make_mesh_run` modifié (l'upstream retravaille ses UDIM) ; `render_path_draw_meshes`
-remplacé dans `render_path_base_draw_gbuffer`.
+**Signes que l'upstream l'a changé.** `gpu_delete_texture`, `gpu_begin`, `history_copy_to_undo`, `history_paint` ou
+`slot_layer_swap` réécrits ; le bloc `tex_coord_atlas` de `make_mesh_run` ou le bloc `atlas_uv` de
+`make_paint_run_context` modifiés (l'upstream retravaille ses UDIM) ; `render_path_draw_meshes` remplacé dans
+`render_path_base_draw_gbuffer` ; `gbuffer2.r` utilisé par l'upstream ; les branches pipette ou peinture de
+`render_path_paint_commands_paint` réorganisées ; les caches de `util_uv.c` renommés.
 
-**Non couvert (D2a).** La peinture, le remplissage, le bake, les cartes et les pipettes (D2b) ; flatten, fusion et
-masques en pile (D2c) ; export (D2d) ; `.arm` et migration des projets atlas (D2e). Sur la branche `d2` tant que le
-lot n'est pas fini : la peinture d'un projet UDIM y est cassée.
+**Non couvert.** Flatten, fusion et masques en pile (D2c) ; export (D2d) ; `.arm` et migration des projets atlas
+(D2e) ; raytrace (D2f). Voulu, décrit dans `ARMORPAINT_UDIM.md` (lot D2b) : pas d'aperçu de pinceau live sur un
+calque à tuiles ; pas de clone d'une tuile à l'autre ; ColorID, flou et smudge ne lisent que la tuile peinte. Non
+testés : sculpt, particules, décalques et texte sur un calque à tuiles (même chemin que le pinceau). Sur la branche
+`d2` tant que le lot n'est pas fini : l'export et les projets atlas d'avant D2 y sont cassés.

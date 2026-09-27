@@ -8,6 +8,10 @@ void make_clone_run(node_shader_t *kong) {
 	                             "constants.clone_delta.y) * constants.gbuffer_size.y));");
 	node_shader_write_frag(kong, "float4 tex_coord_inp4 = gbuffer2[tex_coord_coord];");
 	node_shader_write_frag(kong, "float2 tex_coord_inp = tex_coord_inp4.ba;");
+	if (util_udim_layer_should_tile(g_context->layer)) { // STUDIO-PATCH(udim-tiles): the source on another tile is not bound, nothing painted
+		node_shader_add_constant(kong, "float udim_tile_code", "_udim_tile_code");
+		node_shader_write_frag(kong, "if (tex_coord_inp4.r != constants.udim_tile_code) { discard; }");
+	}
 
 	node_shader_write_frag(kong, "float4 texpaint_undo_sample = sample_lod(texpaint_undo, sampler_linear, tex_coord_inp, 0.0);");
 	node_shader_write_frag(kong, "float4 texpaint_pack_undo_sample = sample_lod(texpaint_pack_undo, sampler_linear, tex_coord_inp, 0.0);");

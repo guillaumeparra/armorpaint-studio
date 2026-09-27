@@ -22,6 +22,9 @@ static i32 util_udim_object_tile(object_t *object) {
 
 vec2_t util_udim_tile_uv(object_t *object) {
 	i32 tile = util_udim_object_tile(object);
+	if (tile < 0 && g_context->paint2d && util_udim_layer_tiled(g_context->layer)) {
+		tile = util_udim_tile(); // The 2d plane paints the tile of the context (lot D2b)
+	}
 	if (tile < 0) {
 		return (vec2_t){0.0, 0.0};
 	}
@@ -51,7 +54,12 @@ static bool util_udim_paint_per_object() {
 	return tool != TOOL_TYPE_BAKE && tool != TOOL_TYPE_COLORID && tool != TOOL_TYPE_PICKER && tool != TOOL_TYPE_MATERIAL && tool != TOOL_TYPE_CURSOR;
 }
 
+static bool udim_draw_tile_meshes();
+
 void util_udim_draw_paint_meshes() {
+	if (udim_draw_tile_meshes()) { // Tiled layer (lot D2)
+		return;
+	}
 	mesh_object_t         *merged = g_context->merged_object;
 	mesh_object_t_array_t *scope  = util_mesh_merged_scope();
 	if (merged == NULL || scope == NULL || scope->length == 0 || !util_udim_paint_per_object()) {
@@ -98,6 +106,15 @@ static gpu_texture_t *udim_placeholder = NULL;
 static i32            udim_loop_saved[8];
 static bool           udim_loop_tiled[8];
 static i32            udim_loop_depth = 0;
+static bool           udim_copying    = false; // Inside the upstream history_copy_to_undo()
+static bool           udim_painting   = false; // Inside the paint loop
+static i32            udim_dirty[UDIM_MAX_TILES]; // Tiles painted since the dilation of their nor and pack
+static i32            udim_dirty_count = 0;
+static slot_layer_t  *udim_arm_layer   = NULL; // Layer of the paint step, its tiles saved when first drawn to
+static gpu_texture_t *udim_arm_views[3];
+static gpu_texture_t *udim_arm_slot_views[3];
+static i32            udim_picked      = -1; // Tile of the last pick
+static i32            udim_island_tile = -1; // Tile of util_uv_uvislandmap
 
 static udim_store_t *udim_store_of(gpu_texture_t *view) {
 	if (view == NULL) {
@@ -250,8 +267,7 @@ static void udim_unregister(udim_store_t *s) {
 }
 
 // The view gets tiles: its texture goes to the tile of the context (or to the first of ids), the other tiles are new,
-// copies of it or cleared
-// The texture of the view goes to the tile shown (or the first), the other tiles are cleared or get its background
+// cleared or given its background (texel (0, 0))
 static udim_store_t *udim_tile_view(gpu_texture_t *view, bool partial, i32 n, i32 *ids, bool background) {
 	i32 home = ids[0];
 	for (i32 i = 0; i < n; ++i) {
@@ -296,8 +312,21 @@ static void udim_untile(udim_store_t *s, i32 keep) {
 	udim_unregister(s);
 }
 
+static void udim_disarm() {
+	udim_arm_layer = NULL;
+	for (i32 i = 0; i < 3; ++i) {
+		udim_arm_views[i]      = NULL;
+		udim_arm_slot_views[i] = NULL;
+	}
+}
+
 // gpu_delete_texture() of a view: its tiles go with it
 static void udim_texture_deleting(gpu_texture_t *texture) {
+	for (i32 i = 0; i < 3 && udim_arm_layer != NULL; ++i) {
+		if (texture == udim_arm_views[i] || texture == udim_arm_slot_views[i]) {
+			udim_disarm();
+		}
+	}
 	udim_store_t *s = udim_store_of(texture);
 	if (s == NULL) {
 		return;
@@ -434,9 +463,13 @@ bool util_udim_layer_tiled(slot_layer_t *l) {
 	return l != NULL && udim_store_of(l->texpaint) != NULL;
 }
 
+// By the table of util_mesh.c, which the stores follow at the next sync: the shaders parsed before it are right
 bool util_udim_layer_should_tile(slot_layer_t *l) {
+	i32 *tiles = NULL;
+	i32  n     = util_mesh_udim_tile_table(&tiles);
+	n          = n > UDIM_MAX_TILES ? UDIM_MAX_TILES : n;
 	// Groups, undo slots ("_undo0") and the live layer ("_live") are not
-	if (udim_table_count < 2 || l == NULL || l->texpaint == NULL || l->ext == NULL || l->ext[0] == '_') {
+	if (n < 2 || l == NULL || l->texpaint == NULL || l->ext == NULL || l->ext[0] == '_') {
 		return false;
 	}
 	if (slot_layer_is_mask(l)) {
@@ -448,7 +481,7 @@ bool util_udim_layer_should_tile(slot_layer_t *l) {
 	i32                    mask    = slot_layer_get_object_mask(l);
 	mesh_object_t_array_t *objects = g_project->_->paint_objects;
 	if (mask > 0 && mask <= objects->length) { // Limited to an object: tiled when it has a tile
-		return udim_table_index(util_mesh_udim_tile(objects->buffer[mask - 1]->base->name)) >= 0;
+		return udim_ids_have(n, tiles, util_mesh_udim_tile(objects->buffer[mask - 1]->base->name));
 	}
 	return true;
 }
@@ -512,6 +545,66 @@ void util_udim_replace(gpu_texture_t *view, gpu_texture_t *fresh) {
 	*view             = *fresh;
 	free(fresh);
 	udim_destroy(old);
+}
+
+bool util_udim_clear(gpu_texture_t *view, u32 color) {
+	udim_store_t *s = udim_store_of(view);
+	if (s == NULL || gpu_in_use) {
+		return false;
+	}
+	for (i32 i = 0; i < s->count; ++i) {
+		udim_show(s, s->ids[i]);
+		_gpu_begin(view, NULL, NULL, GPU_CLEAR_COLOR, color, 0.0);
+		gpu_end();
+	}
+	udim_show(s, udim_cur);
+	return true;
+}
+
+bool util_udim_tile_like(gpu_texture_t *view, gpu_texture_t *from) {
+	udim_store_t *f = udim_store_of(from);
+	if (f == NULL || gpu_in_use || udim_store_of(view) != NULL) {
+		return false;
+	}
+	i32           home = f->cur >= 0 ? f->cur : f->ids[0];
+	udim_store_t *s    = udim_register(view, f->partial);
+	s->ids[0]          = home;
+	s->count           = 1;
+	s->cur             = home;
+	for (i32 i = 0; i < f->count; ++i) {
+		udim_show(f, f->ids[i]);
+		if (f->ids[i] == home) {
+			draw_begin(view, false, 0);
+			draw_set_pipeline(udim_copy_pipe(view->format));
+			draw_scaled_image(from, 0, 0, view->width, view->height);
+			draw_set_pipeline(NULL);
+			draw_end();
+			continue;
+		}
+		s->ids[s->count]   = f->ids[i];
+		s->tiles[s->count] = udim_new_content(view->width, view->height, view->format, from);
+		s->count++;
+	}
+	udim_show(f, udim_cur);
+	udim_show(s, udim_cur);
+	return true;
+}
+
+static void udim_hold(gpu_texture_t *view);
+
+bool util_udim_tile_preview(gpu_texture_t *image) {
+	udim_store_t *s = udim_store_of(image);
+	if (gpu_in_use) {
+		return false;
+	}
+	if (!util_udim_layer_tiled(g_context->layer)) {
+		if (s != NULL) {
+			udim_untile(s, udim_cur);
+		}
+		return false;
+	}
+	udim_hold(image);
+	return true;
 }
 
 bool util_udim_resize_layer(slot_layer_t *l, i32 width, i32 height) {
@@ -597,6 +690,7 @@ bool util_udim_swap_layers(slot_layer_t *a, slot_layer_t *b) {
 	if (slot == NULL || udim_is_undo(layer) || slot_layer_is_group(layer) || slot->texpaint == NULL) {
 		return false;
 	}
+	udim_disarm(); // Undo or redo: the paint step is over
 	if (!util_udim_layer_tiled(layer)) {
 		bool held = udim_store_of(slot->texpaint) != NULL || udim_store_of(slot->texpaint_nor) != NULL || udim_store_of(slot->texpaint_pack) != NULL;
 		if (!held) {
@@ -632,38 +726,61 @@ bool util_udim_swap_layers(slot_layer_t *a, slot_layer_t *b) {
 }
 
 void util_udim_undo_reset(slot_layer_t *slot) {
+	if (udim_arm_layer != NULL && slot->texpaint == udim_arm_slot_views[0]) {
+		udim_disarm();
+	}
 	udim_untile_layer(slot);
 }
 
-// The undo slot is about to save the tile of the context: a texture of its own for it
-static void udim_undo_hold(slot_layer_t *slot, bool is_mask) {
+// The view gets a content of its own for a tile: its texture when it has no tiles yet (a partial store then), a new
+// cleared one otherwise. Tile 0: the texture of an undo slot waiting for the first tile of a paint step
+static void udim_hold_tile(gpu_texture_t *view, i32 tile) {
+	udim_store_t *s = udim_store_of(view);
+	if (view == NULL) {
+		return;
+	}
+	if (s == NULL) {
+		s         = udim_register(view, true);
+		s->ids[0] = tile;
+		s->count  = 1;
+		s->cur    = tile;
+	}
+	else if (udim_index(s, tile) < 0 && s->count < UDIM_MAX_TILES) {
+		gpu_texture_t *like = s->cur >= 0 ? s->view : &s->tiles[0]; // The placeholder shown: every content is in tiles
+		s->ids[s->count]    = tile;
+		s->tiles[s->count]  = udim_new_content(like->width, like->height, like->format, NULL);
+		s->count++;
+		udim_show(s, udim_cur);
+	}
+}
+
+static void udim_hold(gpu_texture_t *view) {
+	udim_hold_tile(view, udim_cur);
+}
+
+// The undo slot is about to save a tile (of the context, or 0 for the first tile of a paint step): a texture for it
+static void udim_undo_hold(slot_layer_t *slot, bool is_mask, i32 tile) {
 	gpu_texture_t *views[3] = {slot->texpaint, is_mask ? NULL : slot->texpaint_nor, is_mask ? NULL : slot->texpaint_pack};
 	for (i32 i = 0; i < 3; ++i) {
-		if (views[i] == NULL) {
-			continue;
-		}
-		udim_store_t *s = udim_store_of(views[i]);
-		if (s == NULL) { // Its texture goes to the tile
-			s         = udim_register(views[i], true);
-			s->ids[0] = udim_cur;
-			s->count  = 1;
-			s->cur    = udim_cur;
-		}
-		else if (udim_index(s, udim_cur) < 0 && s->count < UDIM_MAX_TILES) {
-			gpu_texture_t *like = &s->tiles[0]; // The view shows the placeholder: every content is in tiles
-			s->ids[s->count]    = udim_cur;
-			s->tiles[s->count]  = udim_new_content(like->width, like->height, like->format, NULL);
-			s->count++;
-			udim_show(s, udim_cur);
+		if (views[i] != NULL) {
+			udim_hold_tile(views[i], tile);
 		}
 	}
 }
 
+// The upstream copy of the tile of the context into the undo slot
+static void udim_copy_tile_to_undo(i32 from_id, i32 to_id, bool is_mask) {
+	udim_copying   = true;
+	history_undo_i = to_id;
+	history_copy_to_undo(from_id, to_id, is_mask);
+	udim_copying = false;
+}
+
 bool util_udim_copy_to_undo(i32 from_id, i32 to_id, bool is_mask) {
-	static bool inside = false;
-	if (inside || history_undo_layers == NULL || to_id >= history_undo_layers->length) {
+	if (udim_copying || history_undo_layers == NULL || to_id >= history_undo_layers->length) {
 		return false;
 	}
+	udim_disarm(); // A new step
 	slot_layer_t *slot = history_undo_slot(to_id);
 	util_udim_undo_reset(slot);
 	slot_layer_t         *from   = NULL;
@@ -676,14 +793,11 @@ bool util_udim_copy_to_undo(i32 from_id, i32 to_id, bool is_mask) {
 	if (from == NULL || !util_udim_layer_tiled(from) || gpu_in_use) {
 		return false;
 	}
-	inside     = true;
-	i32 undo_i = history_undo_i;
-	i32 n      = util_udim_loop_begin(true);
+	i32 n = util_udim_loop_begin(true);
 	for (i32 k = 0; k < n; ++k) {
 		util_udim_loop_tile(k);
-		udim_undo_hold(slot, is_mask);
-		history_undo_i = undo_i;
-		history_copy_to_undo(from_id, to_id, is_mask); // The upstream copy, of the tile of the context
+		udim_undo_hold(slot, is_mask, udim_cur);
+		udim_copy_tile_to_undo(from_id, to_id, is_mask);
 	}
 	util_udim_loop_end();
 	gpu_texture_t *views[3] = {slot->texpaint, slot->texpaint_nor, slot->texpaint_pack};
@@ -693,7 +807,74 @@ bool util_udim_copy_to_undo(i32 from_id, i32 to_id, bool is_mask) {
 			s->whole = true;
 		}
 	}
+	return true;
+}
+
+// Copy on write of a paint step: the tile shown by a view of its layer goes to the undo slot when first drawn to
+static void udim_save_tile(i32 v) {
+	udim_store_t *ls = udim_store_of(udim_arm_views[v]);
+	udim_store_t *ss = udim_store_of(udim_arm_slot_views[v]);
+	if (ls == NULL || ss == NULL || ls->cur < 0 || udim_index(ss, ls->cur) >= 0 || ss->count >= UDIM_MAX_TILES) {
+		return;
+	}
+	gpu_texture_t *draw_current = _draw_current; // Called from gpu_begin(), maybe that of draw_begin()
+	u32            draw_color   = draw_get_color();
+	i32            spare        = udim_index(ss, 0);
+	if (spare >= 0) { // The texture of the slot, for the first tile of the step
+		ss->ids[spare] = ls->cur;
+		ss->cur        = ss->cur == 0 ? ls->cur : ss->cur;
+		udim_show(ss, ls->cur);
+		draw_begin(ss->view, false, 0);
+		draw_set_pipeline(udim_copy_pipe(ss->view->format));
+		draw_scaled_image(ls->view, 0, 0, ss->view->width, ss->view->height);
+		draw_set_pipeline(NULL);
+		draw_end();
+	}
+	else {
+		ss->ids[ss->count]   = ls->cur;
+		ss->tiles[ss->count] = udim_new_content(ls->view->width, ls->view->height, ls->view->format, ls->view);
+		ss->count++;
+	}
+	_draw_current = draw_current;
+	draw_set_color(draw_color);
+	udim_show(ss, udim_cur); // The paint shader reads the slot (_texpaint_undo)
+}
+
+static void udim_target_beginning(gpu_texture_t **targets, i32 count) {
+	static bool inside = false;
+	if (udim_arm_layer == NULL || inside) {
+		return;
+	}
+	inside = true;
+	for (i32 i = 0; i < count; ++i) {
+		for (i32 v = 0; v < 3; ++v) {
+			if (targets[i] != NULL && targets[i] == udim_arm_views[v]) {
+				udim_save_tile(v);
+			}
+		}
+	}
 	inside = false;
+}
+
+bool util_udim_paint_undo(slot_layer_t *layer, i32 to_id, bool is_mask) {
+	util_udim_sync(); // The shaders follow the rule: no frame rendered yet since the table changed (scripts)
+	if (history_undo_layers == NULL || to_id >= history_undo_layers->length || layer->texpaint_sculpt != NULL || !util_udim_layer_tiled(layer) ||
+	    gpu_in_use) {
+		return false;
+	}
+	udim_disarm();
+	slot_layer_t *slot = history_undo_slot(to_id);
+	util_udim_undo_reset(slot);
+	udim_undo_hold(slot, is_mask, 0); // Nothing saved yet: a stroke that draws no tile has nothing to give back
+	udim_arm_layer         = layer;
+	udim_arm_views[0]      = layer->texpaint;
+	udim_arm_views[1]      = is_mask ? NULL : layer->texpaint_nor;
+	udim_arm_views[2]      = is_mask ? NULL : layer->texpaint_pack;
+	udim_arm_slot_views[0] = slot->texpaint;
+	udim_arm_slot_views[1] = is_mask ? NULL : slot->texpaint_nor;
+	udim_arm_slot_views[2] = is_mask ? NULL : slot->texpaint_pack;
+	gpu_target_beginning   = udim_target_beginning;
+	history_undo_i         = (to_id + 1) % g_config->undo_steps; // As history_copy_to_undo()
 	return true;
 }
 
@@ -713,6 +894,11 @@ void util_udim_loop_tile(i32 k) {
 	if (d >= 0 && udim_loop_tiled[d]) {
 		util_udim_set_tile(udim_table[k]);
 	}
+}
+
+// Inside a loop over the tiles: the code called paints and dilates the tile of the context only
+static bool udim_in_tile_loop() {
+	return udim_loop_depth > 0 && udim_loop_tiled[udim_loop_depth <= 8 ? udim_loop_depth - 1 : 7];
 }
 
 void util_udim_loop_end() {
@@ -741,6 +927,710 @@ void util_udim_draw_meshes(char *context) {
 	}
 	util_udim_set_tile(saved);
 	render_path_end();
+}
+
+// Paint (lot D2b)
+
+static bool udim_skips(mesh_object_t *m, char *context) {
+	return m->skip_context != NULL && string_equals(m->skip_context, context);
+}
+
+// The objects the "paint" context draws: those of the merged mesh while it is shown, otherwise those not skipping it
+static bool udim_paint_candidate(mesh_object_t *m) {
+	mesh_object_t         *merged = g_context->merged_object;
+	mesh_object_t_array_t *scope  = util_mesh_merged_scope();
+	if (m == merged || !m->base->visible) {
+		return false;
+	}
+	if (merged != NULL && merged->base->visible && scope != NULL) {
+		return array_index_of((any_array_t *)scope, m) >= 0;
+	}
+	return !udim_skips(m, "paint");
+}
+
+// High poly bake: the object chosen and the other tiles of its mesh (the same name but for the tile)
+static bool udim_high_poly(mesh_object_t *m) {
+	mesh_object_t_array_t *objects = g_project->_->paint_objects;
+	i32                    h       = g_context->bake_high_poly;
+	if (h < 0 || h >= objects->length) {
+		return false;
+	}
+	char *a  = m->base->name;
+	char *b  = objects->buffer[h]->base->name;
+	i32   la = string_length(a) - 5;
+	return m == objects->buffer[h] ||
+	       (util_mesh_udim_tile(a) > 0 && util_mesh_udim_tile(b) > 0 && la == string_length(b) - 5 && strncmp(a, b, la) == 0);
+}
+
+// 1: first pass of a high poly bake (its data from the high poly), 2: the next ones, 0: not a high poly bake
+static i32 udim_high_poly_pass() {
+	if (g_context->tool != TOOL_TYPE_BAKE || !render_path_paint_baking) {
+		return 0;
+	}
+	bake_type_t t = g_context->bake_type;
+	return t == BAKE_TYPE_NORMAL_OBJECT || t == BAKE_TYPE_POSITION                             ? 1
+	       : t == BAKE_TYPE_NORMAL || t == BAKE_TYPE_HEIGHT || t == BAKE_TYPE_DERIVATIVE ? 2
+	                                                                                      : 0;
+}
+
+// The objects baked from the high poly: those of the layer (the object it is limited to, or the merged mesh while shown),
+// the high poly apart. Both passes see them: the first one selects the high poly as paint object.
+static bool udim_high_poly_low(mesh_object_t *m) {
+	if (udim_high_poly(m)) {
+		return false;
+	}
+	i32 mask = context_layer_filter_used() ? g_context->layer_filter : context_object_mask_used() ? slot_layer_get_object_mask(g_context->layer) : 0;
+	return mask > 0 ? m == g_project->_->paint_objects->buffer[mask - 1] && m->base->visible : udim_paint_candidate(m);
+}
+
+// Drawn by the paint loop on its tile. A high poly bake: the high poly then the objects baked from it, on the tiles of these
+// only (the upstream merged mesh drew everything in both passes, the high poly over the low one).
+static bool udim_paint_draws(mesh_object_t *m, i32 tile) {
+	if (m == g_context->merged_object || util_mesh_udim_tile(m->base->name) != tile) {
+		return false;
+	}
+	i32 pass = udim_high_poly_pass();
+	if (pass == 0) {
+		return udim_paint_candidate(m);
+	}
+	for (i32 i = 0; i < scene_meshes->length; ++i) {
+		mesh_object_t *o = scene_meshes->buffer[i];
+		if (util_mesh_udim_tile(o->base->name) == tile && udim_high_poly_low(o)) {
+			return pass == 1 ? udim_high_poly(m) : udim_high_poly_low(m);
+		}
+	}
+	return false;
+}
+
+// In the paint loop: the objects of the tile of the context, instead of the merged mesh
+static bool udim_draw_tile_meshes() {
+	if (!udim_painting) {
+		return false;
+	}
+	_mesh_object_last_pipeline = NULL;
+	for (i32 i = 0; i < scene_meshes->length; ++i) {
+		mesh_object_t *m = scene_meshes->buffer[i];
+		if (!udim_paint_draws(m, udim_cur)) {
+			continue;
+		}
+		char *skip       = m->skip_context;
+		bool  visible    = m->base->visible;
+		m->skip_context  = NULL;
+		m->base->visible = true; // A hidden tile of the high poly, as upstream shows the high poly for its pass
+		mesh_object_render(m, "paint", _render_path_bind_params);
+		m->skip_context  = skip;
+		m->base->visible = visible;
+	}
+	render_path_end();
+	return true;
+}
+
+static gpu_texture_t *udim_blend_view(i32 i) {
+	render_target_t *rt = any_map_get(render_path_render_targets, i == 0 ? "texpaint_blend0" : "texpaint_blend1");
+	return rt != NULL ? rt->_image : NULL;
+}
+
+void util_udim_blend_reset() {
+	if (gpu_in_use) {
+		return;
+	}
+	for (i32 i = 0; i < 2; ++i) {
+		udim_store_t *s = udim_store_of(udim_blend_view(i));
+		if (s != NULL) {
+			udim_untile(s, udim_cur);
+		}
+	}
+}
+
+static void udim_dirty_add(i32 tile) {
+	for (i32 i = 0; i < udim_dirty_count; ++i) {
+		if (udim_dirty[i] == tile) {
+			return;
+		}
+	}
+	if (udim_dirty_count < UDIM_MAX_TILES) {
+		udim_dirty[udim_dirty_count++] = tile;
+	}
+}
+
+f32 uniforms_ext_f32_link(object_t *object, shader_data_t *mat, char *link); // uniforms.c, after this file in main.c
+
+// Bounding box of the positions of a mesh, object space, computed once per vertex array
+typedef struct {
+	mesh_data_t *data;
+	i16         *values;
+	i32          length;
+	vec4_t       min;
+	vec4_t       max;
+} udim_bounds_t;
+
+static udim_bounds_t *udim_bounds       = NULL;
+static i32            udim_bounds_count = 0;
+static i32            udim_bounds_cap   = 0;
+
+static udim_bounds_t *udim_mesh_bounds(mesh_data_t *data) {
+	vertex_array_t *pos = mesh_data_get_vertex_array(data, "pos");
+	if (pos == NULL) {
+		return NULL;
+	}
+	udim_bounds_t *b = NULL;
+	for (i32 i = 0; i < udim_bounds_count && b == NULL; ++i) {
+		b = udim_bounds[i].data == data ? &udim_bounds[i] : NULL;
+	}
+	if (b != NULL && b->values == pos->values->buffer && b->length == pos->values->length) {
+		return b;
+	}
+	if (b == NULL) {
+		if (udim_bounds_count == udim_bounds_cap) {
+			udim_bounds_cap = udim_bounds_cap == 0 ? 64 : udim_bounds_cap * 2;
+			udim_bounds     = realloc(udim_bounds, udim_bounds_cap * sizeof(udim_bounds_t));
+		}
+		b = &udim_bounds[udim_bounds_count++];
+	}
+	b->data   = data;
+	b->values = pos->values->buffer;
+	b->length = pos->values->length;
+	i16 lo[3] = {32767, 32767, 32767}; // mesh_data_calculate_aabb_min_max() keeps the origin in the box
+	i16 hi[3] = {-32767, -32767, -32767};
+	for (i32 i = 0; i + 2 < pos->values->length; i += 4) {
+		for (i32 k = 0; k < 3; ++k) {
+			i16 c = pos->values->buffer[i + k];
+			lo[k] = c < lo[k] ? c : lo[k];
+			hi[k] = c > hi[k] ? c : hi[k];
+		}
+	}
+	f32 f  = data->scale_pos / 32767.0f;
+	b->min = (vec4_t){lo[0] * f, lo[1] * f, lo[2] * f, 1.0};
+	b->max = (vec4_t){hi[0] * f, hi[1] * f, hi[2] * f, 1.0};
+	return b;
+}
+
+// Whether the brush can reach the tiles, by their objects: the stroke is a capsule of world radius R around the surface
+// points under inp and inplast (make_brush.c). A point p within R of a point c of its axis is seen from the camera at
+// most asin(R / |p|) from c: in the tangent plane (x / -z, y / -z), where the axis is the segment inp - inplast, at
+// most tan(t + a) - tan(t) from it, t the angle of the stroke off the view axis. Aligned to the camera, the capsule is
+// that segment widened by R / depth of the surface under inp, nearer than no object. Conservative: the box corners of
+// each object, a square widening, 1.5 of margin; the other tools (fill, decal, text, particles, x-ray) paint every tile.
+typedef struct {
+	bool   cull;
+	bool   ortho;
+	bool   align;
+	mat4_t v;
+	mat4_t p;
+	f32    radius;
+	f32    ax, ay, bx, by; // Stroke in ndc
+	f32    theta;          // Largest angle of the stroke off the view axis
+	f32    align_margin;   // Tangent plane, camera aligned
+} udim_brush_t;
+
+static bool udim_corners_ndc(mesh_object_t *m, udim_brush_t *b, f32 *rect, f32 *dist, f32 *depth) {
+	udim_bounds_t *bounds = udim_mesh_bounds(m->data);
+	if (bounds == NULL) {
+		return false;
+	}
+	f32 vmin[3] = {1e30, 1e30, 1e30};
+	f32 vmax[3] = {-1e30, -1e30, -1e30};
+	for (i32 k = 0; k < 8; ++k) {
+		vec4_t c = {k & 1 ? bounds->max.x : bounds->min.x, k & 2 ? bounds->max.y : bounds->min.y, k & 4 ? bounds->max.z : bounds->min.z, 1.0};
+		c        = vec4_apply_mat4(vec4_apply_mat4(c, m->base->transform->world), b->v);
+		if (!b->ortho && c.z > -1e-4) {
+			return false; // At or behind the camera
+		}
+		vmin[0]  = c.x < vmin[0] ? c.x : vmin[0];
+		vmin[1]  = c.y < vmin[1] ? c.y : vmin[1];
+		vmin[2]  = c.z < vmin[2] ? c.z : vmin[2];
+		vmax[0]  = c.x > vmax[0] ? c.x : vmax[0];
+		vmax[1]  = c.y > vmax[1] ? c.y : vmax[1];
+		vmax[2]  = c.z > vmax[2] ? c.z : vmax[2];
+		vec4_t n = vec4_apply_mat4(c, b->p);
+		f32    x = n.x / n.w;
+		f32    y = n.y / n.w;
+		rect[0]  = k == 0 || x < rect[0] ? x : rect[0];
+		rect[1]  = k == 0 || y < rect[1] ? y : rect[1];
+		rect[2]  = k == 0 || x > rect[2] ? x : rect[2];
+		rect[3]  = k == 0 || y > rect[3] ? y : rect[3];
+	}
+	f32 d = 0.0;
+	for (i32 i = 0; i < 3; ++i) { // Camera to the box
+		f32 e = vmin[i] > 0.0 ? vmin[i] : vmax[i] < 0.0 ? -vmax[i] : 0.0;
+		d += e * e;
+	}
+	*dist  = sqrtf(d);
+	*depth = -vmax[2];
+	return true;
+}
+
+// Segment a - b of ndc against the rect widened by (mx, my), slabs
+static bool udim_segment_hits(udim_brush_t *b, f32 *rect, f32 mx, f32 my) {
+	f32 t0    = 0.0;
+	f32 t1    = 1.0;
+	f32 o[2]  = {b->ax, b->ay};
+	f32 d[2]  = {b->bx - b->ax, b->by - b->ay};
+	f32 lo[2] = {rect[0] - mx, rect[1] - my};
+	f32 hi[2] = {rect[2] + mx, rect[3] + my};
+	for (i32 i = 0; i < 2; ++i) {
+		if (fabsf(d[i]) < 1e-9) {
+			if (o[i] < lo[i] || o[i] > hi[i]) {
+				return false;
+			}
+			continue;
+		}
+		f32 u0 = (lo[i] - o[i]) / d[i];
+		f32 u1 = (hi[i] - o[i]) / d[i];
+		t0     = fmaxf(t0, fminf(u0, u1));
+		t1     = fminf(t1, fmaxf(u0, u1));
+	}
+	return t0 <= t1;
+}
+
+static bool udim_brush_reaches(mesh_object_t *m, udim_brush_t *b) {
+	f32 rect[4];
+	f32 dist;
+	f32 depth;
+	if (!b->cull || !udim_corners_ndc(m, b, rect, &dist, &depth)) {
+		return true;
+	}
+	f32 margin = 0.0; // Tangent plane
+	if (b->ortho) {
+		margin = b->radius;
+	}
+	else {
+		if (dist <= b->radius * 1.01) {
+			return true;
+		}
+		f32 a = asinf(b->radius / dist);
+		if (b->theta + a > 1.4) {
+			return true;
+		}
+		margin = tanf(b->theta + a) - tanf(b->theta);
+		if (b->align) {
+			if (b->align_margin < 0.0) {
+				return true;
+			}
+			margin = fmaxf(margin, b->align_margin);
+		}
+	}
+	margin *= 1.5;
+	return udim_segment_hits(b, rect, margin * fabsf(b->p.m[0]), margin * fabsf(b->p.m[5]));
+}
+
+static void udim_brush_init(udim_brush_t *b) {
+	tool_type_t tool = g_context->tool;
+	b->cull = (tool == TOOL_TYPE_BRUSH || tool == TOOL_TYPE_ERASER || tool == TOOL_TYPE_CLONE || tool == TOOL_TYPE_BLUR) && !g_context->xray &&
+	          !context_is_decal() && scene_camera != NULL;
+	if (!b->cull) {
+		return;
+	}
+	b->v      = scene_camera->v;
+	b->p      = scene_camera->p;
+	b->ortho  = b->p.m[15] != 0.0;
+	b->align  = context_is_brush_camera_align();
+	b->radius = uniforms_ext_f32_link(NULL, NULL, "_brush_radius");
+	b->ax     = g_context->paint_vec.x * 2.0 - 1.0;
+	b->ay     = 1.0 - g_context->paint_vec.y * 2.0;
+	b->bx     = g_context->last_paint_vec_x * 2.0 - 1.0;
+	b->by     = 1.0 - g_context->last_paint_vec_y * 2.0;
+	b->theta  = 0.0;
+	if (b->ortho) {
+		return;
+	}
+	f32 ends[4] = {b->ax, b->ay, b->bx, b->by};
+	for (i32 i = 0; i < 2; ++i) {
+		f32 tx   = (ends[i * 2] + b->p.m[8]) / b->p.m[0];
+		f32 ty   = (ends[i * 2 + 1] + b->p.m[9]) / b->p.m[5];
+		b->theta = fmaxf(b->theta, atanf(sqrtf(tx * tx + ty * ty)));
+	}
+	b->align_margin = 0.0;
+	if (b->align) { // R / depth of the nearest object
+		f32 nearest = 1e30;
+		for (i32 i = 0; i < scene_meshes->length; ++i) {
+			mesh_object_t *m = scene_meshes->buffer[i];
+			f32            rect[4];
+			f32            dist;
+			f32            depth;
+			if (udim_paint_candidate(m) && util_mesh_udim_tile(m->base->name) >= 1000) {
+				if (!udim_corners_ndc(m, b, rect, &dist, &depth)) {
+					nearest = 0.0;
+					break;
+				}
+				nearest = fminf(nearest, depth);
+			}
+		}
+		b->align_margin = nearest > 1e-4 ? b->radius / nearest : -1.0;
+	}
+}
+
+// Face and uv island fills compare the triangles or islands of the tile under the brush: that tile, 0 for none, -1 every
+// tile. The island map is that of the frame before (uniforms.c), with its tile.
+static i32 udim_fill_tile() {
+	if (g_context->tool != TOOL_TYPE_FILL) {
+		return -1;
+	}
+	if (g_context->fill_type == FILL_TYPE_FACE) {
+		i32 tile = util_udim_cursor_tile();
+		return tile >= 0 ? tile : 0;
+	}
+	if (g_context->fill_type == FILL_TYPE_UV_ISLAND) {
+		return util_uv_uvislandmap_cached && udim_island_tile >= 0 ? udim_island_tile : 0;
+	}
+	return -1;
+}
+
+bool util_udim_paint_tiles(bool dilation) {
+	if (udim_painting || gpu_in_use) {
+		return false;
+	}
+	util_udim_sync();
+	if (g_context->paint2d || !util_udim_layer_tiled(g_context->layer)) {
+		util_udim_blend_reset(); // Left by a stroke on a tiled layer
+		return false;
+	}
+	udim_update_table();
+	udim_brush_t brush;
+	udim_brush_init(&brush);
+	i32 only = udim_in_tile_loop() ? udim_cur : udim_fill_tile();
+	i32 tiles[UDIM_MAX_TILES];
+	i32 n = 0;
+	for (i32 i = 0; i < udim_table_count; ++i) {
+		if (only >= 0 && udim_table[i] != only) {
+			continue;
+		}
+		for (i32 j = 0; j < scene_meshes->length; ++j) {
+			mesh_object_t *m = scene_meshes->buffer[j];
+			if (udim_paint_draws(m, udim_table[i]) && udim_brush_reaches(m, &brush)) {
+				tiles[n++] = udim_table[i];
+				break;
+			}
+		}
+	}
+	i32 saved     = udim_cur;
+	udim_painting = true;
+	for (i32 k = 0; k < n; ++k) {
+		util_udim_set_tile(tiles[k]);
+		if (udim_cur != tiles[k]) {
+			continue;
+		}
+		udim_hold(udim_blend_view(0));
+		udim_hold(udim_blend_view(1));
+		udim_dirty_add(tiles[k]);
+		if (g_context->tool == TOOL_TYPE_FILL && g_context->fill_type == FILL_TYPE_FACE) {
+			util_uv_cache_triangle_map(); // Read by the pass
+		}
+		render_path_paint_commands_paint(dilation);
+	}
+	udim_painting = false;
+	util_udim_set_tile(saved);
+	return true;
+}
+
+bool util_udim_dilate(bool base, bool nor_pack) {
+	static bool inside = false;
+	if (inside || udim_painting || gpu_in_use || !util_udim_layer_tiled(g_context->layer) || udim_in_tile_loop()) {
+		return false;
+	}
+	inside    = true;
+	i32 saved = udim_cur;
+	for (i32 i = 0; i < udim_dirty_count; ++i) {
+		if (udim_table_index(udim_dirty[i]) >= 0) {
+			util_udim_set_tile(udim_dirty[i]);
+			render_path_paint_dilate(base, nor_pack);
+		}
+	}
+	util_udim_set_tile(saved);
+	if (nor_pack) {
+		udim_dirty_count = 0;
+	}
+	inside = false;
+	return true;
+}
+
+// As util_uv_cache_dilate_map() creates it
+static void udim_dilate_pipe() {
+	if (util_uv_pipe_dilate != NULL) {
+		return;
+	}
+	util_uv_pipe_dilate                  = gpu_create_pipeline();
+	util_uv_pipe_dilate->vertex_shader   = sys_get_shader("dilate_map.vert");
+	util_uv_pipe_dilate->fragment_shader = sys_get_shader("dilate_map.frag");
+	gpu_vertex_structure_t *vs           = ALLOC_INIT(gpu_vertex_structure_t, {0});
+	gpu_vertex_structure_add(vs, "pos", GPU_VERTEX_DATA_I16_4X_NORM);
+	gpu_vertex_structure_add(vs, "nor", GPU_VERTEX_DATA_I16_2X_NORM);
+	gpu_vertex_structure_add(vs, "tex", GPU_VERTEX_DATA_I16_2X_NORM);
+	util_uv_pipe_dilate->input_layout        = vs;
+	util_uv_pipe_dilate->depth_write         = false;
+	util_uv_pipe_dilate->depth_mode          = GPU_COMPARE_MODE_ALWAYS;
+	util_uv_pipe_dilate->color_attachment[0] = GPU_TEXTURE_FORMAT_R8;
+	gpu_pipeline_compile(util_uv_pipe_dilate);
+}
+
+// Maps of a tiled layer (dilate, triangles, uvs): tiled views, each tile built from the objects of the tile in their
+// local uvs when first needed. Upstream uncaches a map when the objects change: then every tile again.
+typedef struct {
+	gpu_texture_t      **view;
+	bool                *cached;
+	gpu_texture_format_t format;
+	bool                 valid[1000]; // Tile id - 1000: built
+} udim_map_t;
+
+static udim_map_t udim_dilate_map   = {&util_uv_dilatemap, &util_uv_dilatemap_cached, GPU_TEXTURE_FORMAT_R8};
+static udim_map_t udim_triangle_map = {&util_uv_trianglemap, &util_uv_trianglemap_cached, GPU_TEXTURE_FORMAT_RGBA32};
+static udim_map_t udim_uv_map       = {&util_uv_uvmap, &util_uv_uvmap_cached, GPU_TEXTURE_FORMAT_RGBA32};
+
+// -1: the map of upstream (not a tiled layer), 1: the map of the tile of the context is in the view, 0: to draw, the view
+// holds the tile
+static i32 udim_map_begin(udim_map_t *m) {
+	udim_store_t *s = udim_store_of(*m->view);
+	if (gpu_in_use) {
+		return s != NULL ? 1 : -1;
+	}
+	if (!util_udim_layer_tiled(g_context->layer) || udim_cur < 1000 || udim_cur >= 2000) {
+		if (s != NULL) { // Back to the map of upstream
+			udim_untile(s, udim_cur);
+			*m->cached = false;
+		}
+		return -1;
+	}
+	gpu_texture_t *like = s == NULL || s->cur >= 0 ? *m->view : s->count > 0 ? &s->tiles[0] : NULL; // The view may show the placeholder
+	if (like != NULL && (like->width != config_get_texture_res_x() || like->height != config_get_texture_res_y())) {
+		gpu_delete_texture(*m->view); // Its tiles with it
+		*m->view = NULL;
+		s        = NULL;
+	}
+	if (*m->view == NULL) {
+		*m->view = gpu_create_render_target(config_get_texture_res_x(), config_get_texture_res_y(), m->format);
+	}
+	if (s == NULL || !*m->cached) {
+		memset(m->valid, 0, sizeof(m->valid));
+		*m->cached = true;
+	}
+	if (s != NULL && s->cur == udim_cur && m->valid[udim_cur - 1000]) {
+		return 1;
+	}
+	udim_hold(*m->view);
+	m->valid[udim_cur - 1000] = true;
+	return 0;
+}
+
+// The paint objects of the tile of the context, of the object mask or the layer filter
+static bool udim_map_object(i32 i) {
+	mesh_object_t_array_t *objects = g_project->_->paint_objects;
+	i32                    mask    = context_object_mask_used() ? slot_layer_get_object_mask(g_context->layer) : 0;
+	if (context_layer_filter_used()) {
+		mask = g_context->layer_filter;
+	}
+	if (mask > 0 && mask <= objects->length && i != mask - 1) {
+		return false;
+	}
+	return util_mesh_udim_tile(objects->buffer[i]->base->name) == udim_cur;
+}
+
+static i32 udim_bytes_tile = -1; // Tile of util_uv_dilate_bytes
+
+bool util_udim_cache_dilate_map() {
+	i32 state = udim_map_begin(&udim_dilate_map);
+	if (state != 0) {
+		return state > 0;
+	}
+	udim_dilate_pipe();
+	mesh_object_t_array_t *objects = g_project->_->paint_objects;
+	_gpu_begin(util_uv_dilatemap, NULL, NULL, GPU_CLEAR_COLOR, 0x00000000, 0.0);
+	gpu_set_pipeline(util_uv_pipe_dilate);
+	for (i32 i = 0; i < objects->length; ++i) {
+		if (udim_map_object(i)) {
+			gpu_set_vertex_buffer(objects->buffer[i]->data->_->vertex_buffer);
+			gpu_set_index_buffer(objects->buffer[i]->data->_->index_buffer);
+			gpu_draw();
+		}
+	}
+	gpu_end();
+	util_uv_dilate_bytes = NULL;
+	return true;
+}
+
+// As util_uv_cache_triangle_map(), the colors going on from an object to the next
+bool util_udim_cache_triangle_map() {
+	i32 state = udim_map_begin(&udim_triangle_map);
+	if (state != 0) {
+		return state > 0;
+	}
+	mesh_object_t_array_t *objects = g_project->_->paint_objects;
+	draw_begin(util_uv_trianglemap, true, 0xff000000);
+	f32 f     = (1 / 32767.0) * util_uv_trianglemap->width;
+	i32 color = 0xff000001;
+	for (i32 o = 0; o < objects->length; ++o) {
+		if (!udim_map_object(o)) {
+			continue;
+		}
+		i16_array_t *texa = objects->buffer[o]->data->vertex_arrays->buffer[2]->values;
+		u32_array_t *inda = objects->buffer[o]->data->index_array;
+		for (i32 i = 0; i < inda->length / 3; ++i) {
+			if (color == 0xffffffff) {
+				color = 0xff000001;
+			}
+			color++;
+			draw_set_color(color);
+			f32 x1 = texa->buffer[inda->buffer[i * 3] * 2] * f;
+			f32 x2 = texa->buffer[inda->buffer[i * 3 + 1] * 2] * f;
+			f32 x3 = texa->buffer[inda->buffer[i * 3 + 2] * 2] * f;
+			f32 y1 = texa->buffer[inda->buffer[i * 3] * 2 + 1] * f;
+			f32 y2 = texa->buffer[inda->buffer[i * 3 + 1] * 2 + 1] * f;
+			f32 y3 = texa->buffer[inda->buffer[i * 3 + 2] * 2 + 1] * f;
+			draw_filled_triangle(x1, y1, x2, y2, x3, y3);
+		}
+	}
+	draw_end();
+	return true;
+}
+
+// As util_uv_cache_uv_map()
+static void udim_draw_uv_map() {
+	mesh_object_t_array_t *objects = g_project->_->paint_objects;
+	draw_begin(util_uv_uvmap, true, 0x00000000);
+	draw_set_color(0xffffffff);
+	f32 strength = config_get_texture_res_x() > 2048 ? 2.0 : 1.0;
+	f32 f        = (1 / 32767.0) * util_uv_uvmap->width;
+	for (i32 o = 0; o < objects->length; ++o) {
+		if (!udim_map_object(o)) {
+			continue;
+		}
+		i16_array_t *texa = objects->buffer[o]->data->vertex_arrays->buffer[2]->values;
+		u32_array_t *inda = objects->buffer[o]->data->index_array;
+		for (i32 i = 0; i < inda->length / 3; ++i) {
+			f32 x1 = texa->buffer[inda->buffer[i * 3] * 2] * f;
+			f32 x2 = texa->buffer[inda->buffer[i * 3 + 1] * 2] * f;
+			f32 x3 = texa->buffer[inda->buffer[i * 3 + 2] * 2] * f;
+			f32 y1 = texa->buffer[inda->buffer[i * 3] * 2 + 1] * f;
+			f32 y2 = texa->buffer[inda->buffer[i * 3 + 1] * 2 + 1] * f;
+			f32 y3 = texa->buffer[inda->buffer[i * 3 + 2] * 2 + 1] * f;
+			draw_line_aa(x1, y1, x2, y2, strength);
+			draw_line_aa(x2, y2, x3, y3, strength);
+			draw_line_aa(x3, y3, x1, y1, strength);
+		}
+	}
+	draw_end();
+}
+
+bool util_udim_cache_uv_map() {
+	if (gpu_in_use) {
+		return udim_store_of(util_uv_uvmap) != NULL;
+	}
+	i32 saved = udim_cur;
+	for (i32 i = -1; i < udim_table_count; ++i) { // The tile of the context, then the others
+		if (i >= 0) {
+			util_udim_set_tile(udim_table[i]);
+		}
+		i32 state = udim_map_begin(&udim_uv_map);
+		if (state < 0) {
+			return false;
+		}
+		if (state == 0) {
+			udim_draw_uv_map();
+		}
+	}
+	util_udim_set_tile(saved);
+	return true;
+}
+
+// Pickers (lot D2b)
+
+vec4_t uniforms_ext_vec4_link(object_t *object, shader_data_t *mat, char *link); // uniforms.c
+
+static gpu_texture_t *udim_cursor_target = NULL;
+
+f32 util_udim_tile_code(object_t *object) {
+	i32 tile = util_udim_object_tile(object);
+	return tile > 1000 && tile < 2000 ? tile - 1000 : 0.0;
+}
+
+// The texel of gbuffer2 under the brush, as the picker shaders read it (make_picking.c)
+i32 util_udim_cursor_tile() {
+	render_target_t *rt = render_path_render_targets != NULL ? any_map_get(render_path_render_targets, "gbuffer2") : NULL;
+	if (udim_table_count < 2 || gpu_in_use || g_context->paint2d || rt == NULL || rt->_image == NULL) {
+		return -1;
+	}
+	gpu_texture_t *gbuffer2 = rt->_image;
+	vec4_t         inp      = uniforms_ext_vec4_link(NULL, NULL, "_input_brush");
+	i32            x        = (i32)(inp.x * gbuffer2->width);
+	i32            y        = (i32)(inp.y * gbuffer2->height);
+	if (x < 0 || y < 0 || x >= gbuffer2->width || y >= gbuffer2->height) {
+		return -1;
+	}
+	if (udim_cursor_target == NULL) {
+		udim_cursor_target = gpu_create_render_target(1, 1, GPU_TEXTURE_FORMAT_RGBA128);
+	}
+	draw_begin(udim_cursor_target, false, 0);
+	draw_set_pipeline(pipes_copy128);
+	draw_sub_image(gbuffer2, x, y, 1, 1, 0, 0);
+	draw_set_pipeline(NULL);
+	draw_end();
+	buffer_t *pixel = gpu_get_texture_pixels(udim_cursor_target);
+	i32       tile  = 1000 + (i32)roundf(buffer_get_f32(pixel, 0));
+	return udim_table_index(tile) >= 0 ? tile : -1;
+}
+
+i32 util_udim_pick_begin(bool show) {
+	i32 saved   = udim_cur;
+	i32 tile    = util_udim_cursor_tile();
+	udim_picked = tile >= 0 ? tile : udim_cur;
+	if (show && tile >= 0 && util_udim_layer_tiled(g_context->layer)) {
+		util_udim_set_tile(tile);
+	}
+	return saved;
+}
+
+i32 util_udim_picked_tile() {
+	return udim_picked;
+}
+
+i32 util_udim_island_begin() {
+	i32 saved = udim_cur;
+	if (!util_udim_layer_tiled(g_context->layer) || gpu_in_use) {
+		udim_bytes_tile  = -1;
+		udim_island_tile = -1;
+		return saved;
+	}
+	i32 tile = util_udim_cursor_tile();
+	if (tile >= 0) {
+		util_udim_set_tile(tile);
+	}
+	if (udim_bytes_tile != udim_cur) { // Read again from the dilate map of this tile
+		util_uv_dilate_bytes = NULL;
+	}
+	udim_bytes_tile  = udim_cur;
+	udim_island_tile = udim_cur;
+	return saved;
+}
+
+// 2d view (lot D2b): a tiled layer shows and paints the tile of the context, chosen there
+
+static i32 udim_view2d_next = -1;
+
+static void udim_view2d_set(void *_) { // Outside the ui pass
+	util_udim_set_tile(udim_view2d_next);
+	g_context->ddirty       = 2;
+	ui_view2d_hwnd->redraws = 2;
+}
+
+bool util_udim_view2d_tile() {
+	if (!util_udim_layer_tiled(g_context->layer) || udim_table_count < 2) {
+		return false;
+	}
+	static char           labels[UDIM_MAX_TILES][8];
+	static string_array_t names    = {0};
+	static i32            position = 0;
+	names.length                   = 0;
+	for (i32 i = 0; i < udim_table_count; ++i) {
+		snprintf(labels[i], sizeof(labels[i]), "%d", udim_table[i]);
+		string_array_push(&names, labels[i]);
+	}
+	i32 k    = udim_table_index(udim_cur);
+	position = k < 0 ? 0 : k;
+	ui_combo(&position, &names, tr("Tile"), false, UI_ALIGN_LEFT, true);
+	if (ui_item_changed() && position >= 0 && position < udim_table_count) {
+		udim_view2d_next = udim_table[position];
+		sys_notify_on_next_frame(&udim_view2d_set, NULL);
+	}
+	return true;
 }
 
 char *util_udim_stats() {

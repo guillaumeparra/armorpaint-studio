@@ -5,6 +5,9 @@ buffer_t       *util_uv_dilate_bytes = NULL;
 gpu_pipeline_t *util_uv_pipe_dilate  = NULL;
 
 void util_uv_cache_uv_map() {
+	if (util_udim_cache_uv_map()) { // STUDIO-PATCH(udim-tiles): tiled layer, a map per tile
+		return;
+	}
 	if (util_uv_uvmap != NULL && (util_uv_uvmap->width != config_get_texture_res_x() || util_uv_uvmap->height != config_get_texture_res_y())) {
 		gpu_delete_texture(util_uv_uvmap);
 		util_uv_uvmap        = NULL;
@@ -49,6 +52,9 @@ void util_uv_cache_uv_map() {
 }
 
 void util_uv_cache_triangle_map() {
+	if (util_udim_cache_triangle_map()) { // STUDIO-PATCH(udim-tiles): tiled layer, the map of the tile of the context
+		return;
+	}
 	if (util_uv_trianglemap != NULL &&
 	    (util_uv_trianglemap->width != config_get_texture_res_x() || util_uv_trianglemap->height != config_get_texture_res_y())) {
 		gpu_delete_texture(util_uv_trianglemap);
@@ -89,6 +95,9 @@ void util_uv_cache_triangle_map() {
 }
 
 void util_uv_cache_dilate_map() {
+	if (util_udim_cache_dilate_map()) { // STUDIO-PATCH(udim-tiles): tiled layer, the map of the tile of the context
+		return;
+	}
 	if (util_uv_dilatemap != NULL && (util_uv_dilatemap->width != config_get_texture_res_x() || util_uv_dilatemap->height != config_get_texture_res_y())) {
 		gpu_delete_texture(util_uv_dilatemap);
 		util_uv_dilatemap        = NULL;
@@ -160,6 +169,7 @@ void _util_uv_check(i32 cx, i32 cy, i32 w, i32 h, i32 r, buffer_t *view, i32_arr
 }
 
 void util_uv_cache_uv_island_map() {
+	i32 udim_saved = util_udim_island_begin(); // STUDIO-PATCH(udim-tiles): tiled layer, the islands of the tile under the brush
 	util_uv_cache_dilate_map();
 	if (util_uv_dilate_bytes == NULL) {
 		util_uv_dilate_bytes = gpu_get_texture_pixels(util_uv_dilatemap);
@@ -200,4 +210,5 @@ void util_uv_cache_uv_island_map() {
 	free(coords_x);
 	array_free(coords_y);
 	free(coords_y);
+	util_udim_set_tile(udim_saved); // STUDIO-PATCH(udim-tiles)
 }

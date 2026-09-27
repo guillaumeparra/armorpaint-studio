@@ -2,7 +2,7 @@
 
 > **Décision 2026-09-26 : option B retenue** (un jeu de textures par tuile, « contexte de tuile », §6). Les options C et D sont écartées ; C reste une évolution possible de B si le nombre de draws devenait un problème (100+ tuiles).
 > **2026-09-27 : lots D0 et D1 faits** (§3, §7). D1 garde un objet de peinture par tuile : la tuile-donnée, le maillage à plages et la migration passent au lot D2 (§7, « Lot D1 »).
-> **2026-09-27 : lot D2 lancé** (go sans la recette C6), plan au §7 « Lot D2 ». Le maillage à plages et la tuile-donnée passent en D3. Sous-lot D2a fait (§7, « Lot D2a »).
+> **2026-09-27 : lot D2 lancé** (go sans la recette C6), plan au §7 « Lot D2 ». Le maillage à plages et la tuile-donnée passent en D3. Sous-lots D2a et D2b faits (§7, « Lot D2a », « Lot D2b »).
 > Document de réflexion à l'origine ; le §7 sert désormais de plan (chantier D de `ARMORPAINT_LOTS.md`). Il fait l'état des UDIM après le commit upstream `99156dfc` (« paint: paint across udims », 2026-09-15), liste les limites, compare quatre architectures et propose une feuille de route.
 > Base : branche `studio` au commit `fbde517a`. Estimations en **jours-homme**, avec les mêmes hypothèses que `ARMORPAINT_LOTS.md`.
 > ⚠️ **§5.2 de `ARMORPAINT_ANALYSE.md` est en partie périmé.** Depuis `99156dfc`, on peut peindre à travers les tuiles et les calques partagés ne sont plus dupliqués par tuile. Ce document le remplace pour tout ce qui touche aux UDIM.
@@ -591,6 +591,64 @@ Patch `udim-tiles` (points d'appel) et `util_udim.c` (patch `udim-core`). Banc `
 - **Pas encore (D2b à D2f).** La peinture d'un projet UDIM est cassée sur la branche `d2` : elle écrit encore en
   espace atlas dans la tuile du contexte. Pas de calque live (aperçu du pinceau, outil Material) sur un calque à
   tuiles. Flatten, fusion, export et `.arm` travaillent sur la tuile du contexte seule.
+
+### Lot D2b (2026-09-27) : fait
+
+Patch `udim-tiles` (points d'appel D2b) et `util_udim.c` (patch `udim-core`). Un bug upstream a été corrigé en route
+(patch `bake-derivative`). Banc `.tests/udim_tiles_app.sh`, sections 7 à 10 : 48 contrôles en tout.
+- **Peinture.** `render_path_paint_commands_paint` peint un calque à tuiles tuile par tuile. `util_udim_paint_tiles`
+  retient les tuiles touchées par le trait :
+  - pinceau, gomme, clone et flou : boîtes des objets projetées à l'écran, comparées au segment du trait élargi du
+    rayon ; en caméra ortho, le rayon exact ; aligné sur la caméra, la profondeur de l'objet le plus proche ;
+  - xray, décalque, texte, particules, remplissage et bake : toutes les tuiles.
+
+  Pour chaque tuile retenue, il met la tuile et rappelle le corps upstream, qui ne dessine que les objets de cette
+  tuile, dans leurs uv locales (matériaux : uv + `_udim_tile`). Le trait est continu à la couture 1001 | 1002. Au-delà
+  des 64 tuiles tenues (`UDIM_MAX_TILES`), le pinceau ne peint rien.
+- **Symétrie.** Le miroir de l'objet de peinture passe par la même boucle. Les tuiles d'en face sont retenues d'après
+  les boîtes en miroir et peintes dans le même pas d'undo. Scripts : `studio_paint_option("sym_x", 1)`. La symétrie
+  est peinte par la frame (`render_path_paint_draw`), pas par `script_paint_world`.
+- **Undo.** Copie sur écriture : `gpu_begin` prévient `util_udim.c` (pointeur `gpu_target_beginning` dans
+  `iron_gpu.h`). Un pas sauve la tuile du contexte, puis chaque tuile à son premier dessin. Il ne tient que les tuiles
+  qu'il a changées, et un trait dans le vide ne tient rien. Undo et redo n'échangent que ces tuiles.
+- **Blend et dilatation.** `texpaint_blend0/1` reçoivent un contenu par tuile peinte, libéré en fin de trait. La
+  dilatation passe par les tuiles peintes, chacune avec sa carte.
+- **Cartes et pipettes.** Les cartes UV, de triangles et de dilatation sont calculées par tuile. Le gbuffer écrit la
+  tuile de chaque objet (`gbuffer2.r`, tuile - 1000). Les pipettes de calque et de masque travaillent sur la tuile
+  sous le pinceau. Les remplissages de face et d'îlot UV ne peignent que cette tuile, et l'undo ne tient qu'elle.
+- **Vue 2D.** Un menu choisit la tuile montrée et peinte. Le point de la pipette n'est dessiné que sur la tuile piquée.
+- **Bakes.** Nœud Bake Texture et bakes de calque se font tuile par tuile, dans les uv de la tuile : Texcoord,
+  Position, Object ID, etc. L'aperçu Curvature d'un calque à tuiles a un aperçu par tuile. Pour le high poly :
+  - le high est l'objet choisi et les autres tuiles de son maillage : même nom au suffixe de tuile près (`high.1001`,
+    `high.1002`). Un objet `high.001.1001`, venu d'un OBJ coupé en parties, n'en fait pas partie ;
+  - une tuile n'est bakée que si elle porte un low, c'est-à-dire un objet du calque autre que le high. Les autres
+    tuiles restent vides, et un high choisi égal au low donne du noir ;
+  - l'upstream dessinait tout le maillage fusionné dans les deux passes, le high par-dessus le low ; désormais chaque
+    passe ne dessine, sur chaque tuile, que le high (première passe) ou le low (suivantes). Les bakes Normal (Object)
+    et Position simples dessinent toujours tous les objets.
+
+  Normal, Height et Derivative sont vérifiés à la valeur près : high plat ou incliné, par tuile.
+- **Bug upstream corrigé (`bake-derivative`).** Le bake Derivative sautait sa passe de hauteur et prenait la dérivée
+  des positions : 0,588 au lieu de 0,5 pour un high confondu avec le low.
+- **Scripts pour les bancs** (`studio_atlas.c`) :
+  - `studio_paint_option` : `camera_align`, `ortho`, `xray`, `sym_x/y/z`, `fill_type` ;
+  - `studio_udim_pick` ;
+  - `studio_clone_source` ;
+  - `studio_bake`, `studio_bake_state` : le bouton Bake d'un nœud ; bake lancé depuis `update()`, puisque le nœud vide
+    sa texture à la frame suivante ;
+  - `studio_udim_pixel`, canaux 3 à 8 : cartes UV, de triangles et de dilatation, pipette, aperçus de nœud,
+    emplacements d'undo.
+- **Limites** (voulues ou upstream) :
+  - pas d'aperçu live du pinceau sur un calque à tuiles, ni de calque live pour l'outil Material (tout D2) ;
+  - pas de clone d'une tuile à l'autre : une source sur une autre tuile ne peint rien ;
+  - ColorID, flou et smudge ne lisent que la tuile peinte ;
+  - xray tient toutes les tuiles à chaque pas ;
+  - upstream : un maillage importé en ajout n'a pas la mise à l'échelle du premier (`viewport_scale_to_bounds`). Un
+    high poly ajouté à part donne donc une hauteur fausse ; il faut mettre low et high dans le même fichier ;
+  - upstream : `cotangent_frame` donne NaN sur des normales constantes. Le low d'un bake de normales doit avoir des
+    normales qui varient (lissées).
+
+  Non testés : sculpt, particules, décalques et texte sur un calque à tuiles (même chemin que le pinceau).
 
 ---
 

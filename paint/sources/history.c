@@ -935,7 +935,9 @@ void history_edit_nodes(ui_node_canvas_t *canvas, i32 canvas_type, i32 canvas_gr
 
 void history_paint() {
 	bool is_mask = slot_layer_is_mask(g_context->layer);
-	history_copy_to_undo(g_context->layer->id, history_undo_i, is_mask);
+	if (!util_udim_paint_undo(g_context->layer, history_undo_i, is_mask)) { // STUDIO-PATCH(udim-tiles): tiles saved when first drawn to
+		history_copy_to_undo(g_context->layer->id, history_undo_i, is_mask);
+	}
 
 	history_push_undo    = false;
 	history_step_t *step = history_push(HISTORY_ACTION_PAINT);

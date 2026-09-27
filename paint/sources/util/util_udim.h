@@ -41,6 +41,11 @@ void  util_udim_sync();             // Layers tiled or not by the rule, stores f
 bool  util_udim_tile_layer(slot_layer_t *l, bool background); // Tiled by the rule now, the new tiles cleared or given texel (0, 0)
 void  util_udim_replace(gpu_texture_t *view, gpu_texture_t *fresh); // Content of fresh into the view, the old one deleted
 bool  util_udim_resize_layer(slot_layer_t *l, i32 width, i32 height); // Every tile of a tiled layer, in place
+bool  util_udim_clear(gpu_texture_t *view, u32 color);       // Every tile of a tiled texture cleared, false when not tiled
+bool  util_udim_tile_like(gpu_texture_t *view, gpu_texture_t *from); // view made from a tiled texture: tiled as it, each tile copied
+// A node preview baked on the mesh (Curvature Texture): a tile per tile of the layer. True when the layer is tiled, the
+// tile of the context then held; false otherwise, the preview a single texture again.
+bool  util_udim_tile_preview(gpu_texture_t *image);
 bool  util_udim_swap_layers(slot_layer_t *a, slot_layer_t *b); // slot_layer_swap of a tiled layer and an undo slot
 bool  util_udim_copy_to_undo(i32 from_id, i32 to_id, bool is_mask); // history_copy_to_undo of a tiled layer
 void  util_udim_undo_reset(slot_layer_t *slot);              // Undo slot reused: back to a single texture
@@ -53,6 +58,32 @@ char *util_udim_view_stats(gpu_texture_t *view);
 i32  util_udim_loop_begin(bool tiled);
 void util_udim_loop_tile(i32 k);
 void util_udim_loop_end();
+
+// Paint (lot D2b). render_path_paint_commands_paint() paints a tiled layer tile by tile, each with the objects of the
+// tile in their local uvs: util_udim_paint_tiles() sets each tile and calls it back. A paint step (history_paint) saves
+// the tile of the context in its undo slot, then each tile of the layer when first drawn to (copy on write, from
+// gpu_begin): its slot holds the tiles the step changed, undo and redo swap them. texpaint_blend0/1 get a content per
+// tile painted, freed at the end of the stroke; the dilation goes through the tiles painted, each with its dilate map.
+bool util_udim_paint_undo(slot_layer_t *layer, i32 to_id, bool is_mask); // history_paint() of a tiled layer
+bool util_udim_paint_tiles(bool dilation);       // Painted tile by tile, false for the upstream path
+void util_udim_blend_reset();                    // Before texpaint_blend0/1 are cleared
+bool util_udim_dilate(bool base, bool nor_pack); // render_path_paint_dilate() outside the loop, of the tiles painted
+bool util_udim_cache_dilate_map();               // util_uv_cache_dilate_map(): the map of the tile of the context
+bool util_udim_cache_triangle_map();             // util_uv_cache_triangle_map(): the same
+bool util_udim_cache_uv_map();                   // util_uv_cache_uv_map(): every tile, the viewport wireframe reads them all
+
+// Pickers (lot D2b). The gbuffer writes the tile of each object (gbuffer2.r, tile - 1000, 0 without one), read under the
+// brush: the layer and mask pickers run on that tile, the uv islands are those of that tile, the face and uv island
+// fills paint that tile only.
+f32  util_udim_tile_code(object_t *object); // _udim_tile_code
+i32  util_udim_cursor_tile();               // Tile under the brush, -1 on an object without one or the 2d view
+i32  util_udim_pick_begin(bool show);       // Before a picker pass: tile under the brush picked, shown when show; tile to put back
+i32  util_udim_picked_tile();               // Tile of the last pick
+i32  util_udim_island_begin();              // util_uv_cache_uv_island_map(): the tile under the brush shown; tile to put back
+
+// 2d view (lot D2b): a tiled layer shows and paints the tile of the context, the 2d plane with the material uvs of that
+// tile. util_udim_view2d_tile() draws the combo choosing it, false when the layer is not tiled.
+bool util_udim_view2d_tile();
 
 // util_mesh.c: the tile table, sorted, and its length (1 for a single tile, udim active from 2)
 i32 util_mesh_udim_tile_table(i32 **tiles);

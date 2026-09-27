@@ -244,6 +244,8 @@ void render_path_paint_commands_paint(bool dilation) {
 		ui_header_handle->redraws = 2;
 	}
 	else if (g_context->tool == TOOL_TYPE_PICKER || g_context->tool == TOOL_TYPE_MATERIAL) {
+		// STUDIO-PATCH(udim-tiles): the tile under the brush, shown for the layer or mask picker of a tiled layer
+		i32 udim_saved = util_udim_pick_begin(!g_context->pick_pos_nor_tex);
 		if (g_context->pick_pos_nor_tex) {
 			if (g_context->paint2d) {
 				string_array_t *additional = any_array_create_from_raw(
@@ -303,7 +305,7 @@ void render_path_paint_commands_paint(bool dilation) {
 				    3);
 				render_path_set_target("texpaint_picker", additional, NULL, GPU_CLEAR_NONE, 0, 0.0);
 				render_path_bind_target("gbuffer2", "gbuffer2");
-				bool use_live_layer = g_context->tool == TOOL_TYPE_MATERIAL;
+				bool use_live_layer = g_context->tool == TOOL_TYPE_MATERIAL && !util_udim_layer_tiled(g_context->layer); // STUDIO-PATCH(udim-tiles)
 				if (use_live_layer) {
 					render_path_paint_use_live_layer(true);
 				}
@@ -315,6 +317,7 @@ void render_path_paint_commands_paint(bool dilation) {
 					render_path_paint_use_live_layer(false);
 				}
 			}
+			util_udim_set_tile(udim_saved); // STUDIO-PATCH(udim-tiles)
 			ui_header_handle->redraws         = 2;
 			ui_base_hwnds->buffer[2]->redraws = 2;
 
@@ -456,6 +459,8 @@ void render_path_paint_commands_paint(bool dilation) {
 			make_material_parse_paint_material(false);
 			render_path_base_draw_gbuffer();
 		}
+	}
+	else if (util_udim_paint_tiles(dilation)) { // STUDIO-PATCH(udim-tiles): tiled layer, painted tile by tile (calls back here)
 	}
 	else {
 		char *texpaint = string_tmp("texpaint%d", tid);
@@ -644,7 +649,7 @@ void render_path_paint_commands_live_brush() {
 		return;
 	}
 
-	if (render_path_paint_live_layer_locked) {
+	if (render_path_paint_live_layer_locked || util_udim_layer_tiled(g_context->layer)) { // STUDIO-PATCH(udim-tiles): no live layer (D2)
 		return;
 	}
 
@@ -971,7 +976,8 @@ void render_path_paint_draw() {
 					}
 					context_select_paint_object(_paint_object);
 
-					if (g_context->bake_type == BAKE_TYPE_DERIVATIVE) {
+					// STUDIO-PATCH(bake-derivative): bake_type is the high poly pass now, the requested bake is kept aside
+					if (_render_path_paint_bake_type == BAKE_TYPE_DERIVATIVE) {
 						sys_notify_on_next_frame(&render_path_paint_draw_bake_derivative, NULL);
 					}
 					else {
@@ -1015,6 +1021,7 @@ void render_path_paint_draw() {
 
 	if (g_context->brush_blend_dirty) {
 		g_context->brush_blend_dirty = false;
+		util_udim_blend_reset(); // STUDIO-PATCH(udim-tiles): blend of each tile painted freed
 		render_path_set_target("texpaint_blend0", NULL, NULL, GPU_CLEAR_COLOR, 0x00000000, 0.0);
 		render_path_set_target("texpaint_blend1", NULL, NULL, GPU_CLEAR_COLOR, 0x00000000, 0.0);
 		render_path_end();
@@ -1191,6 +1198,9 @@ void render_path_paint_unbind_layers() {
 }
 
 void render_path_paint_dilate(bool base, bool nor_pack) {
+	if (util_udim_dilate(base, nor_pack)) { // STUDIO-PATCH(udim-tiles): tiled layer, the tiles painted one by one
+		return;
+	}
 	if (g_config->dilate_radius > 0 && !g_context->paint2d) {
 		util_uv_cache_dilate_map();
 		layers_make_temp_img();
