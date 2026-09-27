@@ -190,6 +190,217 @@ def apply_look(app):
     )
 
 
+# Thème Painter (fenêtre subzero) : panneaux gris #333333, barres #2b2b2b, titres de section en capitales, curseurs
+# fins à poignée en anneau, chevrons fins. Couleurs relevées sur le panneau Shader Settings de Painter. Les images
+# des sous-contrôles (flèche des menus, coche) sont des SVG écrits au démarrage dans un dossier temporaire : une
+# feuille de style Qt ne les prend que par fichier.
+PAINTER_ACCENT = "#378ef0"
+PAINTER_ICONS = {
+    "chevron_down": '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10">'
+                    '<path d="M1.5 3.5l3.5 3.5 3.5-3.5" fill="none" stroke="%s" stroke-width="1.2"/></svg>',
+    "chevron_right": '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10">'
+                     '<path d="M3.5 1.5l3.5 3.5-3.5 3.5" fill="none" stroke="%s" stroke-width="1.2"/></svg>',
+    "check": '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 12 12">'
+             '<path d="M2.6 6.3l2.3 2.3 4.5-5" fill="none" stroke="%s" stroke-width="1.8"/></svg>',
+    "close": '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10">'
+             '<path d="M2 2l6 6M8 2l-6 6" fill="none" stroke="%s" stroke-width="1.3"/></svg>',
+}
+_painter_icons = None  # QTemporaryDir des SVG, vivant autant que l'application
+
+
+def painter_icon(name, color="#9a9a9a"):
+    """Chemin d'une image SVG du thème Painter (écrite à la première demande)."""
+    global _painter_icons
+    if _painter_icons is None:
+        _painter_icons = QtCore.QTemporaryDir()
+    path = os.path.join(_painter_icons.path(), "%s_%s.svg" % (name, color.lstrip("#")))
+    if not os.path.isfile(path):
+        with open(path, "w") as f:
+            f.write(PAINTER_ICONS[name] % color)
+    return path.replace("\\", "/")
+
+
+def apply_painter_look(app):
+    app.setStyle("Fusion")
+    QtCore.QLocale.setDefault(QtCore.QLocale.c())  # 0.5 et non 0,5 : nombres de l'interface anglaise, comme Painter
+    font = app.font()
+    font.setPixelSize(12)  # même taille sous macOS (72 dpi logiques) et Linux (96)
+    app.setFont(font)
+    p = QtGui.QPalette()
+    colors = {
+        QtGui.QPalette.Window: "#333333",
+        QtGui.QPalette.WindowText: "#c8c8c8",
+        QtGui.QPalette.Base: "#252525",
+        QtGui.QPalette.AlternateBase: "#2d2d2d",
+        QtGui.QPalette.Text: "#d2d2d2",
+        QtGui.QPalette.Button: "#2d2d2d",
+        QtGui.QPalette.ButtonText: "#d2d2d2",
+        QtGui.QPalette.Highlight: PAINTER_ACCENT,
+        QtGui.QPalette.HighlightedText: "#ffffff",
+        QtGui.QPalette.ToolTipBase: "#252525",
+        QtGui.QPalette.ToolTipText: "#d2d2d2",
+        QtGui.QPalette.PlaceholderText: "#6e6e6e",
+        QtGui.QPalette.Link: PAINTER_ACCENT,
+    }
+    for role, color in colors.items():
+        p.setColor(role, QtGui.QColor(color))
+    for role in (QtGui.QPalette.WindowText, QtGui.QPalette.Text, QtGui.QPalette.ButtonText):
+        p.setColor(QtGui.QPalette.Disabled, role, QtGui.QColor("#6e6e6e"))
+    app.setPalette(p)
+    app.setStyleSheet(
+        """
+        QToolTip { color: #d2d2d2; background: #252525; border: 1px solid #4d4d4d; padding: 3px 5px; }
+        QFrame#bar { background: #2b2b2b; }
+        QFrame#viewer, QFrame#browser { border-right: 1px solid #1e1e1e; }
+        QFrame#separator { background: #262626; min-height: 1px; max-height: 1px; border: none; }
+        QLabel#title { color: #e6e6e6; font-size: 14px; font-weight: bold; }
+        QLabel#section { color: #e6e6e6; font-weight: bold; }
+        QLabel#muted { color: %(muted)s; }
+        QLabel#caption { color: %(muted)s; font-size: 11px; }
+        QLabel#tag { color: %(muted)s; border: 1px solid #4d4d4d; border-radius: 8px; padding: 1px 7px; }
+        QLabel#banner { background: #3d3222; color: %(warning)s; border: 1px solid #5a4526; border-radius: 3px;
+                        padding: 5px 7px; }
+
+        QPushButton { padding: 3px 12px; min-height: 17px; border: 1px solid #4d4d4d; border-radius: 3px;
+                      background: #2d2d2d; }
+        QPushButton:hover { background: #383838; border-color: #5c5c5c; }
+        QPushButton:pressed { background: #262626; }
+        QPushButton:disabled { color: #7a7a7a; background: #3e3e3e; border-color: #3e3e3e; }
+        QPushButton:checked { background: #1f3b5c; border-color: %(accent)s; color: #ffffff; }
+        QPushButton:checked:hover { background: #274a73; }
+        QPushButton#primary { background: %(accent)s; border-color: %(accent)s; color: #ffffff; font-weight: bold; }
+        QPushButton#primary:hover { background: #4b9bf3; border-color: #4b9bf3; }
+        QPushButton#primary:disabled { background: #3e3e3e; border-color: #3e3e3e; color: #7a7a7a; }
+        QPushButton#link { padding: 2px 4px; border: none; background: transparent; color: %(accent)s; }
+        QPushButton#link:hover { text-decoration: underline; }
+
+        QLineEdit, QSpinBox, QDoubleSpinBox { background: #252525; border: 1px solid #4d4d4d; border-radius: 3px;
+                                              padding: 3px 6px; selection-background-color: %(accent)s; }
+        QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus { border-color: %(accent)s; }
+        QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled { color: #6e6e6e; border-color: #3e3e3e; }
+        QSpinBox#value, QDoubleSpinBox#value { background: transparent; border: 1px solid transparent; padding: 1px 2px; }
+        QSpinBox#value:hover, QDoubleSpinBox#value:hover { border-color: #4d4d4d; }
+        QSpinBox#value:focus, QDoubleSpinBox#value:focus { background: #252525; border-color: %(accent)s; }
+
+        QComboBox { background: #2d2d2d; border: 1px solid #4d4d4d; border-radius: 3px; padding: 3px 22px 3px 8px; }
+        QComboBox:hover { border-color: #5c5c5c; }
+        QComboBox:on, QComboBox:focus { border-color: %(accent)s; }
+        QComboBox:disabled { color: #6e6e6e; border-color: #3e3e3e; }
+        QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: center right; width: 22px;
+                               border: none; }
+        QComboBox::down-arrow { image: url(%(chevron)s); width: 10px; height: 10px; }
+        QComboBox::down-arrow:disabled { image: url(%(chevron_off)s); }
+        QComboBox QAbstractItemView { background: #2b2b2b; border: 1px solid #4d4d4d; outline: 0;
+                                      selection-background-color: %(accent)s; selection-color: #ffffff; }
+
+        QCheckBox { spacing: 7px; }
+        QCheckBox::indicator { width: 12px; height: 12px; border: 1px solid #909090; border-radius: 2px;
+                               background: #2b2b2b; }
+        QCheckBox::indicator:hover { border-color: #c8c8c8; }
+        QCheckBox::indicator:checked { background: #b9b9b9; border-color: #b9b9b9; image: url(%(check)s); }
+        QCheckBox::indicator:disabled { border-color: #555555; }
+        QCheckBox::indicator:checked:disabled { background: #555555; border-color: #555555; }
+
+        QSlider { min-height: 16px; }
+        QSlider::groove:horizontal { height: 2px; background: #4a4a4a; }
+        QSlider::sub-page:horizontal { height: 2px; background: #b9b9b9; }
+        QSlider::add-page:horizontal { height: 2px; background: #4a4a4a; }
+        QSlider::handle:horizontal { width: 9px; height: 9px; margin: -6px 0; border: 2px solid #b9b9b9;
+                                     border-radius: 6px; background: #333333; }
+        QSlider::handle:horizontal:hover { border-color: #e6e6e6; }
+        QSlider::sub-page:horizontal:disabled, QSlider::handle:horizontal:disabled { background: #555555;
+                                                                                     border-color: #555555; }
+
+        QToolButton#group { border: none; background: transparent; color: #e6e6e6; font-weight: bold;
+                            padding: 2px 0; }
+        QToolButton#reset { border: none; background: transparent; color: %(muted)s; padding: 0 2px; }
+        QToolButton#reset:hover { color: #e6e6e6; }
+        QToolButton#tool { border: none; background: transparent; color: #b0b0b0; font-size: 15px; padding: 0 4px; }
+        QToolButton#tool:hover { color: #ffffff; }
+
+        QTabBar#library { background: #2b2b2b; }
+        QTabBar#library::tab { background: transparent; color: %(muted)s; border: none; border-bottom: 2px solid transparent;
+                               padding: 6px 10px 4px 10px; }
+        QTabBar#library::tab:selected { color: #e6e6e6; border-bottom: 2px solid %(accent)s; }
+        QTabBar#library::tab:hover { color: #e6e6e6; }
+        QTabBar#library::close-button { image: url(%(close)s); subcontrol-position: right; margin-left: 4px; }
+        QTabBar#library::close-button:hover { image: url(%(close_hover)s); }
+        QListWidget { background: #333333; border: none; outline: 0; }
+        QListWidget::item { color: #c8c8c8; border-radius: 3px; padding-top: 4px; }
+        QListWidget::item:hover { background: #3a3a3a; }
+        QListWidget::item:selected { background: #1f3b5c; color: #ffffff; }
+
+        QScrollArea { background: transparent; border: none; }
+        QScrollArea > QWidget > QWidget { background: transparent; }
+        QScrollBar:vertical { background: #262626; width: 10px; margin: 0; }
+        QScrollBar::handle:vertical { background: #4a4a4a; min-height: 24px; margin: 1px; }
+        QScrollBar::handle:vertical:hover { background: #5c5c5c; }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
+
+        QTreeWidget { background: #2b2b2b; border: 1px solid #262626; }
+        QHeaderView::section { background: #2b2b2b; color: %(muted)s; border: none; border-bottom: 1px solid #262626;
+                               padding: 4px 6px; }
+        QMenu { background: #2b2b2b; border: 1px solid #4d4d4d; }
+        QMenu::item:selected { background: %(accent)s; color: #ffffff; }
+        """
+        % {"accent": PAINTER_ACCENT, "muted": MUTED, "warning": WARNING, "chevron": painter_icon("chevron_down", "#b0b0b0"),
+           "chevron_off": painter_icon("chevron_down", "#5c5c5c"), "check": painter_icon("check", "#2b2b2b"),
+           "close": painter_icon("close", "#8c8c8c"), "close_hover": painter_icon("close", "#e6e6e6")}
+    )
+
+
+def separator():
+    line = QtWidgets.QFrame()
+    line.setObjectName("separator")
+    return line
+
+
+def section_title(text):
+    """Titre de section à la Painter : capitales, gras."""
+    label = QtWidgets.QLabel(text.upper())
+    label.setObjectName("section")
+    return label
+
+
+class Group(QtWidgets.QWidget):
+    """Groupe repliable à la Painter : chevron fin et titre gras en léger retrait sous le titre de section, contenu
+    en retrait du chevron (body, un QVBoxLayout)."""
+
+    toggled = QtCore.Signal(bool)
+    OFFSET = 6  # chevron
+    INDENT = 20  # contenu
+
+    def __init__(self, title, opened=True):
+        super().__init__()
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(self.OFFSET, 0, 0, 0)
+        lay.setSpacing(6)
+        self.head = QtWidgets.QToolButton()
+        self.head.setObjectName("group")
+        self.head.setCheckable(True)
+        self.head.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+        self.head.setIconSize(QtCore.QSize(10, 10))
+        self.head.setText(title)
+        self.box = QtWidgets.QWidget()
+        self.body = QtWidgets.QVBoxLayout(self.box)
+        self.body.setContentsMargins(self.INDENT - self.OFFSET, 0, 0, 0)
+        self.body.setSpacing(10)
+        lay.addWidget(self.head)
+        lay.addWidget(self.box)
+        self.head.toggled.connect(self._toggled)
+        self.head.setChecked(opened)
+        self._toggled(opened)
+
+    def _toggled(self, on):
+        self.head.setIcon(QtGui.QIcon(painter_icon("chevron_down" if on else "chevron_right")))
+        self.box.setVisible(on)
+        self.toggled.emit(on)
+
+    def is_open(self):
+        return self.head.isChecked()
+
+
 def muted(text=""):
     label = QtWidgets.QLabel(text)
     label.setObjectName("muted")
@@ -214,9 +425,23 @@ def ui_scale(mac):
 # ---- Démarrage ----------------------------------------------------------------------------------------------------------
 
 
-def start(name):
-    """Prend le protocole, crée l'application Qt (échelle d'ArmorPaint, arrière-plan sous macOS, thème) et le canal.
-    Rend (app, mac, channel) ; mac vaut None hors macOS, en offscreen, ou sans accès à NSApplication."""
+def start_standalone(name, painter=False):
+    """Application Qt d'une fenêtre lancée sans ArmorPaint (subzero autonome, lot E9) : ni protocole, ni échelle
+    d'ArmorPaint, application ordinaire au premier plan. Rend app."""
+    app = QtWidgets.QApplication([sys.argv[0]])
+    app.setApplicationName(name)
+    app.setDesktopFileName(name)  # Wayland : icône et regroupement de la fenêtre par subzero.desktop
+    if painter:
+        apply_painter_look(app)
+    else:
+        apply_look(app)
+    return app
+
+
+def start(name, painter=False):
+    """Prend le protocole, crée l'application Qt (échelle d'ArmorPaint, arrière-plan sous macOS, thème : celui du
+    studio, ou celui de Painter) et le canal. Rend (app, mac, channel) ; mac vaut None hors macOS, en offscreen, ou sans
+    accès à NSApplication."""
     proto_in, proto_out = claim_stdio()
     mac = None
     if sys.platform == "darwin" and os.environ.get("QT_QPA_PLATFORM") != "offscreen":
@@ -236,5 +461,8 @@ def start(name):
         except Exception as e:  # noqa: BLE001
             log("could not make the window a background application: %s" % e)
             mac = None
-    apply_look(app)
+    if painter:
+        apply_painter_look(app)
+    else:
+        apply_look(app)
     return app, mac, Channel(proto_in, proto_out)

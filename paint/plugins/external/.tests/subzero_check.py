@@ -14,6 +14,7 @@ import collections
 import json
 import os
 import random
+import shutil
 import subprocess
 import sys
 import threading
@@ -214,23 +215,104 @@ else:
     else:
         dest = os.path.join(W, "planks")
         six = ["basecolor", "normal", "roughness", "metallic", "height", "ambientocclusion"]
-        _, g, res = render_package(PLANKS, outputs=six, out=dest, names={"basecolor": "base"}, exr=["normal", "height"])
+        _, g, res = render_package(PLANKS, outputs=six, out=dest, names={"basecolor": "base"}, fmt="exr16")
         names = sorted(os.listdir(dest))
-        check("colorful_planks : 6 sorties, renommées, EXR pour normale et hauteur",
-              names == ["ambientocclusion.tga", "base.tga", "height.exr", "metallic.tga", "normal.exr", "roughness.tga"],
-              names)
-        with open(os.path.join(dest, "base.tga"), "rb") as f:
-            head = f.read(18)
-        check("colorful_planks : TGA 2048 non compressé", head[2] == 2 and head[12:16] == b"\x00\x08\x00\x08", head.hex())
-        types = exr_pixel_types(os.path.join(dest, "height.exr"))
-        check("colorful_planks : hauteur en EXR half", types and set(types) == {1}, types)
+        check("colorful_planks : 6 sorties en EXR, renommées, en un seul appel (un format par appel)",
+              names == ["ambientocclusion.exr", "base.exr", "height.exr", "metallic.exr", "normal.exr", "roughness.exr"]
+              and len(res["argv"]) == 1, "%s, %d" % (names, len(res["argv"])))
+        check("colorful_planks : EXR half, couleur en A B G R, gris en Y",
+              exr_pixel_types(os.path.join(dest, "base.exr")) == [1, 1, 1, 1]
+              and exr_pixel_types(os.path.join(dest, "height.exr")) == [1])
         comp = exr_compression(os.path.join(dest, "height.exr"))
-        check("colorful_planks : EXR non compressé (1,32 s au lieu de 1,73 s en zip)", comp == 0, comp)
+        check("colorful_planks : EXR non compressé par défaut (1,6 s au lieu de 2,5 s en zip)", comp == 0, comp)
+        # Chaque format du menu, en 256 : le bon fichier, reconnu à sa signature.
+        magic = {".exr": (b"\x76\x2f\x31\x01",), ".png": (b"\x89PNG",), ".tif": (b"II*\x00", b"MM\x00*"),
+                 ".jpg": (b"\xff\xd8",), ".tga": (b"",)}
+        bad = []
+        for fmt, f in subzero_render.FORMATS.items():
+            out = os.path.join(W, "formats", fmt)
+            try:
+                files = render_package(PLANKS, size=(8, 8), outputs=["basecolor", "height"], out=out, fmt=fmt)[2]["files"]
+                for path in files.values():
+                    head = open(path, "rb").read(18)
+                    if not path.endswith(f["ext"]) or not any(head.startswith(m) for m in magic[f["ext"]]) \
+                            or (f["ext"] == ".tga" and head[2] not in (2, 3)):
+                        bad.append("%s: %s" % (fmt, os.path.basename(path)))
+            except subzero_render.Error as e:
+                bad.append("%s: %s" % (fmt, e))
+        check("formats du menu (%s) rendus" % ", ".join(subzero_render.FORMATS), not bad, "; ".join(bad))
+        types = exr_pixel_types(os.path.join(W, "formats", "exr32", "height.exr"))
+        check("EXR 32f : vraiment en float (--exr-format-use-float)", types == [2], types)
+        # La couleur de base d'un EXR a les valeurs du TGA, encodées sRGB (d'où l'espace srgb_tx imposé à l'import).
+        import subzero_exr  # noqa: E402
+        with subzero_exr.Image(os.path.join(W, "formats", "exr16", "basecolor.exr")) as im:
+            tga = open(os.path.join(W, "formats", "tga", "basecolor.tga"), "rb").read()
+            start, bpp, top = 18 + tga[0], tga[16] // 8, bool(tga[17] & 0x20)  # BGR(A) non compressé
+            gaps = []
+            for y in range(0, im.height, 3):
+                row = y if top else im.height - 1 - y
+                red = im.values(im.line(y), "R")
+                for x in range(0, im.width, 3):
+                    gaps.append(abs(red[x] * 255 - tga[start + (row * im.width + x) * bpp + 2]))
+        # Deux rendus ne sont pas identiques au bit près (jusqu'à 20 codes sur quelques pixels) : on compte.
+        close = sum(g < 1.0 for g in gaps) / float(len(gaps))
+        check("couleur de base EXR = TGA/255 (encodée sRGB) sur 98 % des pixels au moins, à un code près",
+              close >= 0.98, "%.1f %%" % (100 * close))
+        # $SUBZERO_EXR_COMPRESSION=zip : la vignette de la fenêtre décode le zip comme le non compressé.
+        subzero_render.EXR_COMPRESSION = "zip"
+        try:
+            zipped = render_package(PLANKS, size=(8, 8), outputs=["basecolor", "height"], out=os.path.join(W, "zip"),
+                                    fmt="exr16")[2]["files"]
+        finally:
+            subzero_render.EXR_COMPRESSION = "none"
+        comps = [exr_compression(zipped[out]) for out in ("basecolor", "height")]
+        exrmetrics = shutil.which("exrmetrics")
+        if not exrmetrics:
+            check("EXR en zip (sbsrender) : vignette décodée", comps == [3, 3]
+                  and subzero_exr.thumbnail(zipped["basecolor"], 64)[2] == "rgb", comps)
+            skip("EXR en zip décodé comme par OpenEXR", "pas d'exrmetrics")
+        else:
+            # Référence : le même fichier décompressé par OpenEXR (deux rendus ne sont pas identiques au bit près).
+            diff = []
+            for out in ("basecolor", "height"):
+                ref = os.path.join(W, "zip", out + ".none.exr")
+                subprocess.run([exrmetrics, "--convert", "-z", "none", zipped[out], "-o", ref],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                with subzero_exr.Image(zipped[out]) as a, subzero_exr.Image(ref) as b:
+                    if [a.line(y) for y in range(a.height)] != [b.line(y) for y in range(b.height)]:
+                        diff.append(out)
+            check("EXR en zip (sbsrender) décodé par subzero_exr comme par OpenEXR (exrmetrics), au bit près",
+                  not diff and comps == [3, 3], "%s, %s" % (diff, comps))
+        subzero_render.EXR_COMPRESSION = "piz"
+        try:
+            subzero_render.format_args("exr16")
+            piz = None
+        except subzero_render.Error as e:
+            piz = str(e)
+        subzero_render.EXR_COMPRESSION = "fast"
+        try:
+            subzero_render.format_args("exr16")
+            bad_comp = None
+        except subzero_render.Error as e:
+            bad_comp = str(e)
+        finally:
+            subzero_render.EXR_COMPRESSION = "none"
+        check("compression EXR inconnue refusée, piz acceptée", piz is None and bad_comp and "fast" in bad_comp, bad_comp)
+        prev = os.environ.get("SUBZERO_FORMAT")
+        os.environ["SUBZERO_FORMAT"] = "png"
+        png = subzero_render.default_format()
+        os.environ["SUBZERO_FORMAT"] = "bmp"
+        unknown = subzero_render.default_format()
+        if prev is None:
+            del os.environ["SUBZERO_FORMAT"]
+        else:
+            os.environ["SUBZERO_FORMAT"] = prev
+        check("$SUBZERO_FORMAT : pris s'il est au menu, sinon EXR half", (png, unknown) == ("png", "exr16"), "%s, %s" % (png, unknown))
         # Valeurs, preset et graine : le rendu change ; une valeur hors graphe est refusée avant le lancement.
-        before = open(os.path.join(dest, "base.tga"), "rb").read()
-        render_package(PLANKS, outputs=["basecolor"], out=dest, names={"basecolor": "base"},
+        before = open(os.path.join(dest, "base.exr"), "rb").read()
+        render_package(PLANKS, outputs=["basecolor"], out=dest, names={"basecolor": "base"}, fmt="exr16",
                        values={"wood_color": [0.9, 0.1, 0.1], "$randomseed": 7})
-        check("colorful_planks : valeur et graine appliquées", open(os.path.join(dest, "base.tga"), "rb").read() != before)
+        check("colorful_planks : valeur et graine appliquées", open(os.path.join(dest, "base.exr"), "rb").read() != before)
         try:
             render_package(PLANKS, outputs=["basecolor"], out=dest, values={"nope": 1})
             check("entrée inconnue refusée", False, "acceptée")
@@ -252,7 +334,8 @@ else:
         timer.start()
         t = time.time()
         try:
-            render_package(PLANKS, size=(12, 12), outputs=six, out=dest, cancel=lambda p: holder.update(proc=p))
+            render_package(PLANKS, size=(12, 12), outputs=six, out=dest, fmt="exr16",
+                           cancel=lambda p: holder.update(proc=p))
             check("annulation", False, "rendu terminé")
         except subzero_render.Error as e:
             check("annulation : rendu tué en %.2f s, destination intacte" % (time.time() - t),

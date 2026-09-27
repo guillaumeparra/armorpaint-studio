@@ -20,6 +20,7 @@ W=${1:-$(mktemp -d)}
 mkdir -p "$W"
 W=$(cd "$W" && pwd)
 [ -x "$APP" ] || { echo "ArmorPaint not found: $APP" >&2; exit 1; }
+export STUDIO_ENV= # lot E5 : aucun studio.env, pas même celui de l'utilisateur
 "$PY" -c 'import PyOpenColorIO, numpy, OpenEXR, PIL' 2> /dev/null && [ -x "$EXT/.ocio/venv/bin/oiiotool" ] ||
 	{ echo "venv incomplet : lancer .tests/ocio.sh puis $EXT/.ocio/venv/bin/pip install numpy OpenEXR Pillow OpenImageIO" >&2; exit 1; }
 [ -n "${NUKE+x}" ] || NUKE=$(ls /Applications/Nuke17*/Nuke17*.app/Contents/MacOS/Nuke17* 2> /dev/null | tail -1 || true)

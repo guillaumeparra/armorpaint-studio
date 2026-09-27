@@ -11,6 +11,7 @@
 #   python3 subzero_meta.py fichier.sbsar --args wood_color=0.5,0.4,0.3 age=0.2   # arguments sbsrender
 
 import json
+import posixpath
 import re
 import sys
 import xml.etree.ElementTree as ET
@@ -275,6 +276,32 @@ def read_sbsar(path):
             d["member"] = name
             descs.append(d)
     return {"path": path, "members": sorted(members), "assemblies": descs}
+
+
+def read_icons(desc, sbsar):
+    """{pkgurl: PNG} des icônes de graphes, rangées à côté du XML de leur assemblage dans l'archive."""
+    wanted = {g["pkgurl"]: posixpath.join(posixpath.dirname(a["member"]), g["icon"])
+              for a in desc["assemblies"] for g in a["graphs"] if g.get("icon")}
+    if not wanted:
+        return {}
+    try:
+        members = read_7z(sbsar)
+    except (OSError, ValueError):
+        return {}
+    return {url: members[m] for url, m in wanted.items() if members.get(m)}
+
+
+def package_icon(path):
+    """PNG de l'icône du premier graphe qui en a une (navigateur de paquets), None sinon ; une seule lecture de
+    l'archive. Lève OSError ou ValueError."""
+    members = read_7z(path)
+    for name in sorted(members):
+        if name.endswith(".xml"):
+            for g in parse_xml(members[name])["graphs"]:
+                icon = members.get(posixpath.join(posixpath.dirname(name), g["icon"])) if g.get("icon") else None
+                if icon:
+                    return icon
+    return None
 
 
 # --------------------------------------------------------------------------- aides pour l'hôte

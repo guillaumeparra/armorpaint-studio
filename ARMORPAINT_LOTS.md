@@ -806,6 +806,127 @@ En C dans `external/`, sur le modèle de `studio_export_window.c` et de `studio_
 | Designer déplacé ou mis à jour : chemin périmé | 🟡 | Chemin vérifié à chaque lancement de la fenêtre, message qui renvoie aux préférences |
 | GPU partagé entre `sbsrender` (`mtl`) et ArmorPaint | 🟢 mesuré en E4 : négligeable au repos, +1 s juste après le lancement d'ArmorPaint | — |
 
+## Chantier E, suite : subzero v1 (E5-E11)
+
+Décidé le 2026-09-27, après la v0. Guillaume veut se rapprocher de l'expérience de Painter : une étagère de matériaux avec leurs vignettes, un double-clic qui ajoute le matériau, une interface de réglage de la même facture, et un subzero utilisable seul pour exporter des cartes. Il veut aussi des textures en flottant plutôt qu'en TGA, un démarrage configuré par l'environnement et un audit de ce que fait `sbsrender` à côté. Ordre retenu : E5, E6, E7, E8, E9, E10. E11 (réglages couleur, Rocky 9.4) s'est ajouté après E6.
+
+### E5 — Environnement et démarrage propre · **1 j** · ✅ fait (2026-09-27)
+
+Livré : `studio_env.c` (banc `.tests/env.sh`, 42 vérifications sous ASan/UBSan), `SUBZERO_SBSRENDER`, `SUBZERO_LIVE`, `SUBZERO_ENGINE` ; `subzero_app.sh` passe `sbsrender` par un `studio.env` à lui, et les autres bancs d'app exportent `STUDIO_ENV=` pour ne pas lire celui de l'utilisateur.
+
+- **`studio.env`** : fichier de lignes `CLÉ=valeur`, lu au tout début d'`external_init`, avant les préférences (module `studio_env`). Il sert quand ArmorPaint est lancé depuis le Finder ou le Dock, qui ne transmettent pas les variables du terminal.
+  - emplacement : `STUDIO_ENV` (un ou plusieurs fichiers séparés par `:` ; vide : aucun fichier). Sinon `studio.env` dans le dossier de l'utilisateur d'ArmorPaint (`~/Library/Application Support/ArmorPaint/`), ignoré en `--background` comme les préférences ;
+  - une vraie variable d'environnement passe toujours devant, puis le premier fichier qui la définit ;
+  - syntaxe : `#` pour les commentaires, `export` facultatif, guillemets, `~` en tête de valeur, `$VAR` et `${VAR}` ;
+  - les variables prises passent aux sous-processus : fenêtres Qt, sidecar ShotGrid, `sbsrender`.
+- **Log au démarrage** : le fichier lu et ses variables, puis l'environnement studio effectif (`OCIO`, `STUDIO_*`, `SUBZERO_*`) avec l'origine de chaque valeur. Les secrets sont masqués.
+- **subzero** :
+  - `SUBZERO_SBSRENDER` passe devant la préférence ; l'onglet des préférences le montre verrouillé, comme `$OCIO` ;
+  - `SUBZERO_LIVE=0` décoche « Live » à l'ouverture ;
+  - `SUBZERO_ENGINE` choisit le moteur (`mtl` par défaut) ;
+  - `SUBZERO_FORMAT` et `SUBZERO_EXR_COMPRESSION` viennent avec E6, `SUBZERO_LIBRARY` avec E7, `SUBZERO_EXPORT_*` avec E9.
+- **OCIO** : rien à ajouter. `OCIO`, `STUDIO_OCIO_WORKING_SPACE`, `STUDIO_OCIO_DISPLAY/VIEW/LOOK`, `STUDIO_OCIO_VIEWPORT` et `STUDIO_OCIO_IMPORT` existent depuis A5.
+- Pour plusieurs postes, il faut un siège Designer par poste. La question de licence reste ouverte (Q5 de l'étude).
+
+### E6 — Formats de sortie, EXR par défaut · **1-2 j** · ✅ fait (2026-09-27)
+
+Livré : menu **Format** (EXR 16f par défaut, EXR 32f, PNG 8, TGA 8, TIFF 8, JPEG), `SUBZERO_FORMAT`, `SUBZERO_EXR_COMPRESSION`, `assets/subzero_exr.py` (EXR en Python pur : vignettes, décalques ; ZIP vérifié au bit près contre `exrmetrics`), `color_space` dans le protocole, retrait des textures périmées côté ArmorPaint (`removed`, `kept`) puis suppression des fichiers par la fenêtre. Bancs : `subzero.sh` (chaque format rendu et reconnu à sa signature), `subzero_window_ui.py` (décalques par format, changement de format, recette v0 en TGA), `subzero_app.sh` (import EXR en `srgb_tx`, passage en PNG dans l'app). Pas de 16 bits entiers : ArmorPaint lit le PNG, le TIFF et le PSD en 8 bits. Écartés : PSD, BMP, HDR (rien de plus, ou moins précis), DDS, WebP, WBMP, PSB (non lus). Deux rendus de `sbsrender` ne sont pas identiques au bit près (jusqu'à 20 codes sur quelques pixels de colorful_planks) : les bancs comparent au décodage d'OpenEXR, pas à un second rendu. L'import réel de chaque format a trouvé un bug upstream : ArmorPaint plantait sur tout TIFF LZW un peu riche (ceux de `sbsrender`, de Photoshop, de notre export), et lisait hors du fichier un TIFF gris sans SamplesPerPixel (ceux de Qt). Corrigé par le patch `tiff-lzw` (`PATCHES.md`).
+
+Demandé par Guillaume : la v0 rend en TGA 8 bits (normale et hauteur en EXR dans les seuls projets en 16 ou 32 bits), ce qui perd de la précision.
+- **Menu « Format »** à côté de la taille, avec les formats de `sbsrender` qu'ArmorPaint sait lire. **EXR half par défaut**, ou `SUBZERO_FORMAT`. Le choix est gardé dans la recette. La liste finale est fixée après un import réel de chaque format dans l'app. WebP, DDS, WBMP et PSB ne sont pas lus par ArmorPaint : ils viennent avec le standalone (E9). Le TIFF l'est (plugin `io_tiff`, 8 bits).
+- **Un seul format par appel**, comme en E1 : l'échec au hasard des appels à deux formats disparaît. EXR sans compression par défaut, pour la vitesse (`SUBZERO_EXR_COMPRESSION`).
+- **Couleur de base en flottant.** `sbsrender` y écrit les mêmes valeurs, encodées sRGB, qu'en 8 bits. C'est vérifié : écart ≤ 0,06/255 avec le TGA sur colorful_planks. Les règles d'A4 la liraient pourtant comme de la lumière linéaire (`ACES2065-1` par la file_rule des `.exr`, sinon `scene_linear`). subzero impose donc l'espace sRGB de texture de la configuration (`srgb_tx`) à son import, par `studio_texture_set_color_space`. Sans OCIO, le mode Auto du nœud la lit déjà comme de l'encodé.
+- **Aperçu 512** : toujours en TGA dans le cache. Il ne sert qu'aux vignettes.
+- **Vignettes du rendu final** : lecteur EXR en Python, sans dépendance, sous-échantillonné.
+- **Décalques** : alpha séparé aussi en EXR, par copie d'octets.
+- **Changement de format** : les nouveaux fichiers remplacent les anciens. Les anciennes textures, inutilisées, sortent du projet, puis leurs fichiers sont supprimés.
+
+### E11 — Réglages couleur OCIO de subzero · **1-2 j** · ✅ fait (2026-09-27)
+
+Demandé par Guillaume après E6, fait avant E7 : un petit panneau de réglages dans la fenêtre, avec les variables d'environnement OCIO, pour les cartes et pour les couleurs ; la fenêtre doit aussi tourner sous Linux Rocky 9.4.
+
+Livré : `assets/subzero_color.py` (configuration, espace de chaque carte, conversion après le rendu, affichage), `assets/studio_env.py` (`studio.env` côté Python : mêmes règles que `studio_env.c`, écriture), bouton **Settings** et son panneau dans `subzero_window.py`, `state.ocio` et `state.env` dans le protocole, `color_space_was` dans les liens, évènement `ocio`, requête `show_prefs`, `tools/setup_subzero.sh`. Bancs : `subzero_color_check.py` (hors fenêtre), cas E11 de `subzero_window_ui.py`, étapes 6 à 8 de `subzero_app.sh`.
+- **Conversion par subzero**, pas par `sbsrender` : son `--set-output-colorspace` prend toute sortie pour du « sRGB » et convertit en silence depuis `scene_linear`. PyOpenColorIO convertit après le rendu, dans la configuration d'ArmorPaint (en autonome : `$OCIO`, sinon `ocio://studio-config-latest`). Sans PyOpenColorIO ni numpy, tout marche comme en E6.
+- **Variables** : `SUBZERO_OCIO_<CARTE>`, sinon `SUBZERO_OCIO_COLOR` (couleur de base) ou `SUBZERO_OCIO_DATA` (le reste), sinon ce qu'écrit `sbsrender` (`srgb_tx`, rôle `data`), donc aucune conversion par défaut. `SUBZERO_OCIO_PICKING` : espace des couleurs des paramètres (défaut : rôle `color_picking`). En autonome (E9), la fenêtre lit aussi `OCIO` et `STUDIO_OCIO_DISPLAY/VIEW/LOOK/VIEWPORT`.
+- **Panneau** : configuration et affichage d'ArmorPaint en lecture, espaces par groupe et par carte, origine de chaque variable (fichier, environnement verrouillé, fenêtre). Apply (la fenêtre) ou Save (`studio.env`, une ligne par variable, le reste gardé). La fenêtre relit `studio.env` à l'ouverture, ArmorPaint seulement à son démarrage.
+- **ArmorPaint** : une texture neuve prend l'espace du lien ; une texture déjà là le suit seulement si elle a encore celui du rendu précédent. Un choix de l'artiste est donc gardé.
+- **Affichage** : vignettes et nuanciers passent par la transformation d'affichage du viewport.
+- **Trouvé en route** : Qt refuse un TGA sans le pied TGA 2.0. Les décalques TGA d'E6 (écrits sans lui) n'avaient pas de vignette : corrigé. `sbsrender` (Metal) n'est pas déterministe : entre deux rendus du même matériau, en 2048, jusqu'à 2 % des pixels de la couleur de base changent de plus de 1 % (max 0,47). En 8192, c'est 4,9 %. Ce ne sont pas les « quelques pixels » vus en E6. Les bancs comparent donc un fichier converti à PyOpenColorIO appliqué à ce même fichier, et deux rendus seulement en statistique.
+- **Rocky 9.4** : voir E9. Le code Python est portable (chemins `/opt/Adobe`, `~/.cache`, `~/.local/share`). Essayé le 2026-09-27 sur une copie jetable de la VM Rocky 9.4 de la machine Linux : `setup_subzero.sh` fait le venv (Python 3.9.18, PySide6 6.10.3, OCIO 2.5.2, numpy 2.0.2) ; la fenêtre et le panneau Settings s'ouvrent en Wayland et en X11 ; `subzero_color_check.py` passe en entier (48 ok, lecteur C de `studio.env` compris) ; `subzero_window_ui.py` passe ses règles pures (20 ok). Pas de rendu : pas de `sbsrender` Linux sur la VM.
+
+### E7 — Bibliothèque de matériaux (étagère) · **4-6 j**
+
+- **Onglet « subzero »** dans le panneau du bas, à côté de Browser et Textures, ajouté par `ui_base_hwnd_tabs` sans patch du cœur. Il liste à plat tous les `.sbs` et `.sbsar` trouvés sous les dossiers de `SUBZERO_LIBRARY`, avec recherche et regroupement par dossier.
+- **Vignettes lues, jamais rendues en lot** :
+  - un `.sbsar` contient l'icône de son graphe, celle que montre Painter ;
+  - un `.sbs` contient aussi la vignette de son graphe : balise `<icon>`, PNG compressé par `qCompress` en base64 (334 Ko sur colorful_planks) ;
+  - elles sont extraites par un processus Python et gardées en cache. Un fichier sans vignette n'est rendu (couleur de base) qu'à la demande, pour les seuls éléments visibles (règle R4 de l'étude).
+- **Double-clic** : matériau créé avec les valeurs par défaut, puis fenêtre subzero ouverte dessus, « Live » actif. Chaque double-clic crée une nouvelle instance, comme un glisser depuis l'étagère de Painter. Option à mesurer : créer d'abord en 512 (0,7 s) puis affiner.
+- **Survol** : grande vignette et description du graphe.
+- **La fenêtre suit le matériau sélectionné** : cliquer un matériau subzero dans Materials montre ses réglages, comme dans Painter.
+- Le Browser d'ArmorPaint liste déjà les `.sbs`/`.sbsar`, et un double-clic y ouvre la fenêtre. Y montrer les vignettes demanderait un patch de `ui_files.c` : pas prévu.
+
+### E8 — Interface de réglage façon Painter · **3-5 j** · 🟡 look fait (2026-09-28)
+
+- **Fait le 2026-09-28**, sur une capture du panneau Shader Settings de Painter envoyée par Guillaume (elle tient lieu
+  de maquette) : thème `apply_painter_look` dans `studio_qt.py` (couleurs relevées sur la capture : fonds #333333 et
+  #2b2b2b, bords #4d4d4d, piste #b9b9b9/#4a4a4a, poignée en anneau, accent #378ef0 ; police à 12 px, nombres à
+  l'anglaise), feuille de style Qt et `QSlider` d'origine, flèches et coche en SVG écrits au démarrage. Fenêtre
+  réorganisée : barre du haut (boutons de même largeur, nom du matériau), sections MATERIAL, PARAMETERS et OUTPUTS,
+  groupes repliables à chevron, valeur sur la ligne du libellé, « ↺ » seulement sur une valeur changée, « Restore
+  defaults » (tous les paramètres), état sur une ligne. Panneau Settings à l'identique. Vu sous macOS et sur la VM
+  Rocky 9.4 (Wayland et X11) ; `subzero_window_ui.py` : 75 ok avec OCIO, 53 sans. Le thème du studio (fenêtre
+  d'export) ne change pas.
+- **Reste** : les gestes du curseur ci-dessous (Ctrl, double-clic, clic droit), « Restore defaults » par groupe, et le
+  survol 1:1 des vignettes.
+- **Curseur dessiné à nous** à la place de `QSlider` et de sa case numérique :
+  - libellé à gauche et valeur à droite sur une ligne, piste fine et poignée ronde en dessous ;
+  - clic sur la valeur pour la taper, Ctrl pour un réglage fin, double-clic pour remettre la valeur par défaut, clic droit pour un menu.
+- **Sections** : titres en majuscules, sous-groupes repliables (∨), « Restore defaults » par groupe. Palette et espacements serrés relevés sur une capture de Painter 12.
+- **Survol d'une vignette** : la carte à 1:1 (1 pixel de l'image = 1 pixel physique sur Retina), réduite si elle dépasse l'écran, avec sa taille. Avant l'envoi, seul l'aperçu 512 existe : le 1:1 d'une carte finale suppose un rendu final (Live ou « Send »).
+- Maquette d'abord, validée par Guillaume, puis branchement.
+
+### E9 — subzero standalone · **2-3 j** · ✅ fait (2026-09-28)
+
+Livré : `assets/subzero_app.py` (fenêtre sans ArmorPaint et commandes `render`, `info`, `locate` en JSON),
+`assets/subzero_material.py` (dossier, recette, noms, textures périmées), `subzero_window.LocalHost`, variables
+`SUBZERO_EXPORT_DIR`, `SUBZERO_EXPORT_TEMPLATE`, `SUBZERO_NORMAL_FORMAT`, `SUBZERO_SIZE`. Paquet à part, à côté des
+versions d'ArmorPaint Studio : `tools/release_subzero.py` (archive avec lanceur `bin/subzero` et `setup.sh`, roue pip
+avec la commande `subzero`, `package.py` et `rezbuild.py` de rez ; archives reproductibles, aucun fichier d'Adobe),
+gabarit `release/subzero/`. Demandés en cours de route par Guillaume : le **viewer** des cartes
+(`assets/subzero_viewer.py` : panneau carré, touches 1 à 9, zoom, 1:1, OCIO, tirettes exposition, gamma et saturation
+à la Nuke ; aussi dans ArmorPaint, fermé par défaut), une fenêtre à 512 par défaut, et le **navigateur de paquets**
+(`assets/subzero_browser.py`, sans ArmorPaint : un onglet par dossier de `SUBZERO_LIBRARY`, dossiers ajoutés gardés
+dans `browser.json`). Banc : `.tests/subzero_standalone.py` (45 ok, vrai `sbsrender`) ; `subzero_window_ui.py`,
+`subzero.sh`, `subzero_color_check.py` et `subzero_app.sh` passent toujours. rez : `rez build --install` (paquet
+personnel, dans `local_packages_path`) ; le lanceur prend le Python de la résolution ; `rez pip` écarté (il tirerait
+les dépendances de PyPI en paquets rez). README du projet en anglais : `.github/README.md` (montré par GitHub à la
+place du `readme.md` d'upstream, sans conflit aux merges). Reste : l'essai du paquet sur Rocky 9.4 avec `sbsrender`
+Linux, et les formats que seul le standalone servirait (WebP, DDS).
+
+- La fenêtre sans ArmorPaint : un canal local remplace le protocole. Le chemin de `sbsrender` vient de `SUBZERO_SBSRENDER`, du fichier des préférences studio ou de la détection.
+- **Panneau « Export »** à la place de « Send » :
+  - dossier et modèle de nom (`{name}_{channel}.{ext}`) ;
+  - tous les formats de `sbsrender` ;
+  - taille, choix des cartes, normale OpenGL ou DirectX ;
+  - PNG écrit par conversion d'un rendu rapide si `sbsrender` reste lent en PNG (7,5 s en 2048 en E1).
+- Lanceur `subzero` (script, ou petite app pour le Dock), qui lit aussi `studio.env`. En option, une ligne de commande `subzero export`. Un export en lot reste un automatisme : permis en licence individuelle, pas en licence Entreprise sans accord (R4).
+- Canaux regroupés (ORM et autres) : plus tard, si l'usage le demande.
+- **Linux Rocky 9.4**, demandé avec E11 : le standalone doit y tourner. Prérequis :
+  - Designer pour Linux (RPM, dans `/opt/Adobe/Adobe_Substance_3D_Designer/`) ; moteurs `vk` ou `ogl3` (GPU), `sse2` (CPU) ;
+  - Python 3.9 du système, ou 3.11/3.12 d'AppStream ; roues PySide6 (manylinux_2_28, glibc 2.34 : bon), `opencolorio`, `numpy` ;
+  - bibliothèques de Qt : `xcb-util-cursor`, `libxkbcommon-x11`, `xcb-util-wm/image/keysyms/renderutil`, EGL et GL de mesa, `fontconfig`, toutes dans AppStream (vérifié sur la VM). Seul X11 les veut : une session GNOME Wayland s'en passe.
+
+  `tools/setup_subzero.sh` fait le venv et signale ce qui manque. Essai sur VM fait avec E11 (voir E11). Reste à faire : `subzero.sh` et `subzero_window_ui.py` avec `sbsrender` Linux (Designer pour Linux à installer sur la VM), et le lanceur Linux (script, fichier `.desktop`).
+
+### E10 — `sbsrender` en cage · **0,5 j**
+
+- Tirer les conclusions de l'audit (réseau, programmes lancés, fichiers écrits hors de la sortie ; démons Creative Cloud présents).
+- subzero lance toujours `sbsrender` et `sbscooker` sous `sandbox-exec` : pas de réseau, pas d'écriture hors du cache et de la sortie, pas de services Adobe. Ils ne peuvent alors rien envoyer, quoi qu'ils contiennent. Le surcoût est à mesurer. L'isolement a déjà été vérifié par `test_sbsrender_isole.sh` (étude).
+
+| Chantier E, suite (v1) — total | **13-20 j** |
+|---|---|
+
 ---
 
 ## Synthèse
@@ -818,6 +939,7 @@ En C dans `external/`, sur le modèle de `studio_export_window.c` et de `studio_
 | **C — ShotGrid** | **37** | C1+C2 avant C3-C4 ; C4 dépend de B3/B5 |
 | **D — UDIM natifs** | **56-87** | D0 indépendant ; D2 avant D3-D4 ; C4 publie `<UDIM>` sans dépendre de D |
 | **E — subzero, .sbs/.sbsar par sbsrender (v0)** | **11-16** | Indépendant de A-D ; réutilise `studio_proc` (C1) et le modèle de fenêtre de B6 |
+| **E, suite — subzero v1 (E5-E11)** | **13-20** | Après la v0 ; E8 avant E9 (le standalone reprend la nouvelle interface) |
 | **Total A-C** | **106 j-h** (~5,3 mois à 1 ETP) | |
 
 ### Chemin recommandé

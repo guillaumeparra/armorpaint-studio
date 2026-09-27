@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=subzero
+GenericName=Material renderer
+Comment=Open .sbsar and .sbs materials, tweak them and export their textures
+Exec=@ROOT@/bin/subzero %f
+Icon=applications-graphics
+Terminal=false
+Categories=Graphics;3DGraphics;
+MimeType=application/x-sbsar;application/x-sbs;
+StartupWMClass=subzero

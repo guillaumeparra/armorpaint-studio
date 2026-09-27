@@ -13,6 +13,7 @@ W=${1:-$(mktemp -d)}
 mkdir -p "$W/sub"
 W=$(cd "$W" && pwd)
 [ -x "$APP" ] || { echo "ArmorPaint not found: $APP" >&2; exit 1; }
+export STUDIO_ENV= # lot E5 : aucun studio.env, pas même celui de l'utilisateur
 FAIL=0
 
 # run <attendu> <args...> : lance ArmorPaint depuis le dossier courant, exige le code $RC_WANT (0 ; 1 pour un fichier

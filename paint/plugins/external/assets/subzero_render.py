@@ -2,21 +2,32 @@
 # Cuisson et rendu des .sbs/.sbsar pour subzero (chantier E1), par sbsrender et sbscooker de Designer. Bibliothèque
 # standard seule (Python 3.8+), sans ArmorPaint : la fenêtre (subzero_window.py) s'en sert, les bancs aussi.
 #
-# Le chemin de sbsrender vient d'ArmorPaint (préférence subzero.sbsrender) ; vide, il est cherché dans /Applications.
-# sbscooker est cherché à côté ; sans lui, les .sbs sont refusés et les .sbsar marchent. La bibliothèque sbs:// du
-# cuiseur est trouvée par lui-même, en ../Resources/packages.
+# Le chemin de sbsrender vient d'ArmorPaint (préférence subzero.sbsrender) ; vide, il est cherché là où Designer
+# s'installe (DESIGNER_GLOBS : /Applications sous macOS, /opt/Adobe sous Linux), puis dans le PATH. sbscooker est
+# cherché à côté ; sans lui, les .sbs sont refusés et les .sbsar marchent. La bibliothèque sbs:// du cuiseur est
+# trouvée par lui-même, en ../Resources/packages.
+#
+# Linux (Rocky 9.4, lot E11) : même code. Moteur par défaut : celui que choisit sbsrender (vk, ogl3, sinon sse2 sur
+# CPU) ; SUBZERO_ENGINE le force (sse2 sur une machine sans GPU). Cache en $XDG_CACHE_HOME/subzero (~/.cache/subzero).
 #
 # Mesures (M4, colorful_planks, mtl, 6 sorties) : coût fixe ≈ 0,6 s par processus (dyld, moteur), 512 en 0,68 s,
 # 2048 en 1,17 s en TGA. `--memory-budget` est toujours donné : sans lui, sbsrender lance system_profiler pour lire la
-# VRAM et l'attend 0,3 s. L'EXR est écrit sans compression : tout en EXR, 1,32 s au lieu de 1,73 s en zip.
+# VRAM et l'attend 0,3 s.
+#
+# Formats (lot E6, FORMATS) : ceux qu'ArmorPaint lit, EXR half par défaut. Mesures en 2048, 9 sorties, poste chargé :
+# TGA 1,3 s ; EXR half 1,6 s sans compression (2,5 s en zip) ; EXR float 1,7 s ; PNG 2,0 s en best_speed (4,7 s
+# avec la compression par défaut) ; TIFF 2,3 s ; JPEG 1,6 s. L'EXR « 32f » n'est en float qu'avec
+# --exr-format-use-float (sinon half), et la hauteur y a bien des valeurs qu'un half n'a pas. Les sorties grises sont
+# écrites sur un canal (Y en EXR). ArmorPaint lit le PNG, le TIFF et le PSD en 8 bits même en 16 : pas de 16 bits
+# entiers au menu. Écartés : PSD, BMP (rien de plus que TIFF et TGA), HDR (flottant sans alpha, moins précis que
+# l'EXR half), DDS, WebP, WBMP, PSB (qu'ArmorPaint ne lit pas).
 #
 # sbsrender rend le code 0 sur une sortie introuvable (« Cannot find graph output ») ou un bitmap manquant (image
 # noire) : chaque fichier attendu est vérifié, et les lignes [ERROR]/[WARNING] sont relevées. Il ne crée pas le
 # dossier de sortie (code 47). Il échoue aussi, au hasard (≈ 1 fois sur 8 sur colorful_planks), quand un même appel
 # écrit deux formats (TGA et EXR, ou TGA et TIFF) : « Result cannot be saved », code 47. Un format par appel ne
-# l'a jamais fait (0 sur 47) : les sorties EXR partent dans un second processus, lancé en même temps que le premier.
-# Chacun recalcule le graphe : ≈ +0,5 s en 2048 (1,64 s), d'où l'EXR réservé aux projets en 16 ou 32 bits. Le TGA
-# « 16 bits » n'existe pas : sbsrender l'écrit en 8 bits sans rien dire.
+# l'a jamais fait (0 sur 47) : toutes les sorties d'un rendu sont dans le même format. Le TGA « 16 bits » n'existe
+# pas : sbsrender l'écrit en 8 bits sans rien dire.
 #
 # Le rendu se fait dans un dossier temporaire à côté de la destination, puis les fichiers y sont renommés : ArmorPaint
 # ne lit jamais un fichier à moitié écrit, et un rendu annulé ne touche à rien.
@@ -24,7 +35,7 @@
 #   python3 subzero_render.py [--sbsrender CHEMIN] locate
 #   python3 subzero_render.py [--sbsrender CHEMIN] cook fichier.sbs
 #   python3 subzero_render.py [--sbsrender CHEMIN] render fichier.sbs[ar] --out DOSSIER [--graph URL] [--preset NOM]
-#       [--size 11] [--set id=valeur]... [--entry id=image]... [--output id[=nom]]... [--exr id]... [--engine mtl]
+#       [--size 11] [--set id=valeur]... [--entry id=image]... [--output id[=nom]]... [--format exr16] [--engine mtl]
 # Résultat en JSON sur stdout.
 
 import glob
@@ -41,11 +52,76 @@ import time
 
 import subzero_meta
 
-DESIGNER_GLOB = "/Applications/Adobe Substance 3D Designer*/*.app/Contents/MacOS/sbsrender"
-CACHE_DIR = os.path.expanduser(os.environ.get("SUBZERO_CACHE", "~/Library/Caches/subzero"))
+EXE = ".exe" if sys.platform == "win32" else ""
+# Installations de Designer, la plus récente en dernier après tri.
+DESIGNER_GLOBS = {
+    "darwin": ["/Applications/Adobe Substance 3D Designer*/*.app/Contents/MacOS/sbsrender"],
+    "win32": ["C:/Program Files/Adobe/Adobe Substance 3D Designer*/sbsrender.exe"],
+}.get(sys.platform, ["/opt/Adobe/Adobe_Substance_3D_Designer*/sbsrender", "/opt/Adobe/Adobe Substance 3D Designer*/sbsrender"])
+DESIGNER_WHERE = {"darwin": "/Applications", "win32": "C:/Program Files/Adobe"}.get(sys.platform, "/opt/Adobe")
+
+
+def _cache_dir():
+    if sys.platform == "darwin":
+        return "~/Library/Caches/subzero"
+    if sys.platform == "win32":
+        return os.path.join(os.environ.get("LOCALAPPDATA") or "~", "subzero", "cache")
+    return os.path.join(os.environ.get("XDG_CACHE_HOME") or "~/.cache", "subzero")
+
+
+CACHE_DIR = os.path.expanduser(os.environ.get("SUBZERO_CACHE") or _cache_dir())
 MEMORY_BUDGET_MB = 2000
-ENGINE = "mtl"
-PREFERENCES_HINT = "set its path in Preferences > subzero"
+# mtl (GPU, celui de Designer et de Painter sous macOS), neon (CPU, macOS), vk ou ogl3 (GPU, Linux), sse2 (CPU, Linux) ;
+# "" : pas d'option --engine, sbsrender choisit.
+ENGINE = os.environ.get("SUBZERO_ENGINE") or ("mtl" if sys.platform == "darwin" else "")
+
+# Formats de sortie (lot E6), dans l'ordre du menu de la fenêtre. float : valeurs flottantes, que l'import OCIO
+# d'ArmorPaint lirait comme de la lumière linéaire (la couleur de base est pourtant encodée sRGB, comme en 8 bits).
+FORMATS = {
+    "exr16": {"label": "EXR 16f", "ext": ".exr", "float": True, "alpha": True,
+              "args": ["--output-format", "exr", "--output-bit-depth", "16f"]},
+    "exr32": {"label": "EXR 32f", "ext": ".exr", "float": True, "alpha": True,
+              "args": ["--output-format", "exr", "--output-bit-depth", "32f", "--exr-format-use-float"]},
+    "png": {"label": "PNG 8", "ext": ".png", "float": False, "alpha": True,
+            "args": ["--output-format", "png", "--output-bit-depth", "8", "--png-format-compression", "best_speed"]},
+    "tga": {"label": "TGA 8", "ext": ".tga", "float": False, "alpha": True,
+            "args": ["--output-format", "tga", "--output-bit-depth", "8"]},
+    "tif": {"label": "TIFF 8", "ext": ".tif", "float": False, "alpha": True,
+            "args": ["--output-format", "tif", "--output-bit-depth", "8"]},
+    "jpg": {"label": "JPEG", "ext": ".jpg", "float": False, "alpha": False,
+            "args": ["--output-format", "jpg", "--output-bit-depth", "8"]},
+}
+PREVIEW_FORMAT = "tga"  # aperçus 512 du cache : le plus rapide, et Qt le lit
+EXR_COMPRESSIONS = ("none", "zip", "piz", "pxr24", "b44")  # celles de sbsrender ; la fenêtre ne lit que none et zip
+EXR_COMPRESSION = os.environ.get("SUBZERO_EXR_COMPRESSION") or "none"  # none : le plus rapide à écrire et à lire
+
+
+def default_format():
+    """$SUBZERO_FORMAT s'il est au menu, sinon EXR half."""
+    fmt = os.environ.get("SUBZERO_FORMAT") or ""
+    return fmt if fmt in FORMATS else "exr16"
+
+
+def format_args(fmt):
+    if fmt not in FORMATS:
+        raise Error("unknown output format %s (%s)" % (fmt, ", ".join(FORMATS)))
+    args = list(FORMATS[fmt]["args"])
+    if FORMATS[fmt]["ext"] == ".exr":
+        if EXR_COMPRESSION not in EXR_COMPRESSIONS:
+            raise Error("unknown EXR compression %s in $SUBZERO_EXR_COMPRESSION (%s)" % (
+                EXR_COMPRESSION, ", ".join(EXR_COMPRESSIONS)))
+        args += ["--exr-format-compression", EXR_COMPRESSION]
+    return args
+
+
+def _hint():
+    """Ce qu'il faut régler quand sbsrender manque : la variable d'environnement si elle est définie (lot E5), sinon
+    la préférence."""
+    env = os.environ.get("SUBZERO_SBSRENDER")
+    if env:
+        return "check $SUBZERO_SBSRENDER (%s), which overrides Preferences > subzero" % env
+    return "set its path in Preferences > subzero"
+
 LOG_LINE = re.compile(r"^\[(ERROR|WARNING)\]\[[^\]]*\](.*)$")
 
 
@@ -66,34 +142,36 @@ def _version(sbsrender):
         try:
             p = subprocess.run([sbsrender, "--version"], capture_output=True, text=True, timeout=20)
         except (OSError, subprocess.SubprocessError) as e:
-            raise Error("%s does not run (%s): %s" % (sbsrender, e, PREFERENCES_HINT))
+            raise Error("%s does not run (%s): %s" % (sbsrender, e, _hint()))
         m = re.search(r"version\s+(\S+)(?:\s+\(build\s+(\d+))?", p.stdout + p.stderr)
         if p.returncode != 0 or m is None:
-            raise Error("%s is not sbsrender (no version): %s" % (sbsrender, PREFERENCES_HINT))
+            raise Error("%s is not sbsrender (no version): %s" % (sbsrender, _hint()))
         _versions[key] = m.group(1) + (" (build %s)" % m.group(2) if m.group(2) else "")
     return _versions[key]
 
 
 def locate(path=""):
-    """Outils à partir du chemin de la préférence (vide : recherche dans /Applications). Rend {"sbsrender",
+    """Outils à partir du chemin de la préférence (vide : recherche de Designer, puis PATH). Rend {"sbsrender",
     "sbscooker" (None si absent), "version", "detected"} ou lève Error avec un message qui dit quoi régler."""
     path = os.path.expanduser((path or "").strip())
     detected = not path
     if detected:
-        found = sorted(glob.glob(DESIGNER_GLOB))
+        found = sorted(f for pattern in DESIGNER_GLOBS for f in glob.glob(pattern)) or \
+            [f for f in [shutil.which("sbsrender")] if f]
         if not found:
-            raise Error("sbsrender not found (no Adobe Substance 3D Designer in /Applications): " + PREFERENCES_HINT)
+            raise Error("sbsrender not found (no Adobe Substance 3D Designer in %s, none in the PATH): %s" % (
+                DESIGNER_WHERE, _hint()))
         path = found[-1]
     if os.path.isdir(path):  # dossier donné : l'app de Designer, son Contents, ou le dossier de sbsrender
-        for sub in ("Contents/MacOS/sbsrender", "MacOS/sbsrender", "sbsrender"):
+        for sub in ("Contents/MacOS/sbsrender", "MacOS/sbsrender", "sbsrender" + EXE):
             if os.path.isfile(os.path.join(path, sub)):
                 path = os.path.join(path, sub)
                 break
     if not os.path.isfile(path):
-        raise Error("sbsrender not found at %s: %s" % (path, PREFERENCES_HINT))
+        raise Error("sbsrender not found at %s: %s" % (path, _hint()))
     if not os.access(path, os.X_OK):
-        raise Error("%s is not executable: %s" % (path, PREFERENCES_HINT))
-    cooker = os.path.join(os.path.dirname(path), "sbscooker")
+        raise Error("%s is not executable: %s" % (path, _hint()))
+    cooker = os.path.join(os.path.dirname(path), "sbscooker" + EXE)
     return {"sbsrender": path, "sbscooker": cooker if os.access(cooker, os.X_OK) else None, "version": _version(path),
             "detected": detected}
 
@@ -113,7 +191,7 @@ def _spawn(argv, cancel):
         proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 start_new_session=True, cwd=tempfile.gettempdir())
     except OSError as e:
-        raise Error("%s does not start (%s): %s" % (argv[0], e, PREFERENCES_HINT))
+        raise Error("%s does not start (%s): %s" % (argv[0], e, _hint()))
     if cancel is not None:
         cancel(proc)
     return proc
@@ -257,15 +335,14 @@ def _report(stdout):
     return report if isinstance(report, list) else []
 
 
-def render_args(sbsar, graph, out_dir, values=None, entries=None, preset=None, size=None, outputs=None, exr=False,
-                engine=ENGINE):
+def render_args(sbsar, graph, out_dir, values=None, entries=None, preset=None, size=None, outputs=None,
+                fmt=PREVIEW_FORMAT, engine=ENGINE):
     """Arguments de sbsrender. values : {id: valeur} (unités du moteur) ; entries : {id: image} ; size : (log2 x,
-    log2 y) ; outputs : identifiants à rendre ; exr : EXR half non compressé (sinon TGA 8 bits), un seul format par appel."""
+    log2 y) ; outputs : identifiants à rendre ; fmt : clé de FORMATS, un seul format par appel."""
     by_id = {i["identifier"]: i for i in graph["inputs"]}
-    fmt = ["--output-format", "exr", "--output-bit-depth", "16f", "--exr-format-compression", "none"] if exr else \
-        ["--output-format", "tga", "--output-bit-depth", "8"]
-    args = ["render", sbsar, "--input-graph", graph["pkgurl"], "--engine", engine, "--memory-budget",
-            str(MEMORY_BUDGET_MB), "--output-path", out_dir, "--output-name", "{outputNodeName}"] + fmt
+    args = ["render", sbsar, "--input-graph", graph["pkgurl"]] + (["--engine", engine] if engine else []) + [
+        "--memory-budget", str(MEMORY_BUDGET_MB), "--output-path", out_dir, "--output-name", "{outputNodeName}"] + \
+        format_args(fmt)
     if preset:
         args += ["--use-preset", preset]
     if size is not None:
@@ -287,10 +364,11 @@ def render_args(sbsar, graph, out_dir, values=None, entries=None, preset=None, s
 
 
 def render(sbsar, graph, out_dir, tools, values=None, entries=None, preset=None, size=None, outputs=None, names=None,
-           exr=(), engine=ENGINE, cancel=None):
-    """Rend le graphe dans out_dir. names : {sortie: nom de fichier sans extension} (défaut : l'identifiant). Les
-    fichiers déjà là sont remplacés seulement si tout le rendu a réussi. Rend {"files": {sortie: chemin}, "warnings",
-    "seconds", "argv"} ; lève Error si une sortie manque, si sbsrender échoue, ou sur annulation."""
+           fmt=PREVIEW_FORMAT, engine=ENGINE, cancel=None):
+    """Rend le graphe dans out_dir, au format fmt (clé de FORMATS). names : {sortie: nom de fichier sans extension}
+    (défaut : l'identifiant). Les fichiers déjà là sont remplacés seulement si tout le rendu a réussi. Rend {"files":
+    {sortie: chemin}, "warnings", "seconds", "argv"} ; lève Error si une sortie manque, si sbsrender échoue, ou sur
+    annulation."""
     ids = [o["identifier"] for o in graph["outputs"] if o["type"] == "image"]
     wanted = list(outputs) if outputs is not None else ids
     missing = [o for o in wanted if o not in ids]
@@ -302,10 +380,8 @@ def render(sbsar, graph, out_dir, tools, values=None, entries=None, preset=None,
     os.makedirs(out_dir, exist_ok=True)
     work = tempfile.mkdtemp(prefix=".render-", dir=out_dir)
     try:
-        groups = [(False, [o for o in wanted if o not in exr]), (True, [o for o in wanted if o in exr])]
-        groups = [(is_exr, outs) for is_exr, outs in groups if outs]
-        argvs = [[tools["sbsrender"]] + render_args(sbsar, graph, work, values, entries, preset, size, outs, is_exr,
-                                                    engine) for is_exr, outs in groups]
+        argvs = [[tools["sbsrender"]] + render_args(sbsar, graph, work, values, entries, preset, size, wanted, fmt,
+                                                    engine)]
         results, seconds = _run_all(argvs, cancel=cancel)
         errors, warnings, written = [], [], {}
         for code, out, err in results:
@@ -322,8 +398,7 @@ def render(sbsar, graph, out_dir, tools, values=None, entries=None, preset=None,
                         written[o.get("identifier")] = o["value"]
         files = {}
         for o in wanted:
-            ext = ".exr" if o in exr else ".tga"
-            path = written.get(o) or os.path.join(work, o + ext)
+            path = written.get(o) or os.path.join(work, o + FORMATS[fmt]["ext"])
             if not os.path.isfile(path) or os.path.getsize(path) == 0:
                 raise Error("sbsrender wrote no file for output %s%s" % (o, ": " + "; ".join(errors + warnings)
                                                                            if errors or warnings else ""))
@@ -360,7 +435,7 @@ def _main(argv):
     r.add_argument("--set", action="append", default=[], metavar="ID=VALUE")
     r.add_argument("--entry", action="append", default=[], metavar="ID=IMAGE")
     r.add_argument("--output", action="append", metavar="ID[=NAME]")
-    r.add_argument("--exr", action="append", default=[], metavar="ID")
+    r.add_argument("--format", default=None, choices=list(FORMATS), help="default: $SUBZERO_FORMAT, else exr16")
     r.add_argument("--engine", default=ENGINE)
     a = ap.parse_args(argv)
     try:
@@ -383,8 +458,8 @@ def _main(argv):
                 outputs = [o.partition("=")[0] for o in a.output]
                 names = {o.partition("=")[0]: o.partition("=")[2] for o in a.output if "=" in o}
             size = (a.size, a.size) if a.size else None
-            result = render(pkg["sbsar"], graph, a.out, tools, values, entries, a.preset, size, outputs, names, a.exr,
-                            a.engine)
+            result = render(pkg["sbsar"], graph, a.out, tools, values, entries, a.preset, size, outputs, names,
+                            a.format or default_format(), a.engine)
             result["cook"] = pkg["cook"]
         print(json.dumps({"ok": True, "result": result}, ensure_ascii=False))
         return 0

@@ -14,6 +14,7 @@ W=${1:-$(mktemp -d)}
 mkdir -p "$W/cfg"
 W=$(cd "$W" && pwd)
 [ -x "$APP" ] || { echo "ArmorPaint not found: $APP" >&2; exit 1; }
+export STUDIO_ENV= # lot E5 : aucun studio.env, pas même celui de l'utilisateur
 [ -x "$PY" ] || { echo "PyOpenColorIO absent : lancer d'abord .tests/ocio.sh" >&2; exit 1; }
 FAIL=0
 
