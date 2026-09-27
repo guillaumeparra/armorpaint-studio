@@ -1331,6 +1331,10 @@ lot D1).
   pointent (Picker, ColorID, Material, Cursor) gardent le maillage fusionné, dont leurs shaders lisent les calques en
   espace atlas ; un filtre de calque (un seul objet affiché) passe par le dessin upstream.
 
+**Contenu (lot D2).** Le contexte de tuile ([udim-tiles](#udim-tiles)) : magasins de contenus par vue et par tuile,
+`util_udim_set_tile`, règle des calques à tuiles, suivi de la table, échanges et sauvegardes d'undo par tuile, boucles
+sur les tuiles des opérations de calque, dessin du gbuffer objet par objet.
+
 Le commentaire d'en-tête d'`util_udim.h` pose la règle du lot D1 : un maillage UDIM garde un objet de peinture par
 tuile, nommé `<objet>.<tuile>` comme dans le format upstream, pour que le `.arm` reste lisible par ArmorPaint et par
 les builds studio précédents. Pour régénérer : `git diff upstream studio -- paint/sources/util/util_udim.c
@@ -1723,3 +1727,60 @@ remplissage est dans la base color (grise, uniforme, sans le patch).
 
 **Non couvert.** `project_new` appelé d'ailleurs (menu, `import_arm`) garde le comportement upstream : pas de script
 derrière pour peindre dans la même image.
+
+---
+
+## udim-tiles
+
+| | |
+|---|---|
+| Fichiers | `base/sources/iron.h` (`gpu_delete_texture`), `paint/sources/history.c` (`history_copy_to_undo`), `paint/sources/slots/slot_layer.c` (`slot_layer_swap`, `_clear`, `_invert_mask`, `_duplicate`, `_resize_and_set_bits`), `paint/sources/render/make_mesh.c` (`make_mesh_run`), `paint/sources/render/render_path_base.c` (`render_path_base_commands`, `_draw_gbuffer`), `paint/sources/render/render_path_paint.c` (`render_path_paint_bind_layers`, `_unbind_layers`), `paint/sources/util/util_mesh.c` (nouveau `util_mesh_udim_tile_table`) |
+| Commit studio | branche `d2` (lot D2, sous-lot D2a), fusionnée dans `studio` à la fin du lot |
+| Validé contre | upstream `85f6cf1c` (2026-09-27) |
+| Injection | points d'appel et boucles sur les tuiles ; la logique dans `util_udim.c` ([udim-core](#udim-core)) |
+
+**Motif.** Lot D2 (`ARMORPAINT_UDIM.md` §7, option B phase 2) : un jeu de textures par tuile pour chaque calque, à
+la place de l'atlas upstream (`99156dfc`), où les tuiles partagent une texture découpée en cases. L'atlas divise la
+résolution par le côté de la grille et renumérote les cases quand la table des tuiles change (L17 : la peinture passe
+à une autre tuile).
+
+**Contexte de tuile par échange de contenu.** Le pointeur `gpu_texture_t *` d'une texture de calque est recopié
+partout (render target, emplacements d'undo, calque live, caches) : il reste une **vue** stable, et c'est son contenu,
+la structure elle-même, qui change avec la tuile. `util_udim.c` tient pour chaque vue un magasin de contenus rangés
+par numéro de tuile ; `util_udim_set_tile(t)` met la tuile t dans toutes les vues (un 1 × 1 transparent pour un objet
+sans tuile). Le code upstream travaille sans changement sur la tuile du contexte.
+
+**Points d'appel (D2a).**
+- `iron.h` : `gpu_delete_texture` prévient `util_udim.c` (pointeur de fonction `gpu_texture_deleting`, `NULL` par
+  défaut) ; le magasin d'une vue supprimée libère ses tuiles. `base/` ne connaît pas `paint/`, d'où le pointeur.
+- `render_path_base.c` : `util_udim_sync()` avant chaque rendu (calques à tuiles selon la règle, magasins qui suivent
+  la table) ; le gbuffer dessine chaque objet avec sa tuile (`util_udim_draw_meshes`).
+- `make_mesh.c` : les calques sont lus en `tex_coord`, plus en `tex_coord_atlas` (bloc upstream retiré).
+- `slot_layer.c` : Clear, Invert Mask et Duplicate bouclent sur les tuiles (`util_udim_loop_begin/tile/end`) ; Invert
+  remplace le contenu de la vue (`util_udim_replace`) au lieu de son pointeur ; le redimensionnement passe par
+  `util_udim_resize_layer` ; l'échange avec un emplacement d'undo par `util_udim_swap_layers`.
+- `history.c` : `history_copy_to_undo` d'un calque à tuiles sauve toutes ses tuiles (`util_udim_copy_to_undo`, qui
+  rappelle la copie upstream pour chaque tuile).
+- `render_path_paint.c` : pas de calque live (aperçu de pinceau, outil Material) sur un calque à tuiles, jusqu'à D2b.
+- `util_mesh.c` : la table des tuiles triée, pour les magasins.
+
+**Règle.** Calques et masques à tuiles quand la table a au moins deux tuiles et `uv_map != 1`, sauf un calque limité
+à un objet sans tuile ; un masque suit son calque. Une tuile qui apparaît reçoit le fond de chaque calque (son texel
+(0, 0)) ; une qui disparaît est libérée ; un calque qui passe aux tuiles garde sa texture sur la tuile du contexte.
+Un emplacement d'undo ne tient que les tuiles qu'il a sauvées ; s'il avait sauvé tout le calque, il reçoit à
+l'échange les tuiles apparues depuis. UDIM coupé : chaque calque revient à une texture.
+
+Pour régénérer : `git diff 06655d76 -- <les sept fichiers>` (`06655d76` : `studio` avant le lot D2) ; `iron.h` porte
+aussi ocio-import, `util_mesh.c` udim-material-uv et udim-tile-limit, `render_path_paint.c` udim-material-uv.
+
+**Test.** `.tests/udim_tiles_app.sh` : passage aux tuiles, Clear / Undo / Redo, Duplicate, Delete et Undo (sans
+fuite), résolution du projet, masque et Invert, vue 3D (gbuffer au centre de chaque tuile), maillage ajouté dans une
+nouvelle tuile (L17 : les tuiles gardent leur peinture), UDIM coupé. Au 2026-09-27 : 19 contrôles passent.
+
+**Signes que l'upstream l'a changé.** `gpu_delete_texture`, `history_copy_to_undo` ou `slot_layer_swap` réécrits ;
+le bloc `tex_coord_atlas` de `make_mesh_run` modifié (l'upstream retravaille ses UDIM) ; `render_path_draw_meshes`
+remplacé dans `render_path_base_draw_gbuffer`.
+
+**Non couvert (D2a).** La peinture, le remplissage, le bake, les cartes et les pipettes (D2b) ; flatten, fusion et
+masques en pile (D2c) ; export (D2d) ; `.arm` et migration des projets atlas (D2e). Sur la branche `d2` tant que le
+lot n'est pas fini : la peinture d'un projet UDIM y est cassée.

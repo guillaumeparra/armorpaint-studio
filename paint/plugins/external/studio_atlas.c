@@ -24,6 +24,7 @@ extern project_t *g_project;
 extern int        plugins_split_by; // paint/plugins/plugins.c : découpage lu par l'import FBX
 extern bool       ui_box_show;
 extern char      *ui_box_title;
+extern bool       import_mesh_append;
 extern char      *console_message;
 extern float      console_message_timer;
 extern i32        base_bits;
@@ -45,6 +46,7 @@ slot_layer_t     *layers_new_group(void);
 void              history_new_group(void);
 extern f32        layers_default_rough;
 void              import_mesh_run(char *path, bool clear_layers, bool replace_existing, bool keep_camera);
+void              import_mesh_finish_import(void *_);
 i32               util_mesh_udim_tile(char *name);
 bool              util_mesh_udim_active(void);
 i32               util_mesh_atlas_stride(void);
@@ -55,6 +57,23 @@ void              console_log(char *s);
 char             *tab_meshes_rename_object(i32 i, char *typed);
 void              tab_meshes_sort_by_name(void);
 void              tab_meshes_sort_hierarchy(void);
+char             *util_udim_stats(void);
+char             *util_udim_view_stats(gpu_texture_t *view);
+void              util_udim_set_tile(i32 tile);
+i32               util_udim_tile(void);
+void              util_udim_sync(void);
+buffer_t         *gpu_get_texture_pixels(gpu_texture_t *image);
+void              history_duplicate_layer(void);
+void              layers_duplicate_layer(slot_layer_t *l);
+void              tab_layers_delete_layer(slot_layer_t *l);
+void              history_clear_layer(void);
+void              history_invert_mask(void);
+void              slot_layer_invert_mask(slot_layer_t *raw);
+void              history_undo(void);
+void              history_redo(void);
+extern any_array_t *history_undo_layers;
+i32               color_from_floats(f32 r, f32 g, f32 b, f32 a);
+void              _gpu_begin(gpu_texture_t *render_target, any_array_t *additional, gpu_texture_t *depth_buffer, gpu_clear_t flags, unsigned color, float depth);
 
 #define DEFAULT_NAME "Atlas 1"
 #define MAX_NAME     64
@@ -455,11 +474,11 @@ void studio_run_next_frames(int from) {
 // Importe un maillage à la place de celui du projet (calques vidés), découpé comme le « Split By » de la boîte
 // d'import : 0 par objet, 1 par matériau, 2 par tuile UDIM, 3 par matériau et par tuile UDIM (un jeu de textures par
 // matériau). Pour les scripts batch et les bancs.
-static minic_val_t mn_studio_import_mesh(minic_val_t *a, int n) {
+static int studio_import(minic_val_t *a, int n, bool append) {
 	char *path  = minic_arg_p(a, n, 0);
 	int   split = (int)minic_arg_i(a, n, 1);
 	if (path == NULL || split < SPLIT_TYPE_OBJECT || split > SPLIT_TYPE_MATERIAL_UDIM) {
-		return minic_val_int(0);
+		return 0;
 	}
 	g_context->split_by = (split_type_t)split;
 	plugins_split_by    = split;
@@ -471,13 +490,29 @@ static minic_val_t mn_studio_import_mesh(minic_val_t *a, int n) {
 	// La fin de l'import (calques remis à zéro, objets triés par nom et fusionnés) attend l'image suivante : faite ici,
 	// pour que la suite du script (jeux de textures, masques de calque) voie les objets dans leur ordre final.
 	i32 before = (i32)_sys_on_next_frames->length;
-	import_mesh_run(path, true, true, false);
+	i32 first  = (i32)g_project->_->paint_objects->length;
+	import_mesh_run(path, !append, !append, append);
 	studio_run_next_frames(before);
+	if (append) { // Comme le bouton Append de la boîte d'import : la fin de l'import n'est pas programmée
+		if ((i32)g_project->_->paint_objects->length > first) {
+			import_mesh_finish_import(NULL);
+		}
+		import_mesh_append = false;
+	}
 	if (in_use) {
 		draw_begin(current, false, 0);
 	}
 	g_context->ddirty = 2;
-	return minic_val_int(1);
+	return 1;
+}
+
+static minic_val_t mn_studio_import_mesh(minic_val_t *a, int n) {
+	return minic_val_int(studio_import(a, n, false));
+}
+
+// Ajoute un maillage à ceux du projet (calques gardés), comme l'import avec « Replace Existing » décoché.
+static minic_val_t mn_studio_append_mesh(minic_val_t *a, int n) {
+	return minic_val_int(studio_import(a, n, true));
 }
 
 // Titre de la boîte de dialogue ouverte, "" sans boîte : un script batch voit qu'ArmorPaint attend quelqu'un (dépliage
@@ -692,6 +727,237 @@ static minic_val_t mn_studio_project_res(minic_val_t *a, int n) {
 	return minic_val_int(1);
 }
 
+// Tuiles UDIM (lot D2) : table, tuile du contexte, magasins. Pour les bancs.
+static minic_val_t mn_studio_udim_stats(minic_val_t *a, int n) {
+	(void)a, (void)n;
+	return minic_val_ptr(util_udim_stats());
+}
+
+static char *udim_views(slot_layer_t *l) {
+	return string("base=[%s] nor=[%s] pack=[%s]", util_udim_view_stats(l->texpaint), util_udim_view_stats(l->texpaint_nor),
+	              util_udim_view_stats(l->texpaint_pack));
+}
+
+// Textures du calque i (indice dans g_project->_->layers), ou de l'emplacement d'undo -1 - i : une ligne par texture,
+// « single WxH » ou « cur=<tuile du contexte> partial=<0|1> tiles=<tuiles> WxH ».
+static minic_val_t mn_studio_udim_layer(minic_val_t *a, int n) {
+	int i = (int)minic_arg_i(a, n, 0);
+	if (i < 0) {
+		i = -1 - i;
+		if (history_undo_layers == NULL || i >= (int)history_undo_layers->length) {
+			return minic_val_ptr(string_copy("-"));
+		}
+		return minic_val_ptr(udim_views(history_undo_layers->buffer[i]));
+	}
+	slot_layer_t_array_t *layers = g_project->_->layers;
+	if (i >= (int)layers->length) {
+		return minic_val_ptr(string_copy("-"));
+	}
+	return minic_val_ptr(udim_views(layers->buffer[i]));
+}
+
+static float half_to_float(uint16_t h) {
+	uint32_t sign = (uint32_t)(h & 0x8000) << 16, exp = (h >> 10) & 0x1f, mant = h & 0x3ff, bits;
+	if (exp == 0) {
+		float f = mant / 1024.0f / 16384.0f;
+		return sign ? -f : f;
+	}
+	bits = exp == 31 ? sign | 0x7f800000 | (mant << 13) : sign | ((exp + 112) << 23) | (mant << 13);
+	float f;
+	memcpy(&f, &bits, 4);
+	return f;
+}
+
+static char *pixel_text(gpu_texture_t *t, float *c) {
+#ifdef __APPLE__
+	if (t->format == GPU_TEXTURE_FORMAT_RGBA32) { // Cibles de rendu 8 bits en BGRA sous Metal
+		float r = c[0];
+		c[0]    = c[2];
+		c[2]    = r;
+	}
+#endif
+	return string("%.3f %.3f %.3f %.3f", c[0], c[1], c[2], c[3]);
+}
+
+// Pixel (x, y) de la texture channel (0 base, 1 nor, 2 pack) du calque i sur la tuile tile (-1 : tuile du contexte),
+// « r g b a » de 0 à 1 ; « - » hors bornes.
+static minic_val_t mn_studio_udim_pixel(minic_val_t *a, int n) {
+	int                   i       = (int)minic_arg_i(a, n, 0);
+	int                   channel = (int)minic_arg_i(a, n, 1);
+	int                   tile    = (int)minic_arg_i(a, n, 2);
+	int                   x       = (int)minic_arg_i(a, n, 3);
+	int                   y       = (int)minic_arg_i(a, n, 4);
+	slot_layer_t_array_t *layers  = g_project->_->layers;
+	if (i < 0 || i >= (int)layers->length || channel < 0 || channel > 2) {
+		return minic_val_ptr(string_copy("-"));
+	}
+	gpu_texture_t *current = _draw_current;
+	bool           in_use  = gpu_in_use;
+	if (in_use) {
+		draw_end();
+	}
+	i32 saved = util_udim_tile();
+	if (tile >= 0) {
+		util_udim_set_tile(tile);
+	}
+	slot_layer_t  *l   = layers->buffer[i];
+	gpu_texture_t *t   = channel == 0 ? l->texpaint : channel == 1 ? l->texpaint_nor : l->texpaint_pack;
+	char          *out = string_copy("-");
+	if (t != NULL && x >= 0 && y >= 0 && x < (int)t->width && y < (int)t->height) {
+		buffer_t *b = gpu_get_texture_pixels(t);
+		float     c[4];
+		int       at = y * (int)t->width + x;
+		for (int k = 0; k < 4; ++k) {
+			c[k] = t->format == GPU_TEXTURE_FORMAT_RGBA128  ? ((float *)b->buffer)[at * 4 + k]
+			       : t->format == GPU_TEXTURE_FORMAT_RGBA64 ? half_to_float(((uint16_t *)b->buffer)[at * 4 + k])
+			                                                : b->buffer[at * 4 + k] / 255.0f;
+		}
+		out = pixel_text(t, c);
+	}
+	util_udim_set_tile(saved);
+	if (in_use) {
+		draw_begin(current, false, 0);
+	}
+	return minic_val_ptr(out);
+}
+
+// Vide la tuile tile (-1 : tuile du contexte) de la texture channel (0 base, 1 nor, 2 pack) du calque i à la couleur
+// (r, g, b, a). Pour les bancs : une couleur par tuile sans peindre. 1 si fait.
+static minic_val_t mn_studio_udim_fill(minic_val_t *a, int n) {
+	int                   i       = (int)minic_arg_i(a, n, 0);
+	int                   channel = (int)minic_arg_i(a, n, 1);
+	int                   tile    = (int)minic_arg_i(a, n, 2);
+	slot_layer_t_array_t *layers  = g_project->_->layers;
+	if (i < 0 || i >= (int)layers->length || channel < 0 || channel > 2) {
+		return minic_val_int(0);
+	}
+	slot_layer_t  *l = layers->buffer[i];
+	gpu_texture_t *t = channel == 0 ? l->texpaint : channel == 1 ? l->texpaint_nor : l->texpaint_pack;
+	if (t == NULL) {
+		return minic_val_int(0);
+	}
+	gpu_texture_t *current = _draw_current;
+	bool           in_use  = gpu_in_use;
+	if (in_use) {
+		draw_end();
+	}
+	i32 saved = util_udim_tile();
+	if (tile >= 0) {
+		util_udim_set_tile(tile);
+	}
+	int done = util_udim_tile() == tile || tile < 0;
+	if (done) {
+		i32 color = color_from_floats((f32)minic_arg_f(a, n, 3), (f32)minic_arg_f(a, n, 4), (f32)minic_arg_f(a, n, 5), (f32)minic_arg_f(a, n, 6));
+		_gpu_begin(t, NULL, NULL, GPU_CLEAR_COLOR, color, 0.0);
+		gpu_end();
+	}
+	util_udim_set_tile(saved);
+	if (in_use) {
+		draw_begin(current, false, 0);
+	}
+	g_context->ddirty       = 2;
+	g_context->layers_preview_dirty = true;
+	return minic_val_int(done);
+}
+
+// Pixel d'une render target du chemin de rendu (gbuffer1 : couleur de base du viewport) là où se voit le point du
+// monde (x, y, z), « r g b a » de 0 à 1 ; « - » si elle n'existe pas ou si le point est hors de l'écran.
+static minic_val_t mn_studio_rt_pixel(minic_val_t *a, int n) {
+	char            *name = minic_arg_p(a, n, 0);
+	render_target_t *rt   = name != NULL ? any_map_get(render_path_render_targets, name) : NULL;
+	if (rt == NULL || rt->_image == NULL) {
+		return minic_val_ptr(string_copy("-"));
+	}
+	gpu_texture_t *current = _draw_current;
+	bool           in_use  = gpu_in_use;
+	if (in_use) {
+		draw_end();
+	}
+	gpu_texture_t *t    = rt->_image;
+	vec4_t         clip = vec4_apply_mat4((vec4_t){(f32)minic_arg_f(a, n, 1), (f32)minic_arg_f(a, n, 2), (f32)minic_arg_f(a, n, 3), 1.0f},
+	                                      scene_camera->vp);
+	int            x    = (int)((clip.x / clip.w + 1.0f) * 0.5f * t->width);
+	int            y    = (int)((-clip.y / clip.w + 1.0f) * 0.5f * t->height);
+	char          *out  = string_copy("-");
+	if (clip.w > 0.0f && x >= 0 && y >= 0 && x < (int)t->width && y < (int)t->height) {
+		buffer_t *b = gpu_get_texture_pixels(t);
+		float     c[4];
+		int       at = y * (int)t->width + x;
+		for (int k = 0; k < 4; ++k) {
+			c[k] = t->format == GPU_TEXTURE_FORMAT_RGBA128  ? ((float *)b->buffer)[at * 4 + k]
+			       : t->format == GPU_TEXTURE_FORMAT_RGBA64 ? half_to_float(((uint16_t *)b->buffer)[at * 4 + k])
+			                                                : b->buffer[at * 4 + k] / 255.0f;
+		}
+		out = pixel_text(t, c);
+	}
+	if (in_use) {
+		draw_begin(current, false, 0);
+	}
+	return minic_val_ptr(out);
+}
+
+// Calque courant = calque i. 1 si fait.
+static minic_val_t mn_studio_layer_select(minic_val_t *a, int n) {
+	int                   i      = (int)minic_arg_i(a, n, 0);
+	slot_layer_t_array_t *layers = g_project->_->layers;
+	if (i < 0 || i >= (int)layers->length) {
+		return minic_val_int(0);
+	}
+	context_set_layer(layers->buffer[i]);
+	return minic_val_int(1);
+}
+
+// Opération sur le calque courant, comme les menus, avec son pas d'historique, finie tout de suite : "duplicate",
+// "delete", "clear", "invert" (masque), "undo", "redo", "sync" (util_udim_sync, fait par le viewport à chaque image).
+// 1 si fait.
+static minic_val_t mn_studio_layer_op(minic_val_t *a, int n) {
+	char         *op = minic_arg_p(a, n, 0);
+	slot_layer_t *l  = g_context->layer;
+	if (op == NULL || l == NULL) {
+		return minic_val_int(0);
+	}
+	gpu_texture_t *current = _draw_current;
+	bool           in_use  = gpu_in_use;
+	if (in_use) {
+		draw_end();
+	}
+	i32 before = (i32)_sys_on_next_frames->length;
+	int done   = 1;
+	if (strcmp(op, "duplicate") == 0) {
+		history_duplicate_layer();
+		layers_duplicate_layer(l);
+	}
+	else if (strcmp(op, "delete") == 0) {
+		tab_layers_delete_layer(l);
+	}
+	else if (strcmp(op, "clear") == 0) {
+		history_clear_layer();
+		slot_layer_clear(l, slot_layer_is_mask(l) ? 0xffffffff : 0x00000000, NULL, 1.0, layers_default_rough, 0.0);
+	}
+	else if (strcmp(op, "invert") == 0 && slot_layer_is_mask(l)) {
+		history_invert_mask();
+		slot_layer_invert_mask(l);
+	}
+	else if (strcmp(op, "undo") == 0) {
+		history_undo();
+	}
+	else if (strcmp(op, "redo") == 0) {
+		history_redo();
+	}
+	else if (strcmp(op, "sync") == 0) {
+		util_udim_sync();
+	}
+	else {
+		done = 0;
+	}
+	studio_run_next_frames(before);
+	if (in_use) {
+		draw_begin(current, false, 0);
+	}
+	g_context->ddirty = 2;
+	return minic_val_int(done);
+}
+
 #endif
 
 void studio_atlas_init(void) {
@@ -699,6 +965,7 @@ void studio_atlas_init(void) {
 	minic_register("studio_atlases", "p()", mn_studio_atlases);
 	minic_register("studio_set_atlases", "p(p)", mn_studio_set_atlases);
 	minic_register("studio_import_mesh", "i(p,i)", mn_studio_import_mesh);
+	minic_register("studio_append_mesh", "i(p,i)", mn_studio_append_mesh);
 	minic_register("studio_dialog_title", "p()", mn_studio_dialog_title);
 	minic_register("studio_status_message", "p()", mn_studio_status_message);
 	minic_register("studio_layer_set_atlas", "i(i)", mn_studio_layer_set_atlas);
@@ -714,5 +981,12 @@ void studio_atlas_init(void) {
 	minic_register("studio_layer_masks", "p()", mn_studio_layer_masks);
 	minic_register("studio_project_res", "i(i)", mn_studio_project_res);
 	minic_register("studio_world_screen", "p(f,f,f)", mn_studio_world_screen);
+	minic_register("studio_udim_stats", "p()", mn_studio_udim_stats);
+	minic_register("studio_udim_layer", "p(i)", mn_studio_udim_layer);
+	minic_register("studio_udim_pixel", "p(i,i,i,i,i)", mn_studio_udim_pixel);
+	minic_register("studio_layer_select", "i(i)", mn_studio_layer_select);
+	minic_register("studio_udim_fill", "i(i,i,i,f,f,f,f)", mn_studio_udim_fill);
+	minic_register("studio_rt_pixel", "p(p,f,f,f)", mn_studio_rt_pixel);
+	minic_register("studio_layer_op", "i(p)", mn_studio_layer_op);
 #endif
 }

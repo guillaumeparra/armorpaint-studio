@@ -2,7 +2,7 @@
 
 > **Décision 2026-09-26 : option B retenue** (un jeu de textures par tuile, « contexte de tuile », §6). Les options C et D sont écartées ; C reste une évolution possible de B si le nombre de draws devenait un problème (100+ tuiles).
 > **2026-09-27 : lots D0 et D1 faits** (§3, §7). D1 garde un objet de peinture par tuile : la tuile-donnée, le maillage à plages et la migration passent au lot D2 (§7, « Lot D1 »).
-> **2026-09-27 : lot D2 lancé** (go sans la recette C6), plan au §7 « Lot D2 ». Le maillage à plages et la tuile-donnée passent en D3.
+> **2026-09-27 : lot D2 lancé** (go sans la recette C6), plan au §7 « Lot D2 ». Le maillage à plages et la tuile-donnée passent en D3. Sous-lot D2a fait (§7, « Lot D2a »).
 > Document de réflexion à l'origine ; le §7 sert désormais de plan (chantier D de `ARMORPAINT_LOTS.md`). Il fait l'état des UDIM après le commit upstream `99156dfc` (« paint: paint across udims », 2026-09-15), liste les limites, compare quatre architectures et propose une feuille de route.
 > Base : branche `studio` au commit `fbde517a`. Estimations en **jours-homme**, avec les mêmes hypothèses que `ARMORPAINT_LOTS.md`.
 > ⚠️ **§5.2 de `ARMORPAINT_ANALYSE.md` est en partie périmé.** Depuis `99156dfc`, on peut peindre à travers les tuiles et les calques partagés ne sont plus dupliqués par tuile. Ce document le remplace pour tout ce qui touche aux UDIM.
@@ -565,6 +565,32 @@ tuile, rangé dans les cases du proxy. Les pipettes dessinent encore le maillage
 - Blob d'origine = composite en atlas.
 - L17 : la peinture suit son numéro de tuile quand la table change.
 - Sections 4 et 10 d'`udim_app.sh` (propres à l'atlas) réécrites.
+
+### Lot D2a (2026-09-27) : fait
+
+Patch `udim-tiles` (points d'appel) et `util_udim.c` (patch `udim-core`). Banc `.tests/udim_tiles_app.sh`, 19 contrôles.
+- **Magasins.** Chaque texture de calque à tuiles (base, nor, pack ; la texture d'un masque) est une vue dont le
+  contenu est celui de la tuile du contexte ; les autres tuiles attendent dans le magasin de la vue.
+  `gpu_delete_texture` prévient `util_udim.c` (pointeur `gpu_texture_deleting` dans `iron.h`) : une vue supprimée
+  libère ses tuiles. Une tuile absente de la vue (objet sans tuile, tuile non tenue) montre un 1 × 1 transparent
+  partagé.
+- **Règle et table.** `util_udim_sync()` avant chaque rendu : calques et masques à tuiles quand la table a au moins
+  deux tuiles (`uv_map != 1`, pas un calque limité à un objet sans tuile) ; un calque qui passe aux tuiles garde sa
+  texture sur la tuile du contexte, les autres tuiles reçoivent son fond (texel (0, 0)) ; une tuile qui apparaît dans
+  la table reçoit aussi le fond de chaque calque, une qui disparaît est libérée ; UDIM coupé : une texture par calque,
+  celle de la tuile qui reste. Les tuiles sont rangées par numéro : un maillage ajouté dans une nouvelle tuile ne
+  déplace plus la peinture (L17).
+- **Vue 3D.** Le gbuffer dessine chaque objet avec sa tuile (`util_udim_draw_meshes`) ; les calques sont lus en
+  `tex_coord` (plus d'espace atlas dans `make_mesh`).
+- **Opérations.** Clear, Invert Mask et Duplicate bouclent sur les tuiles ; le redimensionnement (résolution du
+  projet) redimensionne chaque tuile en place, emplacements d'undo compris ; Delete passe par l'undo.
+- **Undo générique.** `history_copy_to_undo` sauve toutes les tuiles d'un calque dans l'emplacement (un contenu par
+  tuile) ; l'échange d'undo (`slot_layer_swap`) échange les tuiles que l'emplacement tient. Un emplacement qui avait
+  sauvé tout le calque reçoit, à l'échange, les tuiles apparues depuis dans la table : un Redo qui refait l'opération
+  sur toutes les tuiles (Clear) puis un Undo rendent la tuile ajoutée telle qu'elle était.
+- **Pas encore (D2b à D2f).** La peinture d'un projet UDIM est cassée sur la branche `d2` : elle écrit encore en
+  espace atlas dans la tuile du contexte. Pas de calque live (aperçu du pinceau, outil Material) sur un calque à
+  tuiles. Flatten, fusion, export et `.arm` travaillent sur la tuile du contexte seule.
 
 ---
 

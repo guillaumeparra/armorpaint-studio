@@ -1155,7 +1155,7 @@ void render_path_paint_restore_plane_mesh() {
 void render_path_paint_bind_layers() {
 	bool is_live          = g_config->brush_live && render_path_paint_live_layer_drawn > 0;
 	bool is_material_tool = g_context->tool == TOOL_TYPE_MATERIAL;
-	if (is_live || is_material_tool) {
+	if ((is_live || is_material_tool) && !util_udim_layer_tiled(g_context->layer)) { // STUDIO-PATCH(udim-tiles): no live layer (D2)
 		render_path_paint_use_live_layer(true);
 	}
 
@@ -1185,7 +1185,7 @@ void render_path_paint_bind_layers() {
 void render_path_paint_unbind_layers() {
 	bool is_live          = g_config->brush_live && render_path_paint_live_layer_drawn > 0;
 	bool is_material_tool = g_context->tool == TOOL_TYPE_MATERIAL;
-	if (is_live || is_material_tool) {
+	if ((is_live || is_material_tool) && !util_udim_layer_tiled(g_context->layer)) { // STUDIO-PATCH(udim-tiles)
 		render_path_paint_use_live_layer(false);
 	}
 }

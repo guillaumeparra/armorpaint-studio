@@ -935,7 +935,18 @@ char *studio_object_rename(int index, char *name);   // comme l'onglet Meshes : 
 int   studio_import_mesh(char *path, int split);     // remplace le maillage ; split : 0 objet, 1 matériau, 2 tuile UDIM, 3 matériau et tuile UDIM ; fini au retour
 int   studio_meshes_sort(void);                      // Edit > Sort de l'onglet Meshes : objets triés par nom
 int   studio_mesh_set_parent(char *child, char *parent); // champ Parent de l'onglet Meshes ; "" : aucun ; la liste est réordonnée
+int   studio_append_mesh(char *path, int split);     // ajoute un maillage à ceux du projet (Replace Existing décoché), calques gardés
 char *studio_layer_masks(void);                      // masques d'objet des calques : "Layer 1=0 Layer 2=5 filter=0" (bancs)
+int   studio_layer_new_mask(int white);              // masque blanc (1) ou noir (0) sur le calque courant, devenu courant
+int   studio_layer_select(int i);                    // calque courant : le i-ième de la pile (0 en bas)
+int   studio_layer_op(char *op);                     // "duplicate", "delete", "clear", "invert" (masque), "undo", "redo", "sync" (bancs)
+int   studio_project_res(int px);                    // résolution Custom px × px, calques redimensionnés tout de suite
+char *studio_world_screen(float x, float y, float z); // position à l'écran (0..1) d'un point du monde, « x y » ; « - » derrière la caméra
+char *studio_rt_pixel(char *target, float x, float y, float z); // pixel « r g b a » d'une cible de rendu (gbuffer1...) là où le point se projette
+char *studio_udim_stats(void);                       // tuiles UDIM (lot D2) : « tile=1001 table=... stores=N partial=N contents=N » (bancs)
+char *studio_udim_layer(int i);                      // textures du calque i par tuile, « base=[...] nor=[...] pack=[...] » ; i < 0 : emplacement d'undo -1-i
+char *studio_udim_pixel(int i, int channel, int tile, int x, int y); // texel « r g b a » (0 à 1) d'une tuile du calque i ; channel 0 base, 1 nor, 2 pack ; « - » si la tuile n'est pas tenue
+int   studio_udim_fill(int i, int channel, int tile, float r, float g, float b, float a); // vide une tuile du calque i à cette couleur
 char *studio_dialog_title(void);                     // titre de la boîte ouverte (« Unwrap Mesh »...), "" sans boîte
 char *studio_status_message(void);                   // message de la barre d'état, "" s'il est effacé
 void  studio_export_window_show(void);               // ouvre la fenêtre d'export, ou la ramène devant

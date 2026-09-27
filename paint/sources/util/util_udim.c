@@ -73,3 +73,698 @@ void util_udim_draw_paint_meshes() {
 	merged->skip_context = merged_skip;
 	array_delete(skips);
 }
+
+// Tile context (lot D2), see util_udim.h
+
+void history_copy_to_undo(i32 from_id, i32 to_id, bool is_mask); // history.c, not in functions.h
+
+typedef struct udim_store {
+	gpu_texture_t *view;
+	i32            cur;     // Tile whose content is in the view, -1 for the placeholder
+	bool           partial; // Undo slot: the tiles it saved, not those of the table
+	bool           whole;   // Undo slot that saved every tile of its layer: the tiles the layer gained since join it
+	i32            count;
+	i32            ids[UDIM_MAX_TILES];
+	gpu_texture_t  tiles[UDIM_MAX_TILES]; // Content of each tile, stale for the one in the view
+} udim_store_t;
+
+static udim_store_t **udim_stores      = NULL;
+static i32            udim_store_count = 0;
+static i32            udim_store_cap   = 0;
+static i32            udim_cur         = -1; // Tile of the context
+static i32            udim_table[UDIM_MAX_TILES];
+static i32            udim_table_count = 0; // Tiles the stores follow, 0 when udim is off
+static gpu_texture_t *udim_placeholder = NULL;
+static i32            udim_loop_saved[8];
+static bool           udim_loop_tiled[8];
+static i32            udim_loop_depth = 0;
+
+static udim_store_t *udim_store_of(gpu_texture_t *view) {
+	if (view == NULL) {
+		return NULL;
+	}
+	for (i32 i = 0; i < udim_store_count; ++i) {
+		if (udim_stores[i]->view == view) {
+			return udim_stores[i];
+		}
+	}
+	return NULL;
+}
+
+static i32 udim_index(udim_store_t *s, i32 tile) {
+	for (i32 i = 0; i < s->count; ++i) {
+		if (s->ids[i] == tile) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+static i32 udim_table_index(i32 tile) {
+	for (i32 i = 0; i < udim_table_count; ++i) {
+		if (udim_table[i] == tile) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+// gpu_end() leaves no render target behind: a view is only busy during the pass drawing into it
+static bool udim_busy(gpu_texture_t *view) {
+	if (!gpu_in_use) {
+		return false;
+	}
+	for (uint32_t i = 0; i < current_render_targets_count; ++i) {
+		if (current_render_targets[i] == view) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static gpu_pipeline_t *udim_copy_pipe(gpu_texture_format_t format) {
+	return format == GPU_TEXTURE_FORMAT_RGBA64 ? pipes_copy64 : format == GPU_TEXTURE_FORMAT_RGBA128 ? pipes_copy128 : pipes_copy;
+}
+
+// A new texture content, cleared or filled from src, stretched
+static gpu_texture_t udim_new_content(i32 width, i32 height, gpu_texture_format_t format, gpu_texture_t *src) {
+	gpu_texture_t *t = gpu_create_render_target(width, height, format);
+	if (src == NULL) {
+		_gpu_begin(t, NULL, NULL, GPU_CLEAR_COLOR, 0x00000000, 0.0);
+		gpu_end();
+	}
+	else {
+		draw_begin(t, false, 0);
+		draw_set_pipeline(udim_copy_pipe(format));
+		draw_scaled_image(src, 0, 0, width, height);
+		draw_set_pipeline(NULL);
+		draw_end();
+	}
+	gpu_texture_t content = *t;
+	free(t);
+	return content;
+}
+
+// The background of a texture: its texel (0, 0) in a 1x1 render target, to stretch over a new tile
+static gpu_texture_t *udim_background(gpu_texture_t *view) {
+	gpu_texture_t *bg = gpu_create_render_target(1, 1, view->format);
+	draw_begin(bg, false, 0);
+	draw_set_pipeline(udim_copy_pipe(view->format));
+	draw_scaled_sub_image(view, 0, 0, 1, 1, 0, 0, 1, 1);
+	draw_set_pipeline(NULL);
+	draw_end();
+	return bg;
+}
+
+static void udim_destroy(gpu_texture_t content) {
+	gpu_texture_t *t = malloc(sizeof(gpu_texture_t));
+	*t               = content;
+	gpu_delete_texture(t); // Not a view: the deleting hook lets it go
+}
+
+static bool udim_placeholder_ready() {
+	if (udim_placeholder == NULL && !gpu_in_use) {
+		udim_placeholder = gpu_create_render_target(1, 1, GPU_TEXTURE_FORMAT_RGBA32);
+		_gpu_begin(udim_placeholder, NULL, NULL, GPU_CLEAR_COLOR, 0x00000000, 0.0);
+		gpu_end();
+	}
+	return udim_placeholder != NULL;
+}
+
+// The content of a tile into the view, the one it replaces back to its slot. -1 or a tile not held: the placeholder
+static void udim_show(udim_store_t *s, i32 tile) {
+	i32 k      = tile < 0 ? -1 : udim_index(s, tile);
+	i32 target = k < 0 ? -1 : tile;
+	if (s->cur == target) {
+		return;
+	}
+	if (udim_busy(s->view) || (k < 0 && !udim_placeholder_ready())) {
+		static bool reported = false;
+		if (!reported) {
+			reported = true;
+			iron_log("UDIM: tile %d not set, its texture is being drawn to or no placeholder yet", tile);
+		}
+		return;
+	}
+	if (s->cur >= 0) {
+		s->tiles[udim_index(s, s->cur)] = *s->view;
+	}
+	else if (s->view->buffer != NULL) { // Pixels read from the placeholder
+		free(s->view->buffer->buffer);
+		free(s->view->buffer);
+	}
+	if (k >= 0) {
+		*s->view = s->tiles[k];
+	}
+	else {
+		*s->view        = *udim_placeholder;
+		s->view->buffer = NULL;
+	}
+	s->cur = target;
+}
+
+static void udim_texture_deleting(gpu_texture_t *texture);
+
+static udim_store_t *udim_register(gpu_texture_t *view, bool partial) {
+	gpu_texture_deleting = udim_texture_deleting;
+	if (udim_store_count == udim_store_cap) {
+		udim_store_cap = udim_store_cap == 0 ? 64 : udim_store_cap * 2;
+		udim_stores    = realloc(udim_stores, udim_store_cap * sizeof(udim_store_t *));
+	}
+	udim_store_t *s                 = calloc(1, sizeof(udim_store_t));
+	s->view                         = view;
+	s->partial                      = partial;
+	s->cur                          = -1;
+	udim_stores[udim_store_count++] = s;
+	return s;
+}
+
+static void udim_unregister(udim_store_t *s) {
+	for (i32 i = 0; i < udim_store_count; ++i) {
+		if (udim_stores[i] == s) {
+			udim_stores[i] = udim_stores[--udim_store_count];
+			break;
+		}
+	}
+	free(s);
+}
+
+// The view gets tiles: its texture goes to the tile of the context (or to the first of ids), the other tiles are new,
+// copies of it or cleared
+// The texture of the view goes to the tile shown (or the first), the other tiles are cleared or get its background
+static udim_store_t *udim_tile_view(gpu_texture_t *view, bool partial, i32 n, i32 *ids, bool background) {
+	i32 home = ids[0];
+	for (i32 i = 0; i < n; ++i) {
+		if (ids[i] == udim_cur) {
+			home = udim_cur;
+		}
+	}
+	gpu_texture_t *bg = background && n > 1 ? udim_background(view) : NULL;
+	udim_store_t  *s  = udim_register(view, partial);
+	s->ids[0]         = home;
+	s->count        = 1;
+	s->cur          = home;
+	for (i32 i = 0; i < n && s->count < UDIM_MAX_TILES; ++i) {
+		if (ids[i] == home) {
+			continue;
+		}
+		s->ids[s->count]   = ids[i];
+		s->tiles[s->count] = udim_new_content(view->width, view->height, view->format, bg);
+		s->count++;
+	}
+	if (bg != NULL) {
+		gpu_delete_texture(bg);
+	}
+	udim_show(s, udim_cur);
+	return s;
+}
+
+// Back to a single texture, that of the tile kept (the tile shown or the first when keep is not held)
+static void udim_untile(udim_store_t *s, i32 keep) {
+	if (udim_index(s, keep) < 0) {
+		keep = s->cur >= 0 ? s->cur : s->ids[0];
+	}
+	udim_show(s, keep);
+	if (s->cur != keep) {
+		return;
+	}
+	for (i32 i = 0; i < s->count; ++i) {
+		if (s->ids[i] != keep) {
+			udim_destroy(s->tiles[i]);
+		}
+	}
+	udim_unregister(s);
+}
+
+// gpu_delete_texture() of a view: its tiles go with it
+static void udim_texture_deleting(gpu_texture_t *texture) {
+	udim_store_t *s = udim_store_of(texture);
+	if (s == NULL) {
+		return;
+	}
+	if (s->cur < 0) { // The placeholder is shared: a tile of its own goes in the view
+		if (texture->buffer != NULL) {
+			free(texture->buffer->buffer);
+			free(texture->buffer);
+		}
+		*texture = s->tiles[0];
+		s->cur   = s->ids[0];
+	}
+	for (i32 i = 0; i < s->count; ++i) {
+		if (s->ids[i] != s->cur) {
+			udim_destroy(s->tiles[i]);
+		}
+	}
+	udim_unregister(s);
+}
+
+static bool udim_ids_have(i32 n, i32 *ids, i32 tile) {
+	for (i32 i = 0; i < n; ++i) {
+		if (ids[i] == tile) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// A layer store follows the table: the tiles gone are freed, the new ones get the background of the layer (texel (0, 0)
+// of a tile it keeps, or of its first)
+static void udim_follow_table(udim_store_t *s, i32 n, i32 *tiles) {
+	gpu_texture_t *bg = NULL;
+	for (i32 i = 0; i < n && bg == NULL; ++i) {
+		if (udim_index(s, tiles[i]) >= 0) {
+			continue;
+		}
+		i32 src = s->ids[0];
+		for (i32 j = 0; j < s->count; ++j) {
+			if (udim_ids_have(n, tiles, s->ids[j])) {
+				src = s->ids[j];
+				break;
+			}
+		}
+		udim_show(s, src);
+		bg = udim_background(s->view);
+	}
+	i32                  width  = s->view->width;
+	i32                  height = s->view->height;
+	gpu_texture_format_t format = s->view->format;
+	udim_show(s, -1);
+	if (s->cur >= 0) { // No placeholder
+		if (bg != NULL) {
+			gpu_delete_texture(bg);
+		}
+		return;
+	}
+	for (i32 i = s->count - 1; i >= 0; --i) {
+		if (!udim_ids_have(n, tiles, s->ids[i])) {
+			udim_destroy(s->tiles[i]);
+			s->count--;
+			s->ids[i]   = s->ids[s->count];
+			s->tiles[i] = s->tiles[s->count];
+		}
+	}
+	for (i32 i = 0; i < n && s->count < UDIM_MAX_TILES; ++i) {
+		if (udim_index(s, tiles[i]) < 0) {
+			s->ids[s->count]   = tiles[i];
+			s->tiles[s->count] = udim_new_content(width, height, format, bg);
+			s->count++;
+		}
+	}
+	if (bg != NULL) {
+		gpu_delete_texture(bg);
+	}
+}
+
+static void udim_update_table() {
+	i32 *tiles = NULL;
+	i32  n     = util_mesh_udim_tile_table(&tiles);
+	n          = n > UDIM_MAX_TILES ? UDIM_MAX_TILES : n;
+	i32 m      = n > 1 ? n : 0;
+	if (m == udim_table_count && memcmp(tiles, udim_table, m * sizeof(i32)) == 0) {
+		return;
+	}
+	if (m == 0) { // Udim off: every view back to a single texture, that of the remaining tile
+		i32 keep = n == 1 ? tiles[0] : udim_cur;
+		for (i32 i = udim_store_count - 1; i >= 0; --i) {
+			udim_untile(udim_stores[i], keep);
+		}
+		udim_table_count = 0;
+		udim_cur         = -1;
+		return;
+	}
+	if (!udim_placeholder_ready()) {
+		return;
+	}
+	i32 cur = udim_ids_have(m, tiles, udim_cur) ? udim_cur : tiles[0];
+	for (i32 i = 0; i < udim_store_count; ++i) {
+		udim_store_t *s = udim_stores[i];
+		if (!s->partial) {
+			udim_follow_table(s, m, tiles);
+		}
+		udim_show(s, cur);
+	}
+	memcpy(udim_table, tiles, m * sizeof(i32));
+	udim_table_count = m;
+	udim_cur         = cur;
+}
+
+void util_udim_set_tile(i32 tile) {
+	if (tile == udim_cur) {
+		return;
+	}
+	for (i32 i = 0; i < udim_store_count; ++i) {
+		udim_show(udim_stores[i], tile);
+	}
+	udim_cur = tile;
+}
+
+i32 util_udim_tile() {
+	return udim_cur;
+}
+
+i32 util_udim_tile_count() {
+	return udim_table_count;
+}
+
+i32 util_udim_tile_at(i32 i) {
+	return i >= 0 && i < udim_table_count ? udim_table[i] : -1;
+}
+
+bool util_udim_layer_tiled(slot_layer_t *l) {
+	return l != NULL && udim_store_of(l->texpaint) != NULL;
+}
+
+bool util_udim_layer_should_tile(slot_layer_t *l) {
+	// Groups, undo slots ("_undo0") and the live layer ("_live") are not
+	if (udim_table_count < 2 || l == NULL || l->texpaint == NULL || l->ext == NULL || l->ext[0] == '_') {
+		return false;
+	}
+	if (slot_layer_is_mask(l)) {
+		return l->parent != NULL && (slot_layer_is_group(l->parent) || util_udim_layer_should_tile(l->parent));
+	}
+	if (l->uv_map == 1) {
+		return false;
+	}
+	i32                    mask    = slot_layer_get_object_mask(l);
+	mesh_object_t_array_t *objects = g_project->_->paint_objects;
+	if (mask > 0 && mask <= objects->length) { // Limited to an object: tiled when it has a tile
+		return udim_table_index(util_mesh_udim_tile(objects->buffer[mask - 1]->base->name)) >= 0;
+	}
+	return true;
+}
+
+static void udim_untile_layer(slot_layer_t *l) {
+	gpu_texture_t *views[3] = {l->texpaint, l->texpaint_nor, l->texpaint_pack};
+	for (i32 i = 0; i < 3; ++i) {
+		udim_store_t *s = udim_store_of(views[i]);
+		if (s != NULL) {
+			udim_untile(s, udim_cur);
+		}
+	}
+}
+
+bool util_udim_tile_layer(slot_layer_t *l, bool background) {
+	if (!gpu_in_use) {
+		udim_update_table();
+	}
+	if (util_udim_layer_tiled(l)) {
+		return true;
+	}
+	if (gpu_in_use || !util_udim_layer_should_tile(l)) {
+		return false;
+	}
+	gpu_texture_t *views[3] = {l->texpaint, l->texpaint_nor, l->texpaint_pack};
+	for (i32 i = 0; i < 3; ++i) {
+		if (views[i] != NULL && udim_store_of(views[i]) == NULL) {
+			udim_tile_view(views[i], false, udim_table_count, udim_table, background);
+		}
+	}
+	return true;
+}
+
+void util_udim_sync() {
+	if (gpu_in_use || g_project == NULL || g_project->_->layers == NULL) {
+		return;
+	}
+	udim_update_table();
+	slot_layer_t_array_t *layers = g_project->_->layers;
+	for (i32 i = 0; i < layers->length; ++i) {
+		slot_layer_t *l = layers->buffer[i];
+		if (slot_layer_is_group(l)) {
+			continue;
+		}
+		if (util_udim_layer_should_tile(l)) {
+			util_udim_tile_layer(l, true);
+		}
+		else if (util_udim_layer_tiled(l)) {
+			udim_untile_layer(l);
+		}
+	}
+}
+
+void util_udim_replace(gpu_texture_t *view, gpu_texture_t *fresh) {
+	udim_store_t *s = udim_store_of(view);
+	if (s != NULL && s->cur < 0) { // The placeholder: no tile to replace
+		gpu_delete_texture(fresh);
+		return;
+	}
+	gpu_texture_t old = *view;
+	*view             = *fresh;
+	free(fresh);
+	udim_destroy(old);
+}
+
+bool util_udim_resize_layer(slot_layer_t *l, i32 width, i32 height) {
+	if (!util_udim_layer_tiled(l) || gpu_in_use) {
+		return false;
+	}
+	gpu_texture_format_t format   = slot_layer_is_mask(l)             ? GPU_TEXTURE_FORMAT_RGBA32
+	                                : base_bits == TEXTURE_BITS_BITS8  ? GPU_TEXTURE_FORMAT_RGBA32
+	                                : base_bits == TEXTURE_BITS_BITS16 ? GPU_TEXTURE_FORMAT_RGBA64
+	                                                                   : GPU_TEXTURE_FORMAT_RGBA128;
+	gpu_texture_t       *views[3] = {l->texpaint, l->texpaint_nor, l->texpaint_pack};
+	for (i32 i = 0; i < 3; ++i) {
+		if (views[i] == NULL) {
+			continue;
+		}
+		udim_store_t *s = udim_store_of(views[i]);
+		for (i32 j = 0; j < (s != NULL ? s->count : 1); ++j) { // A view without tiles (undo slot saving a mask) as one tile
+			if (s != NULL) {
+				udim_show(s, s->ids[j]);
+			}
+			gpu_texture_t *fresh = gpu_create_render_target(width, height, format);
+			draw_begin(fresh, false, 0);
+			draw_set_pipeline(udim_copy_pipe(format));
+			draw_scaled_image(views[i], 0, 0, width, height);
+			draw_set_pipeline(NULL);
+			draw_end();
+			util_udim_replace(views[i], fresh);
+		}
+		if (s != NULL) {
+			udim_show(s, udim_cur);
+		}
+	}
+	return true;
+}
+
+static bool udim_is_undo(slot_layer_t *l) {
+	return l->ext != NULL && starts_with(l->ext, "_undo");
+}
+
+// The tiles held by the slot view swap their content with those of the layer view; a slot view without tiles is first
+// copied to every tile of the layer (saved before the layer was tiled)
+static void udim_swap_views(gpu_texture_t *layer_view, gpu_texture_t *slot_view) {
+	udim_store_t *ls = udim_store_of(layer_view);
+	if (ls == NULL || slot_view == NULL) {
+		return;
+	}
+	udim_store_t *ss = udim_store_of(slot_view);
+	if (ss == NULL) {
+		ss        = udim_tile_view(slot_view, true, ls->count, ls->ids, true);
+		ss->whole = true;
+	}
+	// A whole save swapped back after the table grew (an undo, or a redo that runs its operation again on every tile):
+	// the new tiles of the layer, unchanged since, go to the slot as they are
+	for (i32 j = 0; ss->whole && j < ls->count && ss->count < UDIM_MAX_TILES; ++j) {
+		i32 t = ls->ids[j];
+		if (udim_index(ss, t) < 0) {
+			gpu_texture_t *like = ss->cur >= 0 ? ss->view : &ss->tiles[0];
+			ss->ids[ss->count]   = t;
+			ss->tiles[ss->count] = udim_new_content(like->width, like->height, like->format, ls->cur == t ? ls->view : &ls->tiles[j]);
+			ss->count++;
+		}
+	}
+	for (i32 i = 0; i < ss->count; ++i) {
+		i32 t = ss->ids[i];
+		i32 j = udim_index(ls, t);
+		if (j < 0) {
+			continue;
+		}
+		gpu_texture_t *a = ls->cur == t ? ls->view : &ls->tiles[j];
+		gpu_texture_t *b = ss->cur == t ? ss->view : &ss->tiles[i];
+		if (udim_busy(a) || udim_busy(b)) {
+			continue;
+		}
+		gpu_texture_t tmp = *a;
+		*a                = *b;
+		*b                = tmp;
+	}
+}
+
+bool util_udim_swap_layers(slot_layer_t *a, slot_layer_t *b) {
+	slot_layer_t *slot  = udim_is_undo(a) ? a : udim_is_undo(b) ? b : NULL;
+	slot_layer_t *layer = slot == a ? b : a;
+	if (slot == NULL || udim_is_undo(layer) || slot_layer_is_group(layer) || slot->texpaint == NULL) {
+		return false;
+	}
+	if (!util_udim_layer_tiled(layer)) {
+		bool held = udim_store_of(slot->texpaint) != NULL || udim_store_of(slot->texpaint_nor) != NULL || udim_store_of(slot->texpaint_pack) != NULL;
+		if (!held) {
+			return false;
+		}
+		if (!util_udim_tile_layer(layer, true)) {
+			util_udim_undo_reset(slot);
+			return false;
+		}
+	}
+	if (gpu_in_use) {
+		return false;
+	}
+	udim_swap_views(layer->texpaint, slot->texpaint);
+	if (slot_layer_is_layer(layer) && slot_layer_is_layer(slot)) {
+		udim_swap_views(layer->texpaint_nor, slot->texpaint_nor);
+		udim_swap_views(layer->texpaint_pack, slot->texpaint_pack);
+	}
+	// The rest of slot_layer_swap()
+	gpu_texture_t *preview = layer->texpaint_preview;
+	layer->texpaint_preview = slot->texpaint_preview;
+	slot->texpaint_preview  = preview;
+	if (a->texpaint_sculpt != NULL && b->texpaint_sculpt != NULL) {
+		render_target_t *srt0          = any_map_get(render_path_render_targets, string("texpaint_sculpt%s", a->ext));
+		render_target_t *srt1          = any_map_get(render_path_render_targets, string("texpaint_sculpt%s", b->ext));
+		srt0->_image                   = b->texpaint_sculpt;
+		srt1->_image                   = a->texpaint_sculpt;
+		gpu_texture_t *texpaint_sculpt = a->texpaint_sculpt;
+		a->texpaint_sculpt             = b->texpaint_sculpt;
+		b->texpaint_sculpt             = texpaint_sculpt;
+	}
+	return true;
+}
+
+void util_udim_undo_reset(slot_layer_t *slot) {
+	udim_untile_layer(slot);
+}
+
+// The undo slot is about to save the tile of the context: a texture of its own for it
+static void udim_undo_hold(slot_layer_t *slot, bool is_mask) {
+	gpu_texture_t *views[3] = {slot->texpaint, is_mask ? NULL : slot->texpaint_nor, is_mask ? NULL : slot->texpaint_pack};
+	for (i32 i = 0; i < 3; ++i) {
+		if (views[i] == NULL) {
+			continue;
+		}
+		udim_store_t *s = udim_store_of(views[i]);
+		if (s == NULL) { // Its texture goes to the tile
+			s         = udim_register(views[i], true);
+			s->ids[0] = udim_cur;
+			s->count  = 1;
+			s->cur    = udim_cur;
+		}
+		else if (udim_index(s, udim_cur) < 0 && s->count < UDIM_MAX_TILES) {
+			gpu_texture_t *like = &s->tiles[0]; // The view shows the placeholder: every content is in tiles
+			s->ids[s->count]    = udim_cur;
+			s->tiles[s->count]  = udim_new_content(like->width, like->height, like->format, NULL);
+			s->count++;
+			udim_show(s, udim_cur);
+		}
+	}
+}
+
+bool util_udim_copy_to_undo(i32 from_id, i32 to_id, bool is_mask) {
+	static bool inside = false;
+	if (inside || history_undo_layers == NULL || to_id >= history_undo_layers->length) {
+		return false;
+	}
+	slot_layer_t *slot = history_undo_slot(to_id);
+	util_udim_undo_reset(slot);
+	slot_layer_t         *from   = NULL;
+	slot_layer_t_array_t *layers = g_project->_->layers;
+	for (i32 i = 0; i < layers->length; ++i) {
+		if (layers->buffer[i]->id == from_id) {
+			from = layers->buffer[i];
+		}
+	}
+	if (from == NULL || !util_udim_layer_tiled(from) || gpu_in_use) {
+		return false;
+	}
+	inside     = true;
+	i32 undo_i = history_undo_i;
+	i32 n      = util_udim_loop_begin(true);
+	for (i32 k = 0; k < n; ++k) {
+		util_udim_loop_tile(k);
+		udim_undo_hold(slot, is_mask);
+		history_undo_i = undo_i;
+		history_copy_to_undo(from_id, to_id, is_mask); // The upstream copy, of the tile of the context
+	}
+	util_udim_loop_end();
+	gpu_texture_t *views[3] = {slot->texpaint, slot->texpaint_nor, slot->texpaint_pack};
+	for (i32 i = 0; i < 3; ++i) {
+		udim_store_t *s = udim_store_of(views[i]);
+		if (s != NULL) {
+			s->whole = true;
+		}
+	}
+	inside = false;
+	return true;
+}
+
+i32 util_udim_loop_begin(bool tiled) {
+	if (!gpu_in_use) {
+		udim_update_table();
+	}
+	i32 d = udim_loop_depth < 8 ? udim_loop_depth : 7;
+	udim_loop_depth++;
+	udim_loop_saved[d] = udim_cur;
+	udim_loop_tiled[d] = tiled && udim_table_count > 1 && !gpu_in_use;
+	return udim_loop_tiled[d] ? udim_table_count : 1;
+}
+
+void util_udim_loop_tile(i32 k) {
+	i32 d = udim_loop_depth <= 8 ? udim_loop_depth - 1 : 7;
+	if (d >= 0 && udim_loop_tiled[d]) {
+		util_udim_set_tile(udim_table[k]);
+	}
+}
+
+void util_udim_loop_end() {
+	if (udim_loop_depth == 0) {
+		return;
+	}
+	udim_loop_depth--;
+	i32 d = udim_loop_depth < 8 ? udim_loop_depth : 7;
+	if (udim_loop_tiled[d]) {
+		util_udim_set_tile(udim_loop_saved[d]);
+	}
+}
+
+void util_udim_draw_meshes(char *context) {
+	if (udim_store_count == 0 || udim_table_count < 2) {
+		render_path_draw_meshes(context);
+		return;
+	}
+	i32 saved                  = udim_cur;
+	_mesh_object_last_pipeline = NULL;
+	for (i32 i = 0; i < scene_meshes->length; ++i) {
+		mesh_object_t *mesh = scene_meshes->buffer[i];
+		i32            tile = util_mesh_udim_tile(mesh->base->name);
+		util_udim_set_tile(udim_table_index(tile) >= 0 ? tile : -1); // The textures are read at the draw
+		mesh_object_render(mesh, context, _render_path_bind_params);
+	}
+	util_udim_set_tile(saved);
+	render_path_end();
+}
+
+char *util_udim_stats() {
+	i32 partial  = 0;
+	i32 contents = 0;
+	for (i32 i = 0; i < udim_store_count; ++i) {
+		partial += udim_stores[i]->partial ? 1 : 0;
+		contents += udim_stores[i]->count;
+	}
+	char *table = "";
+	for (i32 i = 0; i < udim_table_count; ++i) {
+		table = string("%s%s%d", table, i > 0 ? "," : "", udim_table[i]);
+	}
+	return string("tile=%d table=%s stores=%d partial=%d contents=%d", udim_cur, table, udim_store_count, partial, contents);
+}
+
+char *util_udim_view_stats(gpu_texture_t *view) {
+	udim_store_t *s = udim_store_of(view);
+	if (s == NULL) {
+		return view == NULL ? "null" : string("single %dx%d", view->width, view->height);
+	}
+	char *ids = "";
+	for (i32 i = 0; i < s->count; ++i) {
+		ids = string("%s%s%d", ids, i > 0 ? "," : "", s->ids[i]);
+	}
+	return string("cur=%d partial=%d tiles=%s %dx%d", s->cur, s->partial ? 1 : 0, ids, view->width, view->height);
+}

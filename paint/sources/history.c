@@ -559,6 +559,9 @@ slot_layer_t *history_undo_slot(i32 i) {
 }
 
 void history_copy_to_undo(i32 from_id, i32 to_id, bool is_mask) {
+	if (util_udim_copy_to_undo(from_id, to_id, is_mask)) { // STUDIO-PATCH(udim-tiles): tiled layer, saved tile by tile
+		return;
+	}
 	char *to_id_s   = i32_to_string(to_id);
 	char *from_id_s = i32_to_string(from_id);
 	if (history_undo_layers != NULL && to_id < history_undo_layers->length) {
