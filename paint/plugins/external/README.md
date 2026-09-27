@@ -864,6 +864,9 @@ int   studio_layer_set_object(int index);            // limite le calque courant
 int   studio_layer_new(void);                        // nouveau calque de peinture vide, au-dessus du courant, devenu courant
 char *studio_object_rename(int index, char *name);   // comme l'onglet Meshes : le suffixe de tuile UDIM reste (body.1001 → torso.1001) ; nouveau nom
 int   studio_import_mesh(char *path, int split);     // remplace le maillage ; split : 0 objet, 1 matériau, 2 tuile UDIM, 3 matériau et tuile UDIM ; fini au retour
+int   studio_meshes_sort(void);                      // Edit > Sort de l'onglet Meshes : objets triés par nom
+int   studio_mesh_set_parent(char *child, char *parent); // champ Parent de l'onglet Meshes ; "" : aucun ; la liste est réordonnée
+char *studio_layer_masks(void);                      // masques d'objet des calques : "Layer 1=0 Layer 2=5 filter=0" (bancs)
 char *studio_dialog_title(void);                     // titre de la boîte ouverte (« Unwrap Mesh »...), "" sans boîte
 char *studio_status_message(void);                   // message de la barre d'état, "" s'il est effacé
 void  studio_export_window_show(void);               // ouvre la fenêtre d'export, ou la ramène devant
@@ -1229,6 +1232,7 @@ python3 .tests/arm_paths.py <projet.arm> [fichier...]   # chemins des fichiers d
 .tests/export_window_app.sh [dossier]  # fenêtre d'export (B6) dans l'app, Qt offscreen : état, préflight, export, fichiers décochés, blocage, réouverture, bits et résolution par map, sidecar, preset du projet ; PY=<python PySide6>
 <python PySide6> .tests/export_window_ui.py [dossier]  # fenêtre d'export contre un faux ArmorPaint : liste groupée (tuiles UDIM, objets), cases, décomptes, problèmes affichés, tableau des maps, sidecar, nom des fichiers, jeux de textures
 .tests/sets_app.sh [dossier]           # jeux de textures, nom des fichiers et UDIM dans l'app, avec les maillages de udim_gen.py ; PY=<python PySide6>
+.tests/atlas_order_app.sh [dossier]    # jeux de textures quand l'onglet Meshes trie, réapparente ou supprime des objets (patch atlas-objects-order)
 python3 .tests/udim_gen.py [dossier]   # maillages de test (défaut .tests/meshes) : udim_cube.obj (une face par tuile, 1001-1003 et 1011-1013 ; matériaux body et cap), props.obj (crate, barrel, ball)
 ```
 

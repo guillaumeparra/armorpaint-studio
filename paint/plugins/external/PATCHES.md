@@ -1485,8 +1485,9 @@ autre tuile (« robe.1005: the UDIM tile of an object comes from its import, a r
 le nom d'une tuile ; un objet sans tuile n'en gagne pas (`cap.1005` tapé donne `cap`). `tab_meshes_rename_object()`
 porte la logique (avec le renommage upstream des stages et des données partagées) ; le plugin l'expose aux scripts
 (`studio_object_rename`). La duplication et l'ajout passent par `_import_mesh_unique_name()`, qui garde le suffixe
-depuis le lot D0 ([udim-import](#udim-import)). Pour régénérer : `git diff upstream studio --
-paint/sources/ui/tab_meshes.c` (aucun autre patch dans ce fichier).
+depuis le lot D0 ([udim-import](#udim-import)). Pour régénérer : `git diff 8cb80cb8^ 8cb80cb8 --
+paint/sources/ui/tab_meshes.c` ; le fichier porte aussi [atlas-objects-order](#atlas-objects-order), dans d'autres
+fonctions : `git diff upstream studio` mêle les deux.
 
 **Test.** `.tests/udim_app.sh` section 9 : `skin.1011` → `torso.1011` ; `robe.1005` tapé pour `cloth.1002` →
 `robe.1002`, avec le message ; nom vide : `skin.1001` gardé ; `skin2.1002` tapé pour `skin.1002` → `skin2.1002` ;
@@ -1506,3 +1507,54 @@ quel, ou la tuile devient une donnée de l'objet. Rejouer la section 9 sans le p
 - La tuile vient toujours du nom : un objet importé sous le nom `truc.1005` hors UDIM reste une tuile (L4), jusqu'à
   la tuile-donnée du lot D2.
 - L'onglet Meshes ne regroupe pas les tuiles d'un objet sous un nœud (`ARMORPAINT_UDIM.md` §6.10) : lot D2.
+
+---
+
+## atlas-objects-order
+
+| | |
+|---|---|
+| Fichier | `paint/sources/ui/tab_meshes.c` (`tab_meshes_sort_hierarchy_from`, `tab_meshes_remapped_mask`, `tab_meshes_draw_context_menu_delete`) |
+| Commit studio | `0dacedb5`, fusionné dans la branche `studio` le 2026-09-27 |
+| Validé contre | upstream `85f6cf1c` (2026-09-27) |
+| Constaté | 2026-09-26, en ajoutant les jeux de textures (`external/studio_atlas.c`) |
+
+**Bug.** `g_project->atlas_objects` (enregistré dans le `.arm`) donne l'atlas de chaque objet **par position** dans
+`paint_objects`. L'onglet Meshes réordonne cette liste — Edit > Sort (`tab_meshes_sort_by_name`), champ Parent et
+glisser-déposer (`tab_meshes_sort_hierarchy_from`), suppression (`tab_meshes_draw_context_menu_delete`) — et remappe
+les masques d'objet des calques, mais jamais `atlas_objects` :
+- après un tri ou un changement de parent, les objets changent de jeu sans rien dire (l'export Visible par jeu, les
+  calques limités à un jeu et la fenêtre d'export suivent la nouvelle attribution) ;
+- après une suppression, `atlas_objects` a un élément de trop : `studio_atlas.c` (`defined()`) retombe sur un seul
+  jeu, l'export par jeu disparaît ;
+- les masques de calque au-delà du nombre d'objets désignent un atlas par sa position dans les atlas **utilisés, par
+  ordre de premier objet** (`project_get_used_atlases`) : quand les objets changent d'ordre, cet ordre change et le
+  calque passe sur un autre jeu ;
+- à la suppression, aucun masque n'est remappé (l'ordre est relevé après le retrait de l'objet) : un calque limité à
+  un objet placé après l'objet supprimé passe sur le suivant, un masque d'atlas se décale d'un jeu.
+
+**Correctif.** `tab_meshes_sort_hierarchy_from` reçoit l'ordre d'avant et sa longueur (`old_length`, objets supprimés
+compris). Quand l'ordre change, `atlas_objects` (s'il a un élément par objet d'avant) est permuté de la même façon, les
+entrées des objets supprimés retirées. Les masques de calque et le filtre de calques sont remappés : objet → sa nouvelle
+position ; atlas → sa position dans les atlas utilisés après coup. Un masque sur un objet supprimé, ou sur un atlas qui
+n'est plus utilisé (ou quand il n'en reste qu'un), devient 0 (partagé) au lieu de désigner un autre objet ou jeu.
+La suppression relève l'ordre avant `array_remove` et appelle `tab_meshes_sort_hierarchy_from` directement. Un
+`atlas_objects` qui n'a déjà pas la bonne longueur (import qui ajoute des objets) n'est pas touché ; les masques d'atlas
+gardent alors leur jeu, décalés du nombre d'objets retirés. Pour régénérer : `git diff 0dacedb5^ 0dacedb5 --
+paint/sources/ui/tab_meshes.c` ; le fichier porte aussi [udim-tile-name](#udim-tile-name), dans d'autres fonctions :
+`git diff upstream studio` mêle les deux.
+
+**Test.** `.tests/atlas_order_app.sh` : props.obj, un jeu par objet, calques limités à des jeux et à un objet ; tri par
+nom, changement de parent, suppression, relecture du `.arm`, suppression jusqu'à un seul objet. Les scripts utilisent
+`studio_meshes_sort`, `studio_mesh_set_parent`, `studio_layer_new`, `studio_layer_masks` (`studio_atlas.c`) et
+`script_object_remove`. Sans le patch, 8 vérifications sur 12 échouent (objets qui changent de jeu, masques figés).
+Au 2026-09-27, après la fusion avec le lot D1 : tout passe.
+
+**Signes que l'upstream l'a corrigé.** `atlas_objects` mentionné dans `tab_meshes.c`, ou `tab_meshes_remapped_mask`
+qui traite les masques au-delà du nombre d'objets, ou un remappage à la suppression. Rejouer le banc sans le patch.
+
+**Non couvert.** La fusion d'objets (`util_mesh.c`, Merge Down) retire déjà l'entrée d'`atlas_objects` et remappe
+ses masques elle-même, mais pas le changement d'ordre des atlas utilisés qu'elle peut entraîner. La duplication et
+l'ajout de forme (`util_mesh_duplicate_object`, `tab_meshes_append_shape`) n'ajoutent pas d'entrée : `atlas_objects`
+devient trop court et les jeux retombent sur un seul (comme après un import qui ajoute des objets). L'annulation
+(historique) n'enregistre ni l'ordre des objets ni ces remappages.
