@@ -608,9 +608,13 @@ static void create_window(iron_window_options_t *options) {
 	windows[0].handle = window;
 	windows[0].view   = view;
 
-	[window makeKeyAndOrderFront:nil];
+	// STUDIO-PATCH(headless): window left hidden when options->visible is false (--background), see
+	// paint/plugins/external/PATCHES.md
+	if (options->visible) {
+		[window makeKeyAndOrderFront:nil];
+	}
 
-	if (options->mode == IRON_WINDOW_MODE_FULLSCREEN) {
+	if (options->visible && options->mode == IRON_WINDOW_MODE_FULLSCREEN) {
 		[window toggleFullScreen:nil];
 		windows[0].fullscreen = true;
 	}
@@ -659,8 +663,14 @@ void iron_init(iron_window_options_t *win) {
 	@autoreleasepool {
 		myapp = [IronApplication sharedApplication];
 		[myapp finishLaunching];
-		[[NSRunningApplication currentApplication] activateWithOptions:(NSApplicationActivateAllWindows | NSApplicationActivateIgnoringOtherApps)];
-		NSApp.activationPolicy = NSApplicationActivationPolicyRegular;
+		// STUDIO-PATCH(headless): without a visible window (--background), no focus taken and no Dock icon
+		if (win->visible) {
+			[[NSRunningApplication currentApplication] activateWithOptions:(NSApplicationActivateAllWindows | NSApplicationActivateIgnoringOtherApps)];
+			NSApp.activationPolicy = NSApplicationActivationPolicyRegular;
+		}
+		else {
+			NSApp.activationPolicy = NSApplicationActivationPolicyAccessory;
+		}
 		add_menubar();
 
 #ifdef WITH_GAMEPAD

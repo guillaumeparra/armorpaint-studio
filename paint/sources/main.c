@@ -387,6 +387,13 @@ void _kickstart() {
 	config_load();
 	config_init();
 	context_init();
+	// STUDIO-PATCH(headless): --background (and --api, which implies it) runs without showing the window, as its help
+	// says (args.c); read here because args_parse() comes after sys_start(), see plugins/external/PATCHES.md
+	for (i32 i = 1; i < iron_get_arg_count(); ++i) {
+		if (string_equals(iron_get_arg(i), "--background") || string_equals(iron_get_arg(i), "--api")) {
+			enable_window = false;
+		}
+	}
 	sys_start(config_get_options());
 
 #ifdef is_debug
