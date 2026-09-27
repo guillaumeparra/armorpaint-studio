@@ -83,6 +83,19 @@ check "--background : chemin propre, dans data/ de l app" 'case $DEF in "$BUNDLE
 check "--background : réglage en mémoire, configuration rechargée" 'has "$L" "t: set=1" && has "$L" "t: pref=[$W/cfg/config.ocio] origin=[preferences]"'
 check "--background : fichier de l artiste intact" '[ "$(snapshot)" = "$before" ]'
 
+# 1a'. App en lecture seule (installée par l'IT) : préférences, journal d'audit et file des publishes vont dans le
+# dossier de sauvegarde d'ArmorPaint. Sur une copie de l'app, pour ne pas toucher au build.
+rm -rf "$W/ro" && mkdir -p "$W/ro"
+cp -R "$(dirname "$BUNDLE")" "$W/ro/"
+RO=$W/ro/$(basename "$(dirname "$BUNDLE")")
+chmod -R a-w "$RO/Contents/Resources"
+perl -e 'alarm 120; exec @ARGV' "$RO/Contents/MacOS/$(basename "$APP")" --background --script "$W/p1.c" \
+	-ApplePersistenceIgnoreState YES > "$W/p1ro.log" 2>&1 || true
+chmod -R u+w "$W/ro" && rm -rf "$W/ro"
+L=$W/p1ro.log
+RODEF=$(sed -n 's/^t: path=\[\(.*\)\]$/\1/p' "$L")
+check "app en lecture seule : dossier de sauvegarde, dit au journal" 'case $RODEF in "$HOME/Library/Application Support/"*/studio_prefs.json) starts "$L" "studio: preferences: the app folder is read-only, studio files go to " && ! printf "%s" "$RODEF" | grep -qE "//|/\./" ;; *) false ;; esac'
+
 # 1b. $STUDIO_PREFS absent : défauts ; chaque changement l'écrit.
 cat > "$W/p2.c" << EOF
 int main() {

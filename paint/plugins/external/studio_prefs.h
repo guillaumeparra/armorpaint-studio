@@ -1,7 +1,8 @@
 #pragma once
 
 // Lot A5 : préférences studio, dans studio_prefs.json à côté du config.json d'ArmorPaint (dossier data/ de l'app, ou
-// dossier de sauvegarde du système quand l'app est dans un dossier protégé), ou dans le fichier $STUDIO_PREFS.
+// dossier de sauvegarde du système quand l'app est dans un dossier protégé ou en lecture seule), ou dans le fichier
+// $STUDIO_PREFS. Le journal d'audit et la file des publishes (lot C5) vont dans le même dossier.
 // config.json est réécrit champ par champ par config_save() : une clé inconnue y serait perdue, d'où un fichier à part.
 //
 // Un objet JSON plat : "version", puis une clé par réglage ("ocio.config"…). Les clés inconnues (d'une autre version

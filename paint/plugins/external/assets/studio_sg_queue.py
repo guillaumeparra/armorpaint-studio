@@ -30,6 +30,7 @@ VERSION = 1
 DISCARDED = "discarded"
 _serial = itertools.count(1)
 _KEY = re.compile(r"[0-9A-Za-z][0-9A-Za-z_-]*")
+_THUMBNAIL = re.compile(r"[0-9A-Za-z][0-9A-Za-z_.-]*")
 
 
 def valid_key(key):
@@ -120,15 +121,26 @@ class Queue(object):
     def save(self, record):
         self._write(record)
 
-    def thumbnail_path(self, record):
+    def _thumbnail(self, record):
+        """La vignette dans le dossier, None sans vignette. Un nom de fichier seul : un enregistrement modifié à la main
+        (ou déposé dans une file partagée) ne fait ni lire, ni supprimer, ni déplacer un fichier hors de la file."""
         name = record.get("thumbnail")
-        path = os.path.join(self.directory, name) if name else None
+        if not name:
+            return None
+        if not isinstance(name, str) or _THUMBNAIL.fullmatch(name) is None:
+            log.warning("publish queue: %s: thumbnail %r ignored (not a file name)", record.get("key"), name)
+            return None
+        return os.path.join(self.directory, name)
+
+    def thumbnail_path(self, record):
+        path = self._thumbnail(record)
         return path if path and os.path.isfile(path) else None
 
     def _files(self, record):
         files = [self._path(record["key"])]
-        if record.get("thumbnail"):
-            files.append(os.path.join(self.directory, record["thumbnail"]))
+        thumbnail = self._thumbnail(record)
+        if thumbnail:
+            files.append(thumbnail)
         return files
 
     def remove(self, record):

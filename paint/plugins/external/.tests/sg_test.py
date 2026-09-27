@@ -1177,6 +1177,18 @@ class TestOffline(Base):
         self.assertEqual(q.count(), 0)
         write(os.path.join(q.directory, "broken.json"), "{")
         self.assertEqual(q.records(), [])  # illisible : sauté
+        # une vignette hors de la file (enregistrement modifié à la main) n'est ni lue, ni supprimée, ni déplacée
+        outside = os.path.join(self.workdir, "outside.png")
+        png(outside)
+        for name in (outside, "../outside.png", "..", "sub/x.png"):
+            key = q.add({"path": "/a/robot.v002.arm"})
+            record = dict(q.load(key), thumbnail=name)
+            q.save(record)
+            self.assertIsNone(q.thumbnail_path(record), name)
+            (q.discard if name == ".." else q.remove)(q.load(key))
+            self.assertIsNone(q.load(key), name)
+            self.assertTrue(os.path.isfile(outside), name)
+        self.assertTrue(os.path.isdir(q.directory))
 
     def test_audit(self):
         import studio_audit

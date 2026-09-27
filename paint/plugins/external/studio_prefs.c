@@ -257,6 +257,12 @@ void studio_prefs_init(void) {
 	}
 	else { // dossier de config.json (config_save, paint/sources/config.c)
 		const char *dir = path_is_protected() ? iron_internal_save_path() : path_data();
+		if (!studio_fs_can_write_in(dir)) {
+			// App installée en lecture seule (par l'IT, comme au studio ; macOS ne la dit jamais protégée) : ni les
+			// préférences, ni le journal d'audit, ni la file des publishes n'y seraient écrits.
+			dir = iron_internal_save_path();
+			iron_log("studio: preferences: the app folder is read-only, studio files go to %s", dir);
+		}
 		snprintf(sp.path, sizeof(sp.path), "%s%s%s", dir, PATH_SEP, PREFS_FILE);
 		clean_path(sp.path);
 	}
