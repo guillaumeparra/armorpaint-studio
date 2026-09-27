@@ -621,6 +621,7 @@ Ce chantier remplace la feuille de route E0-E11 de l'étude pour la v1.
 - **Moteur** : `sbsrender` et `sbscooker` de Designer, moteur `mtl` (par défaut ; c'est celui qu'affichent Designer et Painter). Un processus par rendu, toutes les sorties utiles dans le même appel. Mesuré sur le M4 : 1,40 s en 2048 pour colorful_planks, 0,6 à 0,9 s en 512.
 - **Chemin de `sbsrender`** : préférence `subzero.sbsrender` (fichier des préférences studio, `studio_prefs_*`), réglée dans un onglet **subzero** de la boîte Préférences (`box_preferences_add_tab`, patch `preferences-tab` déjà posé, comme l'onglet Color d'OCIO).
   - Préférence vide : détection dans `/Applications/Adobe Substance 3D Designer/*.app/Contents/MacOS/`.
+  - Sur le poste de Guillaume, la préférence vise la **copie isolée** `~/Desktop/code/sbsrender/MacOS/sbsrender` (E0) : figée, elle ne bouge pas avec les mises à jour de Designer.
   - `sbscooker` est cherché dans le même dossier. S'il manque, les .sbs sont refusés avec un message ; les .sbsar marchent.
   - L'onglet affiche le chemin retenu, la version lue (`sbsrender --version`) ou l'erreur, avec un bouton « Parcourir… ».
   - ArmorPaint transmet le chemin à la fenêtre : une seule source de vérité.
@@ -640,6 +641,19 @@ Ce chantier remplace la feuille de route E0-E11 de l'étude pour la v1.
 - Désactiver les mises à jour automatiques de Designer, pour que la référence ne change pas sous nos pieds.
 - Ranger les deux scripts de l'étude dans `external/assets/`.
 - **Aucun fichier Adobe dans le dépôt** : les bancs lisent leurs échantillons hors dépôt (étagère de Painter, `~/Desktop/code/sbsar/`) et se sautent s'ils sont absents.
+- ✅ **Copie isolée de `sbsrender`** (2026-09-27, demandée par Guillaume) dans `~/Desktop/code/sbsrender/`, hors dépôt, 271 Mo. Elle est refaite depuis Designer par `copier.sh`, rangé à côté.
+  - **Contenu** :
+    - `sbsrender` et `sbscooker` ;
+    - les 58 bibliothèques liées. `sbsrender` embarque aussi le moteur de rendu 3D de Designer (Eclair), d'où Qt et USD, que dyld exige au lancement même pour un rendu 2D ;
+    - les 3 moteurs (`plugins/engines`) ;
+    - la bibliothèque `sbs://` (`Resources/packages`, 128 Mo), pour le cuiseur seul.
+  - **La disposition compte.** Le rpath est `@executable_path/..`, et le moteur est cherché en `../plugins/engines`, les paquets en `../Resources/packages`.
+  - **Vérifié** :
+    - aucune image chargée depuis `/Applications` pendant un rendu (vmmap) ;
+    - rendus `neon --cpu-count 1` identiques à l'octet à ceux de Designer ;
+    - un .sbs cuit par la copie se rend au pixel près comme celui cuit par Designer (seul l'`asmuid` diffère, tiré à chaque cuisson) ;
+    - même vitesse.
+  - `mtl` n'est pas déterministe d'un rendu à l'autre (quelques niveaux sur 0,2 % des octets). C'est sans importance pour Guillaume ; les comparaisons au pixel près se font en `neon --cpu-count 1`.
 
 ### E1 — Description et rendu, en ligne de commande · **2-3 j**
 
@@ -653,6 +667,8 @@ En Python, testable sans ArmorPaint.
 - `subzero_render.py` (chemin de `sbsrender` reçu en argument) :
   - cuisson d'un .sbs par `sbscooker` dans `~/Library/Caches/subzero/cook/`, refaite seulement si le .sbs a changé (dépendances non suivies en v0) ;
   - rendu par `--input-graph`, `--set-value` (dont `$outputsize` et `$randomseed`), `--use-preset`, `--set-entry` pour les entrées image, `--input-graph-output` pour les seules sorties liées ;
+  - **`--memory-budget` toujours explicite.** Sans lui, `sbsrender` lance `system_profiler SPDisplaysDataType` pour lire la VRAM et l'attend 0,3 s. Avec, sur colorful_planks (M4, `mtl`), l'aperçu 512 passe de 1,00 à 0,65 s et le 2048 de 1,42 à 1,08 s, pixels inchangés. **La vitesse est la priorité de Guillaume.** Il reste un coût fixe d'environ 0,6 s par processus, dont 0,14 s de chargement des bibliothèques par dyld et environ 0,2 s de moteur ; l'écart entre 16 px et 512 px ne dépasse pas 0,05 s ;
+  - dossier de sortie créé avant l'appel : `sbsrender` ne le crée pas (code 47). Le rapport JSON qu'il écrit sur stdout (fichier de chaque sortie) sert à la vérification ;
   - formats : TGA 8 bits ; normale et hauteur en EXR half si le projet est en 16 ou 32 bits (`--set-output-format`, `--set-output-bit-depth`). Jamais de PNG : 7,5 s au lieu de 1,4 s en 2048 ;
   - **vérification** que chaque fichier attendu existe, et lecture de stderr. `sbsrender` rend le code 0 sur une sortie introuvable ou un bitmap manquant (image noire) ;
   - annulation par kill du groupe de processus.
@@ -709,7 +725,7 @@ En C dans `external/`, sur le modèle de `studio_export_window.c` et de `studio_
   - chemin de `sbsrender` vide, faux, puis corrigé dans les préférences sans relancer ArmorPaint ;
   - mise à jour d'un matériau utilisé par 2 calques ;
   - projet rouvert sans le plugin, avec un aspect identique.
-- **Critère chronométré** : colorful_planks en 2048, « Envoyer » → calque à jour en ≤ 2,5 s (rendu seul : 1,40 s).
+- **Critère chronométré** : colorful_planks en 2048, « Envoyer » → calque à jour en ≤ 2,5 s (rendu seul : 1,08 s avec `--memory-budget`).
 
 | Chantier E (v0) — total | **11-16 j** |
 |---|---|
@@ -736,7 +752,7 @@ En C dans `external/`, sur le modèle de `studio_export_window.c` et de `studio_
 
 | Risque | Impact | Parade |
 |---|---|---|
-| Adobe retire `sbsrender` de Designer (précédent de 2021) | 🟠 plus de nouveaux rendus | Mises à jour de Designer gelées ; les projets restent lisibles (textures sur disque) |
+| Adobe retire `sbsrender` de Designer (précédent de 2021) | 🟠 plus de nouveaux rendus | Copie isolée figée (E0) ; les projets restent lisibles (textures sur disque) |
 | Erreurs silencieuses de `sbsrender` | 🟠 image noire | Fichiers produits vérifiés, stderr lu (E1) |
 | Designer déplacé ou mis à jour : chemin périmé | 🟡 | Chemin vérifié à chaque lancement de la fenêtre, message qui renvoie aux préférences |
 | GPU partagé entre `sbsrender` (`mtl`) et ArmorPaint | 🟡 à-coups non mesurés | Mesure en E4 |
