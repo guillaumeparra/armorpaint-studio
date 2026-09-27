@@ -1322,7 +1322,7 @@ d'entrée : ils ne portent pas l'état du projet.
 | | |
 |---|---|
 | Fichiers | `paint/sources/util/util_udim.c` et `.h` (nouveaux), `paint/sources/global.h` (include), `paint/sources/main.c` (unity build) |
-| Commit studio | `d2bd0efe` sur la branche `studio` (lot D1) ; lot D2 sur la branche `d2`, fusionnée dans `studio` à la fin du lot |
+| Commit studio | `d2bd0efe` sur la branche `studio` (lot D1) ; lot D2 : branche `d2`, fusionnée dans `studio` par `a63f1318` |
 | Validé contre | upstream `85f6cf1c` (2026-09-27) |
 | Injection | deux lignes d'include ; le reste dans un fichier que l'upstream n'a pas |
 
@@ -1756,7 +1756,7 @@ derrière pour peindre dans la même image.
 | | |
 |---|---|
 | Fichier | `paint/sources/render/render_path_paint.c` (`render_path_paint_draw`) |
-| Commit studio | branche `d2` (lot D2, sous-lot D2b), fusionnée dans `studio` à la fin du lot |
+| Commit studio | branche `d2` (lot D2, sous-lot D2b), fusionnée dans `studio` par `a63f1318` |
 | Validé contre | upstream `85f6cf1c` (2026-09-27) |
 | Trouvé | 2026-09-27, tests du bake high poly par tuile (lot D2b) |
 | Constaté | présent en `85f6cf1c` ; depuis quand : non recherché |
@@ -1783,7 +1783,7 @@ réécrit (variable gardée, ou suite choisie avant la réécriture). Rejouer le
 | | |
 |---|---|
 | Fichiers | `base/sources/iron.h` (`gpu_delete_texture`), `base/sources/iron_gpu.c` et `.h` (`gpu_begin`, nouveau `gpu_target_beginning`), `paint/sources/history.c` (`history_copy_to_undo`, `history_paint`), `paint/sources/slots/slot_layer.c` (`slot_layer_swap`, `_clear`, `_invert_mask`, `_duplicate`, `_resize_and_set_bits`, `layers_apply_mask`), `paint/sources/util/util_layer.c` (`layers_merge_layer`, `layers_flatten`, `layers_draw_mesh_materials`), `paint/sources/ui/ui_header.c` (`ui_header_draw_tool_properties_to_mask`), `paint/sources/io/export_texture.c` (`export_texture_run_layers`, `export_texture_run`), `paint/sources/ui/tab_layers.c` (`tab_layers_draw_layer_context_menu_export_on_file_picked`), `paint/sources/render/make_mesh.c` (`make_mesh_run`), `paint/sources/render/make_paint.c` (`make_paint_run_context`), `paint/sources/render/make_texcoord.c` (`make_texcoord_run`), `paint/sources/render/make_clone.c` (`make_clone_run`), `paint/sources/render/make_material.c` (`make_material_bake_node_preview`), `paint/sources/render/render_path_base.c` (`render_path_base_commands`, `_draw_gbuffer`), `paint/sources/render/render_path_raytrace.c` (`render_path_raytrace_commands`), `paint/sources/render/render_path_raytrace_bake.c` (`render_path_raytrace_bake_commands`), `paint/sources/render/render_path_paint.c` (`render_path_paint_bind_layers`, `_unbind_layers`, `_commands_paint`, `_commands_live_brush`, `_draw`, `_dilate`), `paint/sources/uniforms.c` (`uniforms_ext_f32_link`), `paint/sources/util/util_uv.c` (`util_uv_cache_uv_map`, `_triangle_map`, `_dilate_map`, `_uv_island_map`), `paint/sources/ui/ui_view2d.c` (`ui_view2d_update`), `paint/sources/nodes_material/bake_texture_node.c` (`bake_texture_node_clear`, `_check_result`, nouveau `bake_texture_node_bake`), `paint/sources/util/util_mesh.c` (nouveau `util_mesh_udim_tile_table`), `paint/sources/types.h` (`layer_data_t`, nouveau `layer_tile_data_t`), `paint/sources/util/util_encode.c` (`util_encode_layer_data_size`, `util_encode_project`), `paint/sources/io/export_arm.c` (`export_arm_run_project`), `paint/sources/io/import_arm.c` (`import_arm_run_project`) |
-| Commit studio | branche `d2` (lot D2, sous-lots D2a à D2f), fusionnée dans `studio` à la fin du lot |
+| Commit studio | branche `d2` (lot D2, sous-lots D2a à D2f), fusionnée dans `studio` par `a63f1318` |
 | Validé contre | upstream `85f6cf1c` (2026-09-27) |
 | Injection | points d'appel et boucles sur les tuiles ; la logique dans `util_udim.c` ([udim-core](#udim-core)) |
 
@@ -1957,7 +1957,7 @@ sont corrigés par [mask-multiply](#mask-multiply) et [merge-group-undo](#merge-
 | | |
 |---|---|
 | Fichier | `paint/sources/util/util_layer.c` (`layers_merge_layer`, `layers_apply_masks`, `layers_merge_down`, `layers_merge_group` ; `layers_apply_mask_stack` et `layers_bake_mask_opacity` ajoutées) |
-| Commit studio | `37a7b094` sur la branche `studio` ; boucle de tuiles de `layers_bake_mask_opacity` à la fusion du lot D2 |
+| Commit studio | `37a7b094` sur la branche `studio` ; boucle de tuiles de `layers_bake_mask_opacity` : `c0b2410e`, fusionné par `a63f1318` |
 | Validé contre | upstream `85f6cf1c` (2026-09-27) |
 | Constaté | 2026-09-27 ; présent en `85f6cf1c` |
 
