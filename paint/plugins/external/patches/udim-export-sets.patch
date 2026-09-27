@@ -1,0 +1,180 @@
+diff --git a/paint/sources/io/export_texture.c b/paint/sources/io/export_texture.c
+index 221e8ba7..bc787310 100644
+--- a/paint/sources/io/export_texture.c
++++ b/paint/sources/io/export_texture.c
+@@ -205,6 +205,31 @@ static void export_texture_set_channel(f32 value, buffer_t *to, i32 to_channel,
+ 	}
+ }
+ 
++// STUDIO-PATCH(udim-export-sets): a layer limited to a texture set has a mask past the objects (project_get_atlas_objects),
++// which upstream read as an object past the end of paint_objects in the per object, per udim tile and selected exports.
++// Objects of the texture set of such a mask; NULL for an object mask, no mask, a set no longer used or sets that no longer
++// match the objects (the layer then paints every object, as in the viewport).
++static mesh_object_t_array_t *export_texture_mask_set_objects(i32 mask) {
++	string_array_t *atlases = project_get_used_atlases();
++	i32             i       = mask - g_project->_->paint_objects->length - 1;
++	if (i < 0 || atlases == NULL || i >= atlases->length || g_project->atlas_objects->length != g_project->_->paint_objects->length) {
++		return NULL;
++	}
++	return project_get_atlas_objects(mask);
++}
++
++static bool export_texture_objects_have(mesh_object_t_array_t *objects, char *name) {
++	for (i32 i = 0; i < objects->length; ++i) {
++		if (string_equals(objects->buffer[i]->base->name, name)) {
++			return true;
++		}
++	}
++	return false;
++}
++
++// STUDIO-PATCH(udim-export-sets): texture set exported per udim tile, its name goes before the channel in the file names
++static char *export_texture_udim_set = NULL;
++
+ static void export_texture_run_layers(char *path, slot_layer_t_array_t *layers, char *object_name, bool bake_material) {
+ 	i32 texture_size_x = config_get_texture_res_x();
+ 	i32 texture_size_y = config_get_texture_res_y();
+@@ -238,12 +263,21 @@ static void export_texture_run_layers(char *path, slot_layer_t_array_t *layers,
+ #endif
+ 	// Append object mask name
+ 	bool export_selected = g_context->layers_export == EXPORT_MODE_SELECTED;
+-	if (export_selected && slot_layer_get_object_mask(layers->buffer[0]) > 0) {
++	i32  selected_mask   = export_selected ? slot_layer_get_object_mask(layers->buffer[0]) : 0;         // STUDIO-PATCH(udim-export-sets)
++	if (export_selected && selected_mask > 0 && selected_mask <= g_project->_->paint_objects->length) { // STUDIO-PATCH(udim-export-sets)
+ 		f = string("%s_%s", f, g_project->_->paint_objects->buffer[slot_layer_get_object_mask(layers->buffer[0]) - 1]->base->name);
+ 	}
++	// STUDIO-PATCH(udim-export-sets): a layer limited to a texture set is named after the set
++	else if (export_selected && export_texture_mask_set_objects(selected_mask) != NULL) {
++		f = string("%s_%s", f, project_get_used_atlases()->buffer[selected_mask - g_project->_->paint_objects->length - 1]);
++	}
+ 	if (!is_udim && !export_selected && !string_equals(object_name, "")) {
+ 		f = string("%s_%s", f, object_name);
+ 	}
++	// STUDIO-PATCH(udim-export-sets): "<file>_<set>_<channel>.<tile>" for a texture set exported per udim tile
++	if (is_udim && export_texture_udim_set != NULL) {
++		f = string("%s_%s", f, export_texture_udim_set);
++	}
+ 
+ 	// Export a single udim tile when the target is one
+ 	i32 udim_slot = -1;
+@@ -286,7 +320,8 @@ static void export_texture_run_layers(char *path, slot_layer_t_array_t *layers,
+ 			continue;
+ 		}
+ 
+-		if (!string_equals(object_name, "") && slot_layer_get_object_mask(l1) > 0) {
++		// STUDIO-PATCH(udim-export-sets): object masks only, set masks below
++		if (!string_equals(object_name, "") && slot_layer_get_object_mask(l1) > 0 && slot_layer_get_object_mask(l1) <= g_project->_->paint_objects->length) {
+ 			if (is_udim && !ends_with(g_project->_->paint_objects->buffer[slot_layer_get_object_mask(l1) - 1]->base->name, object_name)) {
+ 				continue;
+ 			}
+@@ -295,6 +330,13 @@ static void export_texture_run_layers(char *path, slot_layer_t_array_t *layers,
+ 				continue;
+ 			}
+ 		}
++		// STUDIO-PATCH(udim-export-sets): per object, a layer limited to a texture set goes with the objects of the set; per
++		// udim tile, into every tile of the set being exported (export_texture_run_udim_sets), as the shared layers
++		mesh_object_t_array_t *set_objects = export_texture_mask_set_objects(slot_layer_get_object_mask(l1));
++		if (set_objects != NULL && g_context->layers_export == EXPORT_MODE_PER_OBJECT && !string_equals(object_name, "") &&
++		    !export_texture_objects_have(set_objects, object_name)) {
++			continue;
++		}
+ 
+ 		gpu_texture_t        *mask    = empty;
+ 		slot_layer_t_array_t *l1masks = slot_layer_get_masks(l1, true);
+@@ -597,6 +639,51 @@ static void export_texture_run_bake_material(char *path) {
+ 	export_texture_run_layers(path, layers, "", true);
+ }
+ 
++// STUDIO-PATCH(udim-export-sets): per udim tile with texture sets (lot D1), the maps of each set for each tile holding one of
++// its objects, "<file>_<set>_<channel>.<tile>". A set gets the layers the Visible export gives it: shared ones, those
++// limited to one of its objects (a tile gets those of its own objects) and those limited to the set. The layer atlas
++// keeps one cell per tile for all the sets: a shared layer gives the same cell to every set of a tile.
++static bool export_texture_layer_in_set(slot_layer_t *l, i32 atlas_index) {
++	i32 mask = slot_layer_get_object_mask(l);
++	if (mask == 0) {
++		return true;
++	}
++	if (mask <= g_project->_->paint_objects->length) {
++		return g_project->atlas_objects->buffer[mask - 1] == atlas_index;
++	}
++	mesh_object_t_array_t *objects = project_get_atlas_objects(mask); // Every object for a set no longer used
++	for (i32 i = 0; i < objects->length; ++i) {
++		if (g_project->atlas_objects->buffer[array_index_of(g_project->_->paint_objects, objects->buffer[i])] == atlas_index) {
++			return true;
++		}
++	}
++	return false;
++}
++
++static void export_texture_run_udim_sets(char *path, string_array_t *udim_tiles) {
++	mesh_object_t_array_t *objects = g_project->_->paint_objects;
++	for (i32 atlas_index = 0; atlas_index < g_project->atlas_names->length; ++atlas_index) {
++		slot_layer_t_array_t *layers = any_array_create_from_raw((void *[]){}, 0);
++		for (i32 i = 0; i < g_project->_->layers->length; ++i) {
++			if (export_texture_layer_in_set(g_project->_->layers->buffer[i], atlas_index)) {
++				any_array_push(layers, g_project->_->layers->buffer[i]);
++			}
++		}
++		for (i32 t = 0; t < udim_tiles->length && layers->length > 0; ++t) {
++			bool in_tile = false;
++			for (i32 i = 0; i < objects->length && !in_tile; ++i) {
++				char *name = objects->buffer[i]->base->name;
++				in_tile    = g_project->atlas_objects->buffer[i] == atlas_index && util_mesh_udim_tile(name) >= 0 && ends_with(name, udim_tiles->buffer[t]);
++			}
++			if (in_tile) {
++				export_texture_udim_set = g_project->atlas_names->buffer[atlas_index];
++				export_texture_run_layers(path, layers, udim_tiles->buffer[t], false);
++				export_texture_udim_set = NULL;
++			}
++		}
++	}
++}
++
+ void export_texture_run(char *path, bool bake_material) {
+ 
+ 	// Exporting without opening the export box
+@@ -630,7 +717,11 @@ void export_texture_run(char *path, bool bake_material) {
+ 				any_array_push(udim_tiles, udim_tile);
+ 			}
+ 		}
+-		if (udim_tiles->length > 0) {
++		// STUDIO-PATCH(udim-export-sets): the texture sets, when they match the objects, each for its tiles
++		if (udim_tiles->length > 0 && project_get_used_atlases() != NULL && g_project->atlas_objects->length == g_project->_->paint_objects->length) {
++			export_texture_run_udim_sets(path, udim_tiles);
++		}
++		else if (udim_tiles->length > 0) {
+ 			for (i32 i = 0; i < udim_tiles->length; ++i) {
+ 				char *udim_tile = udim_tiles->buffer[i];
+ 				export_texture_run_layers(path, g_project->_->layers, udim_tile, false);
+@@ -644,12 +735,19 @@ void export_texture_run(char *path, bool bake_material) {
+ 		string_array_t *object_names = any_array_create_from_raw((void *[]){}, 0);
+ 		for (i32 i = 0; i < g_project->_->layers->length; ++i) {
+ 			slot_layer_t *l = g_project->_->layers->buffer[i];
+-			if (slot_layer_get_object_mask(l) > 0) {
++			if (slot_layer_get_object_mask(l) > 0 && slot_layer_get_object_mask(l) <= g_project->_->paint_objects->length) { // STUDIO-PATCH(udim-export-sets)
+ 				char *name = g_project->_->paint_objects->buffer[slot_layer_get_object_mask(l) - 1]->base->name;
+ 				if (string_array_index_of(object_names, name) == -1) {
+ 					any_array_push(object_names, name);
+ 				}
+ 			}
++			// STUDIO-PATCH(udim-export-sets): a layer limited to a texture set gives a file to each object of the set
++			mesh_object_t_array_t *set_objects = export_texture_mask_set_objects(slot_layer_get_object_mask(l));
++			for (i32 j = 0; set_objects != NULL && j < set_objects->length; ++j) {
++				if (string_array_index_of(object_names, set_objects->buffer[j]->base->name) == -1) {
++					any_array_push(object_names, set_objects->buffer[j]->base->name);
++				}
++			}
+ 		}
+ 		if (object_names->length > 0) {
+ 			for (i32 i = 0; i < object_names->length; ++i) {
+@@ -671,7 +769,9 @@ void export_texture_run(char *path, bool bake_material) {
+ 				}
+ 			}
+ 		}
+-		if (atlas_export) {
++		// STUDIO-PATCH(udim-export-sets): the selected layer alone with texture sets too, upstream exported every layer of
++		// every set
++		if (atlas_export && g_context->layers_export != EXPORT_MODE_SELECTED) {
+ 			string_array_t *used_atlases = project_get_used_atlases();
+ 			for (i32 atlas_index = 0; atlas_index < g_project->atlas_objects->length; ++atlas_index) {
+ 				// Skip atlases that no object is assigned to

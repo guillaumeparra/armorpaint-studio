@@ -1,5 +1,5 @@
 diff --git a/paint/plugins/io_fbx/io_fbx.c b/paint/plugins/io_fbx/io_fbx.c
-index 4c3dabaf..9db4c1cf 100644
+index 4c3dabaf..ec923dcc 100644
 --- a/paint/plugins/io_fbx/io_fbx.c
 +++ b/paint/plugins/io_fbx/io_fbx.c
 @@ -1,14 +1,13 @@
@@ -157,7 +157,7 @@ index 4c3dabaf..9db4c1cf 100644
  
  	uint32_t max_tris = 1;
  	for (size_t ni = 0; ni < scene->nodes.count; ++ni) {
-@@ -165,67 +254,98 @@ static void build_material_split(ufbx_scene *scene) {
+@@ -165,67 +254,121 @@ static void build_material_split(ufbx_scene *scene) {
  			const char *mat_name = (midx < n->materials.count && n->materials.data[midx]) ? n->materials.data[midx]->name.data : n->name.data;
  
  			int m = -1;
@@ -215,6 +215,43 @@ index 4c3dabaf..9db4c1cf 100644
 +	split_finish();
 +	split_free();
 +}
++
++// STUDIO-PATCH(fbx-split): one mesh per node and tile, named <node>.<tile>, instead of all the nodes merged per tile.
++// Triangles over several tiles are cut along the borders (iron_udim.c); upstream took the tile of the uv barycenter
++// cast with (int) (u = -0.5 in 1001, u >= 10 in the next row) and stretched the triangle into it. A uv out of the tiles
++// 1001-1990, or more tiles than the layer atlas holds, refuses the file with a message. Nodes without uvs keep their
++// own mesh, without a tile. By material and tile (lot D1), one mesh per material and tile, named <material>.<tile>,
++// gathered across the nodes.
++typedef struct {
++	int        *tiles; // Split of each tile for the current node or material, -1 if none yet
++	bool       *used;  // Tiles of the file
++	int        *used_count;
++	const char *name;
++	bool        tex1;
++	bool        col;
++} udim_node_t;
++
++// By material, the splits of the tiles of each material, kept from a node to the next
++typedef struct {
++	const char *name;
++	int         tiles[UDIM_TILES_U * UDIM_TILES_V];
++} udim_material_t;
++
++static udim_material_t *udim_materials      = NULL;
++static int              udim_material_count = 0;
++
++static int *udim_material_tiles(const char *name) {
++	for (int i = 0; i < udim_material_count; ++i) {
++		if (strcmp(udim_materials[i].name, name) == 0) {
++			return udim_materials[i].tiles;
++		}
++	}
++	udim_materials     = realloc(udim_materials, sizeof(udim_material_t) * (udim_material_count + 1));
++	udim_material_t *m = &udim_materials[udim_material_count++];
++	m->name            = name;
++	memset(m->tiles, -1, sizeof(m->tiles));
++	return m->tiles;
++}
  
 -	mat_split_meshes = malloc(sizeof(raw_mesh_t *) * num_mats);
 -	mat_split_count  = num_mats;
@@ -224,20 +261,6 @@ index 4c3dabaf..9db4c1cf 100644
 -		free(pf[m].data);
 -		free(nf[m].data);
 -		free(tf[m].data);
-+// STUDIO-PATCH(fbx-split): one mesh per node and tile, named <node>.<tile>, instead of all the nodes merged per tile.
-+// Triangles over several tiles are cut along the borders (iron_udim.c); upstream took the tile of the uv barycenter
-+// cast with (int) (u = -0.5 in 1001, u >= 10 in the next row) and stretched the triangle into it. A uv out of the tiles
-+// 1001-1990, or more tiles than the layer atlas holds, refuses the file with a message. Nodes without uvs keep their
-+// own mesh, without a tile.
-+typedef struct {
-+	int         tiles[UDIM_TILES_U * UDIM_TILES_V]; // Split of each tile for the current node, -1 if none yet
-+	bool       *used;                               // Tiles of the file
-+	int        *used_count;
-+	const char *name;
-+	bool        tex1;
-+	bool        col;
-+} udim_node_t;
-+
 +static void udim_push(split_t *s, const udim_vert_t *v, bool uv, bool tex1, bool col) {
 +	for (int k = 0; k < 3; ++k) {
 +		fbuf_push(&s->pf, v->pos[k]);
@@ -278,7 +301,7 @@ index 4c3dabaf..9db4c1cf 100644
 +}
  
 -	const char *base_name = "Mesh";
-+static void build_udim_split(ufbx_scene *scene) {
++static void build_udim_split(ufbx_scene *scene, bool by_material) {
 +	bool any_col = false;
  	for (size_t ni = 0; ni < scene->nodes.count; ++ni) {
  		ufbx_node *n = scene->nodes.data[ni];
@@ -290,7 +313,7 @@ index 4c3dabaf..9db4c1cf 100644
  	}
  
  	uint32_t max_tris = 1;
-@@ -236,80 +356,111 @@ static void build_udim_split(ufbx_scene *scene) {
+@@ -236,80 +379,122 @@ static void build_udim_split(ufbx_scene *scene) {
  	}
  	uint32_t *indices = malloc(sizeof(uint32_t) * max_tris * 3);
  
@@ -298,6 +321,7 @@ index 4c3dabaf..9db4c1cf 100644
 -		ufbx_node *n = scene->nodes.data[ni];
 -		if (!n->mesh)
 +	bool  used[UDIM_TILES_U * UDIM_TILES_V] = {0};
++	int   node_tiles[UDIM_TILES_U * UDIM_TILES_V];
 +	int   tiles                             = 0;
 +	int   cut                               = 0;
 +	int   invalid                           = 0;
@@ -315,8 +339,9 @@ index 4c3dabaf..9db4c1cf 100644
  		ufbx_matrix normal_mat = ufbx_get_compatible_matrix_for_normals(n);
  		bool        has_tex    = mesh->vertex_uv.exists;
 +		bool        has_col    = mesh->vertex_color.exists;
-+		udim_node_t u          = {.used = used, .used_count = &tiles, .name = n->name.length > 0 ? n->name.data : "Mesh", .tex1 = active_tex1, .col = any_col};
-+		memset(u.tiles, -1, sizeof(u.tiles));
++		const char *node_name  = n->name.length > 0 ? n->name.data : "Mesh";
++		udim_node_t u          = {.tiles = node_tiles, .used = used, .used_count = &tiles, .name = node_name, .tex1 = active_tex1, .col = any_col};
++		memset(node_tiles, -1, sizeof(node_tiles));
 +		int no_uv = -1;
 +		if (!has_tex) {
 +			no_uv = split_add(split_name(u.name, 0));
@@ -369,6 +394,12 @@ index 4c3dabaf..9db4c1cf 100644
 -					fbuf_push(&nf[t], nv.x);
 -					fbuf_push(&nf[t], -nv.z);
 -					fbuf_push(&nf[t], nv.y);
++			if (by_material && has_tex) { // The tiles of the face's material, the node's name without material
++				uint32_t       midx = mesh->face_material.count > 0 ? mesh->face_material.data[fi] : 0;
++				ufbx_material *m    = midx < n->materials.count ? n->materials.data[midx] : NULL;
++				u.name              = m != NULL && m->name.length > 0 ? m->name.data : node_name;
++				u.tiles             = udim_material_tiles(u.name);
++			}
 +			uint32_t num_triangles = ufbx_triangulate_face(indices, max_tris * 3, mesh, mesh->faces.data[fi]);
 +			for (uint32_t t = 0; t < num_triangles; ++t) {
 +				udim_vert_t tri[3] = {0};
@@ -391,7 +422,7 @@ index 4c3dabaf..9db4c1cf 100644
 -						fbuf_push(&tf[t], uv.y - tile_v);
 +						vt->uv[0]    = uv.x;
 +						vt->uv[1]    = uv.y;
-+					}
+ 					}
 +					if (u.tex1) {
 +						ufbx_vec2 uv = ufbx_get_vertex_vec2(&mesh->uv_sets.data[1].vertex_uv, a);
 +						vt->uv1[0]   = uv.x;
@@ -403,14 +434,14 @@ index 4c3dabaf..9db4c1cf 100644
 +						vt->col[1]  = c.y;
 +						vt->col[2]  = c.z;
 +						vt->col[3]  = c.w;
- 					}
- 				}
++					}
++				}
 +				if (!has_tex) {
 +					for (int k = 0; k < 3; ++k) {
 +						udim_push(&splits[no_uv], &tri[k], false, u.tex1, any_col);
 +					}
 +					continue;
-+				}
+ 				}
 +				int r = udim_split_triangle(tri, udim_emit, &u);
 +				if (r == 0 && invalid++ == 0) {
 +					int k         = udim_uv_valid(tri[0].uv[0], tri[0].uv[1]) ? udim_uv_valid(tri[1].uv[0], tri[1].uv[1]) ? 2 : 1 : 0;
@@ -456,13 +487,27 @@ index 4c3dabaf..9db4c1cf 100644
 +	split_free();
 +	free(invalid_name);
 +	free(no_uvs_name);
++	free(udim_materials);
++	udim_materials      = NULL;
++	udim_material_count = 0;
  }
  
  void io_fbx_parse_mesh(raw_mesh_t *raw, ufbx_mesh *mesh, ufbx_matrix *to_world, ufbx_matrix *to_world_unscaled, bool force_tex, bool force_col) {
-@@ -525,6 +676,15 @@ void *io_fbx_parse(char *buf, size_t size) {
+@@ -518,13 +703,23 @@ void *io_fbx_parse(char *buf, size_t size) {
+ 			build_material_split(active_eval_scene);
+ 			mat_split_idx = 0;
+ 		}
+-		else if (plugins_split_by == 2 /* SPLIT_TYPE_UDIM */) {
+-			build_udim_split(active_eval_scene);
++		else if (plugins_split_by == 2 /* SPLIT_TYPE_UDIM */ || plugins_split_by == 3 /* SPLIT_TYPE_MATERIAL_UDIM */) {
++			build_udim_split(active_eval_scene, plugins_split_by == 3); // STUDIO-PATCH(fbx-split): by material and tile too
+ 			mat_split_idx = 0;
+ 		}
  	}
  
- 	if (plugins_split_by == 1 /* SPLIT_TYPE_MATERIAL */ || plugins_split_by == 2 /* SPLIT_TYPE_UDIM */) {
+-	if (plugins_split_by == 1 /* SPLIT_TYPE_MATERIAL */ || plugins_split_by == 2 /* SPLIT_TYPE_UDIM */) {
++	// STUDIO-PATCH(fbx-split): by material and tile too
++	if (plugins_split_by == 1 /* SPLIT_TYPE_MATERIAL */ || plugins_split_by == 2 /* SPLIT_TYPE_UDIM */ || plugins_split_by == 3) {
 +		if (mat_split_count == 0) { // STUDIO-PATCH(fbx-split): no triangle, or udim file refused: read past the array
 +			ufbx_free_scene(active_base_scene);
 +			active_base_scene = NULL;

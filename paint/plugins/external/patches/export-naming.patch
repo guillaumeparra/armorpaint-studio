@@ -1,8 +1,8 @@
 diff --git a/paint/sources/io/export_texture.c b/paint/sources/io/export_texture.c
-index 93a0ae7b..96e9a0b1 100644
+index 5ca879b0..bc787310 100644
 --- a/paint/sources/io/export_texture.c
 +++ b/paint/sources/io/export_texture.c
-@@ -233,6 +233,9 @@ static void export_texture_run_layers(char *path, slot_layer_t_array_t *layers,
+@@ -258,6 +258,9 @@ static void export_texture_run_layers(char *path, slot_layer_t_array_t *layers,
  	render_target_t *rt    = any_map_get(render_path_render_targets, "empty_white");
  	gpu_texture_t   *empty = rt->_image;
  
@@ -11,8 +11,8 @@ index 93a0ae7b..96e9a0b1 100644
 +#endif
  	// Append object mask name
  	bool export_selected = g_context->layers_export == EXPORT_MODE_SELECTED;
- 	if (export_selected && slot_layer_get_object_mask(layers->buffer[0]) > 0) {
-@@ -412,6 +415,14 @@ static void export_texture_run_layers(char *path, slot_layer_t_array_t *layers,
+ 	i32  selected_mask   = export_selected ? slot_layer_get_object_mask(layers->buffer[0]) : 0;         // STUDIO-PATCH(udim-export-sets)
+@@ -472,6 +475,14 @@ static void export_texture_run_layers(char *path, slot_layer_t_array_t *layers,
  		char                    *tex_name = !string_equals(t->name, "") ? string("_%s", t->name) : "";
  		bool  single_channel = string_equals(c->buffer[0], c->buffer[1]) && string_equals(c->buffer[1], c->buffer[2]) && string_equals(c->buffer[3], "1.0");
  		char *out_path       = string("%s%s%s%s%s", path, PATH_SEP, f, tex_name, ext);

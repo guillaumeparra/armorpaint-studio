@@ -2,7 +2,8 @@
 // — un appel par mesh tant que has_next — et imprime chaque mesh (positions dépackées, normales, uvs, second jeu
 // d'uv et couleurs en int16) ainsi que les messages de l'importeur.
 //
-// Usage : fbx_test <fichier.fbx> [0|1|2]     0 : split par objet (défaut), 1 : par matériau, 2 : par tuile UDIM
+// Usage : fbx_test <fichier.fbx> [0|1|2|3]   0 : split par objet (défaut), 1 : par matériau, 2 : par tuile UDIM,
+//                                            3 : par matériau et par tuile UDIM
 // Compilé avec -DIO_FBX='"<io_fbx.c>"' : l'arbre courant ou l'upstream (voir fbx.sh).
 
 #include IO_FBX

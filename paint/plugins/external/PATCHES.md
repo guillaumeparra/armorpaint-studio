@@ -42,7 +42,11 @@ git push origin upstream studio
 `merge` et non `rebase` : l'historique poussé n'est jamais réécrit.
 
 Pour régénérer un patch après l'avoir refait : `git diff upstream studio -- <fichiers> > patches/<id>.patch`,
-puis `tools/check_patches.sh --ack <id>`.
+puis `tools/check_patches.sh --ack <id>`. Quand un autre patch touche le même fichier, ce diff mêlerait les deux :
+partir d'une copie du fichier courant d'où l'on retire ce seul patch (`git apply --reverse` de l'ancien `.patch`,
+avec `-C1` si un autre patch a changé son contexte), puis `git diff --no-index <copie> <fichier>`, chemins de
+l'en-tête ramenés à `a/<fichier>` et `b/<fichier>`. `check_patches.sh` ne demande que ceci : chaque `.patch` se retire
+seul de l'arbre courant.
 
 ---
 
@@ -285,8 +289,11 @@ patch, plantage `__chk_fail_overflow` ; avec, titre tronqué.
 |---|---|
 | Fichier | `paint/sources/io/export_texture.c` (`export_texture_run_layers`) |
 | Commit studio | `0c025bd7` sur la branche `studio` |
-| Validé contre | upstream `85f6cf1c` (2026-09-26) |
+| Validé contre | upstream `85f6cf1c` (2026-09-27) |
 | Injection | 11 lignes sous `#ifdef WITH_EXTERNAL`, en deux blocs — l'app compile toujours sans `external/` |
+
+`.patch` régénéré au lot D1 (2026-09-27), code inchangé : [udim-export-sets](#udim-export-sets) a changé la ligne qui
+suit le premier bloc.
 
 **Motif.** L'upstream nomme les textures exportées `<dossier choisi>/<nom du fichier>_<texture><ext>`. Le nom de
 fichier est celui de la dernière boîte de fichiers (`ui_files_filename`). Un studio veut le chemin que donne son
@@ -780,8 +787,8 @@ accessibles. La boîte d'export de bake (`box_export_show_bake_material`) et l'e
 
 | | |
 |---|---|
-| Fichiers | `base/sources/iron_udim.c` et `.h` (nouveaux), `base/sources/iron_obj.c` (`obj_parse`, nouveaux `obj_udim_*`) et `.h`, `paint/sources/io/import_obj.c` (`import_obj_parse`, nouveau `_import_obj_udim`), `paint/sources/io/import_mesh.c` (`import_mesh_run`, `import_mesh_finish_import`, `_import_mesh_unique_name`) |
-| Commit studio | `4c1ca6cb` sur la branche `studio` |
+| Fichiers | `base/sources/iron_udim.c` et `.h` (nouveaux), `base/sources/iron_obj.c` (`obj_parse`, nouveaux `obj_udim_*`) et `.h`, `paint/sources/io/import_obj.c` (`import_obj_parse`, nouveau `_import_obj_udim`), `paint/sources/io/import_mesh.c` (`import_mesh_run`, `import_mesh_finish_import`, `_import_mesh_unique_name`) ; lot D1 : `paint/sources/enums.h` (`SPLIT_TYPE_MATERIAL_UDIM`), `paint/sources/ui/box_import_mesh.c` (`project_import_mesh_box_draw`) |
+| Commit studio | `4c1ca6cb` (lot D0) et `16ac7cb8` (lot D1) sur la branche `studio` |
 | Validé contre | upstream `85f6cf1c` (2026-09-27) |
 | Trouvé | 2026-09-26, analyse des UDIM (`ARMORPAINT_UDIM.md` §3, L11 à L13) ; L12 confirmé sous ASan : `heap-buffer-overflow` sur `num[tile] += 3` |
 
@@ -820,13 +827,28 @@ Deux défauts voisins, trouvés par les bancs :
   uv UDIM.
 - `obj_parse()` vide le nom au début de chaque fichier ; `_import_mesh_unique_name()` garde le suffixe de tuile et
   met le `.00X` devant (`body.001.1001`).
-- `import_mesh_finish_import()` appelle `studio_udim_import_hint()` (`external/studio_udim.c`) : pixels par tuile
-  dans la grille de l'atlas, et résolution de projet pour 2048 et 4096 px par tuile.
+- `import_mesh_finish_import()` appelle `studio_udim_import_done(import_mesh_append)` (`external/studio_atlas.c`) :
+  pixels par tuile dans la grille de l'atlas, et résolution de projet pour 2048 et 4096 px par tuile
+  (`studio_udim_hint`) ; depuis le lot D1, d'abord les jeux de textures par matériau (ci-dessous).
+
+**Lot D1 : par matériau et par tuile ensemble.** L'upstream n'a qu'un découpage à la fois : par objet, par
+matériau **ou** par tuile UDIM (L5, N8 d'`ARMORPAINT_UDIM.md`).
+- `SPLIT_TYPE_MATERIAL_UDIM` (3) s'ajoute à `split_type_t`. La boîte d'import garde le choix Object / Material et
+  gagne une case « UDIM Tiles » à côté : Object + UDIM est l'ancien « UDIM Tile », Material + UDIM le nouveau mode.
+  `plugins_split_by` suit, pour l'importeur FBX ([fbx-split](#fbx-split)).
+- `_import_obj_udim(…, by_material)` lit les parts par `usemtl` au lieu de `o` : un objet `<matériau>.<tuile>` par
+  matériau et par tuile, rassemblé de toutes les parts du matériau (un OBJ coupe un matériau à chaque objet et à chaque
+  `v` après des faces ; Maya répète `usemtl` dans chaque objet). Les parts sont packées chacune à son échelle : leurs
+  positions sont recalées sur la plus grande (`scale_pos`).
+- Après un tel import (pas un ajout), `studio_udim_import_done()` crée un jeu de textures par matériau, nommé comme
+  lui, avec ses tuiles (et le matériau sans uv, sans tuile). Refusé par `studio_atlas_set` (nom de plus de 64
+  caractères, plus de 256 matériaux) : les jeux restent ceux d'avant, la console dit pourquoi.
 
 L'include et les globales d'`iron_obj.c` sont placés hors des lignes d'obj-global-indices et d'obj-float-exponent
 (contexte de leurs `.patch`), et le découpage juste après la dernière ligne de contexte d'obj-global-indices. Chaîne
-d'`iron_obj.c` : voir [obj-float-exponent](#obj-float-exponent). Pour régénérer celui-ci :
-`git diff 4c1ca6cb^ 4c1ca6cb` (ou les commits qui l'ont refait).
+d'`iron_obj.c` : voir [obj-float-exponent](#obj-float-exponent). Le patch couvre deux commits, et `import_obj.c` et
+`import_mesh.c` portent aussi [import-null-guards](#import-null-guards) : pour le régénérer, retirer ce patch d'une
+copie de chaque fichier (voir l'introduction).
 
 **Test.** `.tests/obj.sh` (hors app, ASan/UBSan), section `udim/` :
 - `udim_clean` : grille UDIM sans triangle à cheval, sortie identique octet pour octet à l'upstream ;
@@ -844,15 +866,25 @@ coupé, signalé ; `cap` sans uv en tête du fichier : pas de dépliage proposé
 2026-09-27 : tout passe. Pendant le développement, ce banc a trouvé un use-after-free dans la boucle en deux passes
 de `_import_obj_udim` (part libérée sans vider sa case), corrigé avant le commit.
 
+Lot D1, `.tests/udim_app.sh` section 7 (OBJ et FBX) : `skin.1001`, `skin.1002`, `skin.1011` et `cloth.1002`, un
+jeu de textures par matériau, un triangle coupé ; positions recalées et surfaces uv conservées par matériau, relues
+par un export OBJ du maillage (`script_export_mesh`) ; témoin : le même fichier par objet et par tuile, sans jeu.
+`.tests/sets_app.sh` section 6 : `udim_cube.obj` par matériau et par tuile, jeux body (1001, 1002, 1003, 1011) et
+cap (1012, 1013). Au 2026-09-27 : tout passe. Mutation : sans le recalage d'échelle, le contrôle des positions échoue
+(positions × 2,2).
+
 **Signes que l'upstream l'a corrigé.** `get_tile()` disparaît ou arrondit par `floorf`, `num[tile]` est borné, ou
 `reading_object` n'est plus conditionné par `!udim`. Rejouer la section `udim/` d'`.tests/obj.sh` contre l'upstream
 sans le patch : les cas de bug doivent passer.
 
 **Non couvert.**
-- Split UDIM et split par matériau restent exclusifs (un seul `split_by`) : phase D1.
-- Les uv vues par les matériaux restent celles de la case de l'atlas (L8) : phase D1.
-- L'identité de la tuile vient toujours du nom de l'objet (L4) : renommer `body.1001` dans l'onglet Meshes change sa
-  tuile.
+- Par matériau et par tuile, un matériau reste un objet par tuile (`skin.1001`, `skin.1002`), comme en D0 : le
+  regroupement en un objet à plages d'index est reporté au lot D2 (`ARMORPAINT_UDIM.md` §7).
+- Un ajout (append) ne crée pas de jeu de textures : `atlas_objects` ne couvre plus les objets ajoutés, et les jeux
+  sont ignorés (tout dans « Atlas 1 ») tant qu'on ne les redéfinit pas, comme pour tout ajout upstream.
+- L'identité de la tuile vient toujours du nom de l'objet (L4) : le renommage dans l'onglet Meshes la garde depuis le
+  lot D1 ([udim-tile-name](#udim-tile-name)), un nom `truc.1005` hors UDIM reste une tuile.
+- Les uv vues par les matériaux : corrigées au lot D1 (L8, [udim-material-uv](#udim-material-uv)).
 - glTF / GLB : pas de split UDIM, comme l'upstream. FBX : voir [fbx-split](#fbx-split).
 - Un triangle coupé devient plusieurs triangles : le nombre de sommets exporté par `--export-mesh` change.
 
@@ -863,7 +895,7 @@ sans le patch : les cas de bug doivent passer.
 | | |
 |---|---|
 | Fichier | `paint/plugins/io_fbx/io_fbx.c` (`io_fbx_parse`, splits par matériau et par tuile) |
-| Commit studio | `de0ba0c5` sur la branche `studio` |
+| Commit studio | `de0ba0c5` (lot D0) et `16ac7cb8` (lot D1) sur la branche `studio` |
 | Validé contre | upstream `85f6cf1c` (2026-09-27) |
 | Trouvé | 2026-09-26, analyse des UDIM (`ARMORPAINT_UDIM.md` §3, L14), puis banc `.tests/fbx.sh` |
 
@@ -887,8 +919,13 @@ sans le patch : les cas de bug doivent passer.
 - Uv pour toutes les faces ou aucune (`mixed_uvs`), second jeu d'uv et couleurs repris comme dans le split par objet.
 - Aucun triangle : NULL au lieu d'une lecture hors du tableau.
 
-Sans UDIM ni bug connu, la sortie est identique à l'upstream, octet pour octet. Pour régénérer :
-`git diff de0ba0c5^ de0ba0c5` (le hunk `ufbx_load_memory` d'`io_fbx_parse` appartient à import-null-guards).
+Lot D1 : par matériau et par tuile (`plugins_split_by` 3, voir [udim-import](#udim-import)), un mesh par matériau et
+par tuile, `<matériau>.<tuile>`, rassemblé d'un nœud à l'autre (`udim_material_tiles`, table des matériaux gardée
+pour tout le fichier) ; une face sans matériau donne ses tuiles sous le nom de son nœud, un nœud sans uv garde son mesh.
+
+Sans UDIM ni bug connu, la sortie est identique à l'upstream, octet pour octet. Pour régénérer : retirer ce patch d'une
+copie d'`io_fbx.c` (voir l'introduction) ; le hunk `ufbx_load_memory` d'`io_fbx_parse` appartient à
+import-null-guards.
 
 **Test.** `.tests/fbx.sh` (hors app, ASan/UBSan ; `fbx_test.c` lit le FBX comme `import_mesh_run`) :
 - `same/` : 8 fichiers (nœuds avec et sans uv, uv mêlées, second jeu d'uv et couleurs, uv hors [0, 1], jusqu'à
@@ -897,7 +934,11 @@ Sans UDIM ni bug connu, la sortie est identique à l'upstream, octet pour octet.
   tête, second jeu d'uv et couleurs, fichier vide, 70 matériaux) ; l'upstream échoue sur 16 d'entre eux (plantages,
   tuiles fausses, nœuds fusionnés, 100 tuiles sur 110, 64 meshes sur 70) ;
 - fuzz : au 2026-09-27, 300 mutations lues en split 0, 1 et 2 : **0 plantage** sur 900 lectures, contre 508 pour
-  l'upstream.
+  l'upstream ;
+- lot D1 : 3 cas par matériau et par tuile (`mat_udim` : deux nœuds, deux matériaux, un triangle à cheval ;
+  `mat_udim_mixed` : nœud sans matériau, nœud sans uv en tête ; `mat_udim_neg` : refus), mêmes vérifications que
+  l'UDIM, par matériau ; le fuzz lit aussi le split 3. Mutation (table des matériaux remise à zéro à chaque nœud) :
+  `mat_udim` échoue (meshes `skin.1001` et `cloth.1002` en double).
 
 Dans l'app, `.tests/udim_app.sh` (FBX) : `body.1001`, `body.1002`, `body.1011`, `cap` sans tuile, un triangle coupé ;
 `cap` sans uv en tête : pas de dépliage proposé ; uv négatives : refusé, son message reste, maillage gardé.
@@ -906,8 +947,7 @@ Dans l'app, `.tests/udim_app.sh` (FBX) : `body.1001`, `body.1002`, `body.1011`, 
 fusionne plus les nœuds. Rejouer `.tests/fbx.sh` contre l'upstream sans le patch.
 
 **Non couvert.**
-- Mêmes limites que l'OBJ ([udim-import](#udim-import)) : split UDIM et par matériau exclusifs, uv des matériaux
-  dans l'espace de la case.
+- Mêmes limites que l'OBJ ([udim-import](#udim-import)) : un objet par matériau (ou par nœud) et par tuile.
 - Seul le premier jeu d'uv décide de la tuile ; le second est interpolé sans être découpé à ses propres bords.
 
 ---
@@ -1264,3 +1304,205 @@ libres : y porter les entrées et retirer le patch.
 
 **Non couvert.** L'export d'un matériau ou d'une brosse seuls (`export_arm_run_material`, `_brush`) n'écrit pas
 d'entrée : ils ne portent pas l'état du projet.
+
+---
+
+## udim-core
+
+| | |
+|---|---|
+| Fichiers | `paint/sources/util/util_udim.c` et `.h` (nouveaux), `paint/sources/global.h` (include), `paint/sources/main.c` (unity build) |
+| Commit studio | `d2bd0efe` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-27) |
+| Injection | deux lignes d'include ; le reste dans un fichier que l'upstream n'a pas |
+
+**Motif.** Les lots D1 à D4 (UDIM natifs, `ARMORPAINT_UDIM.md` §7) ajoutent du code de cœur : il doit compiler dans
+le unity build avec le reste de `util/`, donc pas dans `external/`. `ARMORPAINT_UDIM.md` §8 : la logique va dans un
+fichier à nous, `util_udim.c`, et les fichiers upstream ne gardent que les points d'appel. Ce patch n'ajoute que le
+fichier et ses deux includes ; les points d'appel ont chacun leur patch ([udim-material-uv](#udim-material-uv) au
+lot D1).
+
+**Contenu (lot D1).**
+- `util_udim_tile_uv(object)` : (tuile u, -tuile v) d'un objet de tuile, pour les uv matériau d'un calque de tuile ;
+  `util_udim_offset(object)` : le même décalage, relatif à la case de l'objet dans l'atlas, pour les calques
+  partagés. Zéro pour le maillage fusionné, le plan 2D, un objet sans tuile, et (offset) une tuile sans case.
+- `util_udim_draw_paint_meshes()` : dessine le contexte « paint ». Les calques UDIM partagés (et limités à un jeu)
+  sont peints objet par objet, chacun avec son décalage, au lieu du maillage fusionné. Le bake et les outils qui
+  pointent (Picker, ColorID, Material, Cursor) gardent le maillage fusionné, dont leurs shaders lisent les calques en
+  espace atlas ; un filtre de calque (un seul objet affiché) passe par le dessin upstream.
+
+Le commentaire d'en-tête d'`util_udim.h` pose la règle du lot D1 : un maillage UDIM garde un objet de peinture par
+tuile, nommé `<objet>.<tuile>` comme dans le format upstream, pour que le `.arm` reste lisible par ArmorPaint et par
+les builds studio précédents. Pour régénérer : `git diff upstream studio -- paint/sources/util/util_udim.c
+paint/sources/util/util_udim.h paint/sources/global.h paint/sources/main.c` (aucun autre patch dans ces fichiers).
+
+**Test.** Ceux des patches qui l'appellent ([udim-material-uv](#udim-material-uv)). Sans UDIM,
+`util_udim_draw_paint_meshes()` appelle `render_path_draw_meshes("paint")` comme l'upstream. Au 2026-09-27, les bancs
+d'app sans UDIM passent inchangés : `import_app.sh`, `export_app.sh`, `publish_app.sh`, `arm_paths_app.sh`,
+`ocio_*_app.sh`, `sg_context_app.sh`, et `sets_app.sh` hors du cube UDIM.
+
+**Signes que l'upstream l'a changé.** Un fichier `util_udim.c` upstream, ou un conflit sur les includes de
+`main.c` (liste du unity build remaniée) : renommer le nôtre ou déplacer la ligne.
+
+**Non couvert.** Rien au-delà des patches qui l'appellent.
+
+---
+
+## udim-material-uv
+
+| | |
+|---|---|
+| Fichiers | `paint/sources/render/make_texcoord.c` (`make_texcoord_run`), `paint/sources/render/render_path_paint.c` (`render_path_paint_commands_paint`, `_particle`), `paint/sources/uniforms.c` (`uniforms_ext_vec2_link`), `paint/sources/util/util_mesh.c` (nouveau `util_mesh_merged_scope`) |
+| Commit studio | `d2bd0efe` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-27) |
+| Trouvé | 2026-09-26, analyse des UDIM (`ARMORPAINT_UDIM.md` §3, L8) ; reporté du lot D0 au lot D1 |
+
+**Bug.** Sur un calque UDIM partagé, les matériaux lisent `atlas_uv × stride` : l'uv locale de la tuile plus la
+colonne et la rangée de sa **case d'atlas**, pas de sa tuile. Les cases suivent l'ordre des tuiles dans une grille
+carrée : pour 1001-1004 en grille 2 × 2, la 1003 reçoit le décalage (0, 1) au lieu de (2, 0). Un bruit procédural ou
+un dégradé sur les uv se répète d'une tuile à l'autre, discontinu entre tuiles voisines, contrairement au DCC. Un
+calque limité à une tuile lisait ses propres uv 0-1 : le même matériau n'y tombait pas au même endroit que sur le
+calque partagé.
+
+**Correctif.**
+- Calques partagés : `(atlas_uv × stride + _udim_offset)`, l'uv UDIM réelle de la tuile (avec le retournement de v
+  des uv stockées). L'uniforme est propre à chaque objet : le contexte « paint » dessine les objets de tuile un par
+  un au lieu du maillage fusionné (`util_udim_draw_paint_meshes`, [udim-core](#udim-core) ; `util_mesh_merged_scope`
+  expose les objets fusionnés).
+- Calques d'une tuile : `(tex + _udim_tile)`, les mêmes uv que sur le calque partagé.
+- Le bake garde l'espace atlas (il lit les textures de calque), comme les pipettes et les cartes uv, triangles et
+  dilatation, qui gardent le maillage fusionné.
+
+Pour régénérer : `git diff d2bd0efe^ d2bd0efe -- <les quatre fichiers>` ; `uniforms.c` porte aussi ocio-viewport et
+udim-tile-limit, `util_mesh.c` udim-tile-limit.
+
+**Test.** `.tests/udim_app.sh` section 6 : bruit procédural (UV Map → Noise Texture) rempli sur cinq tuiles pleines
+(1001 à 1004, 1011), export par tuile, écart moyen (0-255) entre les bords :
+- 1003 | 1004 (cases d'atlas non voisines) : 1,20, contre 0,99 entre deux colonnes à la même distance dans une tuile,
+  et 64,00 pour le témoin (bord de 1001) ;
+- 1001 / 1011 (en haut) : 1,10, contre 1,08, témoin 45,18 ;
+- calque limité à 1004 contre le calque partagé : 0,14, témoin (1003) 53,44.
+
+Au 2026-09-27 : tout passe. Mutation (décalages à zéro, le comportement upstream) : 79,83 à droite, 47,04 en haut,
+51,21 pour le calque de tuile ; les trois contrôles échouent.
+
+**Signes que l'upstream l'a corrigé.** `make_texcoord_run()` n'écrit plus `atlas_uv * constants.atlas_stride` seul
+pour les calques UDIM, ou le rendu passe par tuile. Rejouer la section 6 sans le patch.
+
+**Non couvert.**
+- Vue 2D : le plan 2D n'est pas un objet de tuile, `util_udim_offset()` y rend zéro : les matériaux y gardent l'espace
+  de la case, comme l'upstream (pas de banc en vue 2D).
+- Matériaux sur le second jeu d'uv (`uv_map == 1`) : pas un calque UDIM pour l'upstream, inchangé.
+
+---
+
+## udim-export-sets
+
+| | |
+|---|---|
+| Fichier | `paint/sources/io/export_texture.c` (`export_texture_run_layers`, `export_texture_run` ; nouveaux `export_texture_mask_set_objects`, `export_texture_layer_in_set`, `export_texture_run_udim_sets`) |
+| Commit studio | `e7235382` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-27) |
+| Trouvé | 2026-09-27, lot D1 (export jeux de textures × tuiles UDIM), banc `.tests/udim_app.sh` section 8 |
+
+**Bug.** Un calque limité à un jeu de textures a un masque au-delà des objets (`object_mask > paint_objects->length`,
+voir `project_get_atlas_objects`). L'export upstream le lisait comme un masque d'objet :
+- par tuile UDIM, par objet et en Selected, `paint_objects->buffer[mask - 1]` est lu au-delà de la fin du tableau.
+  Au 2026-09-27, l'export par tuile d'un calque limité à un jeu fait planter ArmorPaint (segfault, rc 139) ;
+- en Selected avec des jeux, la sélection était ignorée : chaque jeu sortait tous ses calques (`atlas_export` ne
+  regardait pas le mode).
+Et l'export par tuile ignorait les jeux : une série de maps par tuile, tous jeux mêlés (N8).
+
+**Correctif.**
+- `export_texture_mask_set_objects(mask)` : les objets du jeu d'un masque de jeu ; NULL pour un masque d'objet, sans
+  masque, un jeu plus utilisé, ou des jeux qui ne correspondent plus aux objets (le calque peint alors tous les
+  objets, comme dans le viewport).
+- Masques d'objet seuls là où l'upstream lit `paint_objects` (trois endroits). En Selected, un calque limité à un
+  jeu est nommé d'après le jeu ; par objet, il va avec les objets du jeu, et donne un fichier à chacun.
+- Selected avec des jeux : le calque sélectionné seul.
+- Par tuile, avec des jeux qui correspondent aux objets (`export_texture_run_udim_sets`) : pour chaque jeu, les maps
+  de chacune de ses tuiles, `<fichier>_<jeu>_<canal>.<tuile>`. Un jeu reçoit les calques que lui donne l'export
+  Visible : partagés, limités à un de ses objets (une tuile reçoit ceux de ses objets), limités au jeu.
+
+Côté plugin : le preset studio remplit `<atlas>` avec le jeu en Per UDIM Tile aussi (`studio_export.c`), et la
+fenêtre d'export montre la section des jeux dans ce mode, avec sa note et le résumé « 9 maps × 6 texture set tiles
+(2 sets, 6 UDIM tiles) » (`studio_export_window.py`).
+
+`export_texture.c` porte aussi export-naming, studio-export, studio-exr et udim-tile-limit : `git diff upstream
+studio` les mêle. Pour régénérer celui-ci : `git diff e7235382^ e7235382 -- paint/sources/io/export_texture.c` (tout
+le lot D1 de ce fichier), ou le retirer d'une copie (voir l'introduction).
+
+**Test.** `.tests/udim_app.sh` section 8, sur `mats.obj` par matériau et par tuile (skin : 1001, 1002, 1011 ; cloth :
+1002) :
+- par tuile : les maps de skin sur ses trois tuiles, de cloth sur la 1002 seule (4 × 5 fichiers) ; un calque limité au
+  jeu skin (rouge) dans les fichiers de skin seuls, un calque limité à cloth (bleu) dans `cloth.1002` seul, même là où
+  leurs uv se chevauchent dans la 1002 ; un calque partagé dans les quatre, la même case pour les deux jeux de la
+  1002 ; un calque limité à `skin.1001` dans `skin.1001` seul, pas de fichier pour cloth, sans calque ;
+- preset studio, `<atlas>` et `<UDIM>` : `skin_base_color.1001` … `cloth_base_color.1002`, 9 maps × 4 ;
+- par objet : un fichier par objet des jeux des calques, chacun avec le calque de son jeu ;
+- Selected, calque limité au jeu cloth : nommé cloth, 5 maps.
+
+`.tests/sets_app.sh` section 6 : cube UDIM par matériau et par tuile, fenêtre d'export en Per UDIM Tile (jeux body et
+cap, note du mode, résumé) et export de 54 EXR, body sur ses 4 tuiles, cap sur 1012 et 1013. Au 2026-09-27 : tout
+passe. Mutations, sur la section 8 seule :
+- A, chaque jeu reçoit tous les calques, sur toutes les tuiles : 5 contrôles sur 7 échouent (`cloth.1001`,
+  `cloth.1011` en trop, calques mêlés) ;
+- B, `export_texture_mask_set_objects()` toujours NULL : par objet et Selected échouent (fichiers `untitled_*`) ;
+- C, lectures upstream des masques remises : ArmorPaint plante (rc 139) dès l'export par tuile d'un calque limité à
+  un jeu ; 5 contrôles échouent.
+
+**Signes que l'upstream l'a corrigé.** Les lectures `paint_objects->buffer[slot_layer_get_object_mask(…) - 1]`
+d'`export_texture.c` bornent le masque, ou l'export par tuile connaît les jeux (`atlas_names` dans la boucle des
+tuiles). Rejouer la section 8 sans le patch (mutation C).
+
+**Non couvert.**
+- L'atlas des calques garde une case par tuile, partagée par les jeux de la tuile : là où leurs uv se chevauchent, un
+  calque partagé donne les mêmes texels aux deux jeux (les calques limités à un jeu restent séparés). Stockage par
+  tuile : lot D2.
+- Jeux ignorés quand ils ne correspondent plus aux objets (`atlas_objects` plus court après un ajout) : export par
+  tuile sans jeux, comme l'upstream.
+- En Selected, le preset studio met le nom du jeu dans `<object>` (la variante du fichier).
+
+---
+
+## udim-tile-name
+
+| | |
+|---|---|
+| Fichier | `paint/sources/ui/tab_meshes.c` (`tab_meshes_draw_mesh_slot` : édition du nom ; nouveaux `tab_meshes_rename_object`, `tab_meshes_tile_suffix`, `tab_meshes_tile_base`) |
+| Commit studio | `8cb80cb8` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-27) |
+| Trouvé | 2026-09-27, lot D1 (`ARMORPAINT_UDIM.md` §3, L4) |
+
+**Bug.** La tuile UDIM d'un objet est le suffixe `.1001` de son nom (`util_mesh_udim_tile`). L'onglet Meshes renommait
+l'objet au nom tapé, tel quel : `body.1001` renommé `torso` perdait sa tuile, `Box` renommé `Box.1005` en gagnait
+une. La table des tuiles change alors au prochain calcul (fusion du maillage, réouverture du projet) : la tuile
+renommée disparaît de l'export par tuile et les cases des autres tuiles peuvent se décaler (L17).
+
+**Correctif.** Le champ d'édition ne montre que le nom devant le suffixe ; le suffixe s'affiche à droite du champ et
+reste : `skin.1011` renommé `torso` donne `torso.1011`. Un suffixe tapé est retiré, avec un message s'il désigne une
+autre tuile (« robe.1005: the UDIM tile of an object comes from its import, a rename keeps it ») ; un nom vide laisse
+le nom d'une tuile ; un objet sans tuile n'en gagne pas (`cap.1005` tapé donne `cap`). `tab_meshes_rename_object()`
+porte la logique (avec le renommage upstream des stages et des données partagées) ; le plugin l'expose aux scripts
+(`studio_object_rename`). La duplication et l'ajout passent par `_import_mesh_unique_name()`, qui garde le suffixe
+depuis le lot D0 ([udim-import](#udim-import)). Pour régénérer : `git diff upstream studio --
+paint/sources/ui/tab_meshes.c` (aucun autre patch dans ce fichier).
+
+**Test.** `.tests/udim_app.sh` section 9 : `skin.1011` → `torso.1011` ; `robe.1005` tapé pour `cloth.1002` →
+`robe.1002`, avec le message ; nom vide : `skin.1001` gardé ; `skin2.1002` tapé pour `skin.1002` → `skin2.1002` ;
+`cap.1005` tapé pour `cap` → `cap`, avec le message ; projet sauvé puis rouvert : mêmes noms, jeux et tuiles ; export
+par tuile : la 1011 toujours là, le calque limité à `torso.1011` dans `skin.1011` seul. Au 2026-09-27 : tout passe.
+Mutation (suffixe jamais reconnu, le comportement upstream) : les 4 contrôles échouent, l'export après réouverture ne
+sort plus que `skin.1002`.
+
+Dans l'interface, le 2026-09-27 (événements souris et clavier injectés par un script temporaire, capture de la seule
+fenêtre d'ArmorPaint) : double-clic sur `skin.1011`, le champ montre `skin`, `.1011` à sa droite ; `torso` tapé
+donne `torso.1011` ; champ vidé : le nom reste.
+
+**Signes que l'upstream l'a corrigé.** L'édition du nom (`tab_meshes_mesh_name_edit`) ne renomme plus au nom tapé tel
+quel, ou la tuile devient une donnée de l'objet. Rejouer la section 9 sans le patch.
+
+**Non couvert.**
+- La tuile vient toujours du nom : un objet importé sous le nom `truc.1005` hors UDIM reste une tuile (L4), jusqu'à
+  la tuile-donnée du lot D2.
+- L'onglet Meshes ne regroupe pas les tuiles d'un objet sous un nœud (`ARMORPAINT_UDIM.md` §6.10) : lot D2.

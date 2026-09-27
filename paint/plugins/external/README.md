@@ -671,7 +671,7 @@ La lecture est stricte : une clé inconnue, un type faux ou une combinaison impo
 | `compression` | png `fast`, `default`, `best` ; tiff `none`, `lzw`, `deflate` (défaut) ; exr `none`, `rle`, `zips`, `zip`, `piz`, `pxr24`, `b44`, `b44a`, `htj2k256`, `htj2k32` (défaut : `STUDIO_EXR_COMPRESSION`) ; jpg : `quality` 1-100 (défaut 90) |
 | `color_space` | `raw` : valeurs d'ArmorPaint telles quelles (le `linear` des presets upstream) ; `linear` : couleurs décodées (gamma 2.2 → linéaire) ; `srgb` : décodées, calculées, puis réencodées. Les données, les constantes et l'alpha ne sont jamais transformés. Tout autre nom est un espace OCIO (nom, alias ou rôle : `ACEScg`, `sRGB - Texture`, `Raw`…) : voir « Export (A3) ». Les trois mots-clés s'écrivent en minuscules ; `Raw` est l'espace OCIO |
 | `channels` | 1, 3 ou 4 expressions (pas de 4e canal en JPG) |
-| `naming` | variables (sans égard à la casse) : `<file>` (fichier du projet, `robot_v003`), `<name>` (sans sa version, `robot`), `<version>` (`003`, vide sans version), `<variant>` (objet ou jeu exporté à part), `<object>` (Per Object, ou l'objet du calque en Selected), `<atlas>` (jeu de textures, en Visible), `<channel>` (`suffix`, sinon `name`), `<UDIM>`, `<resolution>` (largeur du fichier), `<bits>`, `<preset>`, `<ext>`. Une variable inconnue est refusée. Une section `[…]` disparaît si une variable qu'elle contient est vide. Un chemin relatif part du dossier choisi ; des sous-dossiers sont permis |
+| `naming` | variables (sans égard à la casse) : `<file>` (fichier du projet, `robot_v003`), `<name>` (sans sa version, `robot`), `<version>` (`003`, vide sans version), `<variant>` (objet ou jeu exporté à part), `<object>` (Per Object, ou l'objet du calque en Selected, le jeu d'un calque limité à un jeu), `<atlas>` (jeu de textures, en Visible et en Per UDIM Tile), `<channel>` (`suffix`, sinon `name`), `<UDIM>`, `<resolution>` (largeur du fichier), `<bits>`, `<preset>`, `<ext>`. Une variable inconnue est refusée. Une section `[…]` disparaît si une variable qu'elle contient est vide. Un chemin relatif part du dossier choisi ; des sous-dossiers sont permis |
 | `resolution` | côté le plus long du fichier, proportions gardées (1 à 65536) ; `0` : celle du projet (défaut). Par texture ou dans `defaults`. Réduire moyenne les pixels par zone ; agrandir est bilinéaire et donne une note `upscaled` |
 | `resolutions` | résolutions admises par le show, vérifiées pour chaque texture à sa taille de sortie : une autre est bloquante |
 | `overwrite` | `warn` (défaut : remplace et le signale), `allow`, `block` |
@@ -747,7 +747,9 @@ une fenêtre Qt à la place de la boîte d'export d'ArmorPaint (patch `export-wi
   jeu et calques limités au jeu, nommé par `<atlas>` (et `<variant>`). Les jeux changent dans le projet d'ArmorPaint
   et sont enregistrés avec le `.arm`, pas dans le sidecar. Un calque limité à un jeu y reste quand le jeu est
   renommé ; vider un tel jeu de ses objets est refusé. Les objets gardent leurs UV : un jeu ne réagence rien, il
-  choisit quels calques vont dans quels fichiers. Les jeux ne se combinent pas avec Per UDIM Tile (upstream).
+  choisit quels calques vont dans quels fichiers. En Per UDIM Tile, chaque jeu donne ses maps pour chacune de ses
+  tuiles seulement (`<atlas>` et `<UDIM>`), avec une note dans la section ; les jeux d'une tuile y partagent sa case
+  de la grille (voir **UDIM**).
 - **Maps** : une ligne par texture du preset, avec une case (map désactivée : aucun de ses fichiers n'est écrit), sa
   profondeur (les valeurs permises par son format) et sa résolution (celle du projet, ou 8192 à 256), puis la taille
   de sortie. « Set all bits » et « Set all resolutions » les règlent pour toutes les maps (une map dont le format n'a
@@ -756,7 +758,8 @@ une fenêtre Qt à la place de la boîte d'export d'ArmorPaint (patch `export-wi
 - **Files** : le préflight, recalculé à chaque changement, sans rien écrire. Avec plusieurs jeux (tuiles UDIM, objets
   ou atlas), chaque fichier se coche ou se décoche avant l'export ; un fichier décoché n'est ni vérifié ni écrit. La
   liste (sans les maps désactivées) est groupée par map ou par objet / tuile, avec une case par groupe (décocher `height` retire toutes ses
-  tuiles). En tête, ce que représentent les fichiers (« 9 maps × 7 UDIM tiles ») ; la ligne du projet donne ses objets
+  tuiles). En tête, ce que représentent les fichiers (« 9 maps × 7 UDIM tiles », ou avec des jeux en Per UDIM Tile
+  « 9 maps × 6 texture set tiles (2 sets, 6 UDIM tiles) ») ; la ligne du projet donne ses objets
   et ses tuiles. Un fichier existant est en orange et compté dans le résumé.
 - **Problèmes** : les bloquants (qui désactivent Export) et quelques avertissements utiles (tuiles UDIM manquantes,
   maillage UDIM hors mode par tuile, place disque). Les choix du preset que les graphistes connaissent (profondeur,
@@ -794,10 +797,13 @@ chemin du sidecar.
 Per Object, ArmorPaint écrit un jeu par objet qui a au moins un calque qui lui est propre (masque d'objet du calque) ;
 les calques partagés vont dans chaque jeu. Sans calque propre à un objet, Per Object donne un seul jeu. Le nom du
 matériau est alors le nom de l'objet : `<object>` (ArmorPaint ne garde pas d'affectation de shader par objet). Autre
-voie : un jeu de textures par matériau (Texture sets), export Visible, `<atlas>`.
+voie : un jeu de textures par matériau (Texture sets), export Visible, `<atlas>`. Avec des UDIM : « Material » et
+« UDIM Tiles » ensemble (voir **UDIM**).
 
-**UDIM.** À l'import, « Split By: UDIM Tile » fait un objet par objet du fichier et par tuile (`body.1001`,
-`body.1002`…, patches udim-import et fbx-split). Un triangle à cheval sur deux tuiles est coupé le long de la frontière.
+**UDIM.** À l'import, la case « UDIM Tiles » (à côté de « Split By: Object / Material ») fait un objet par objet du
+fichier et par tuile (`body.1001`, `body.1002`…) ; avec « Material », un objet par matériau et par tuile (`skin.1001`…,
+rassemblé d'un objet du fichier à l'autre) et un jeu de textures par matériau (patches udim-import et fbx-split). Un
+triangle à cheval sur deux tuiles est coupé le long de la frontière.
 Un fichier dont une uv sort des tuiles 1001-1990 (uv négative, u ≥ 10) ou qui a plus de 64 tuiles est refusé avec un
 message, et le projet garde son maillage. Un objet sans uv est importé sans tuile, avec un message : les calques UDIM
 ne le peignent pas. ArmorPaint peint toutes les tuiles dans chaque texture de calque, rangées en grille (côté : racine
@@ -809,6 +815,18 @@ remet à la résolution de la map : les fichiers ont la taille demandée (`<reso
 Visible, un maillage UDIM donne la grille entière (avertissement du préflight). Au-delà de 64 tuiles (objets
 `nom.1xxx` ajoutés ou renommés), les suivantes ne sont ni peintes ni exportées : message, et le préflight bloque
 l'export studio (patch udim-tile-limit).
+
+Les matériaux lisent les uv UDIM du fichier : un bruit procédural ou un dégradé est continu d'une tuile à sa voisine,
+comme dans le DCC, sur un calque partagé comme sur le calque d'une tuile (patch udim-material-uv ; en vue 2D, ils
+gardent l'espace de la case). Per UDIM Tile avec des jeux de textures : les maps de chaque jeu pour ses tuiles
+(`<fichier>_<jeu>_<canal>.<tuile>` à l'export upstream, `<atlas>` et `<UDIM>` dans un preset studio ; patch
+udim-export-sets). Renommer un objet dans l'onglet Meshes garde sa tuile : le champ ne montre que le nom devant
+`.1011`, et `torso` tapé pour `skin.1011` donne `torso.1011` (patch udim-tile-name).
+
+**Attention, cases de la grille** (L17 de `ARMORPAINT_UDIM.md`, corrigée au lot D2). La case d'une tuile dépend de la
+liste des tuiles du projet. Ajouter un maillage qui apporte une tuile, supprimer le dernier objet d'une tuile ou passer
+de 4 à 5 tuiles (grille 2 × 2 → 3 × 3) déplace les cases : la peinture déjà faite sur les calques partagés passe à une
+autre tuile. Importer toutes les tuiles avant de peindre.
 
 L'onglet Presets (éditeur de presets upstream) et « Pack into project » de la boîte d'export ne sont plus
 accessibles ; l'onglet Atlases est remplacé par la section Texture sets. La résolution du projet (celle des calques) ne change pas : chaque map est mise à sa résolution
@@ -843,7 +861,9 @@ char *studio_atlases(void);                          // {"names", "objects": [{"
 char *studio_set_atlases(char *json);                // {"names": [...], "objects": [jeu de chaque objet]} ; "" si fait, sinon la raison
 int   studio_layer_set_atlas(int atlas);             // limite le calque courant à un jeu ; -1 : partagé
 int   studio_layer_set_object(int index);            // limite le calque courant à un objet (ordre de studio_atlases) ; -1 : partagé
-int   studio_import_mesh(char *path, int split);     // remplace le maillage ; split : 0 objet, 1 matériau, 2 tuile UDIM ; fini au retour
+int   studio_layer_new(void);                        // nouveau calque de peinture vide, au-dessus du courant, devenu courant
+char *studio_object_rename(int index, char *name);   // comme l'onglet Meshes : le suffixe de tuile UDIM reste (body.1001 → torso.1001) ; nouveau nom
+int   studio_import_mesh(char *path, int split);     // remplace le maillage ; split : 0 objet, 1 matériau, 2 tuile UDIM, 3 matériau et tuile UDIM ; fini au retour
 char *studio_dialog_title(void);                     // titre de la boîte ouverte (« Unwrap Mesh »...), "" sans boîte
 char *studio_status_message(void);                   // message de la barre d'état, "" s'il est effacé
 void  studio_export_window_show(void);               // ouvre la fenêtre d'export, ou la ramène devant

@@ -458,8 +458,21 @@ index 00000000..2933416f
 +// Cuts the triangle along the tile borders and emits its parts, normals renormalized. Returns the number of tiles it
 +// was emitted in (1: not cut), 0 when a uv is not valid (nothing emitted).
 +int udim_split_triangle(const udim_vert_t tri[3], udim_emit_t emit, void *user);
+diff --git a/paint/sources/enums.h b/paint/sources/enums.h
+index b546c7d1..64de36db 100644
+--- a/paint/sources/enums.h
++++ b/paint/sources/enums.h
+@@ -37,6 +37,8 @@ typedef enum {
+ 	SPLIT_TYPE_OBJECT   = 0,
+ 	SPLIT_TYPE_MATERIAL = 1,
+ 	SPLIT_TYPE_UDIM     = 2,
++	// STUDIO-PATCH(udim-import): by material and by udim tile together, "<material>.<tile>" objects (lot D1)
++	SPLIT_TYPE_MATERIAL_UDIM = 3,
+ } split_type_t;
+ 
+ typedef enum {
 diff --git a/paint/sources/io/import_mesh.c b/paint/sources/io/import_mesh.c
-index 8921b952..a33d96e1 100644
+index 8d0d520f..25547a59 100644
 --- a/paint/sources/io/import_mesh.c
 +++ b/paint/sources/io/import_mesh.c
 @@ -30,6 +30,9 @@ void import_mesh_run(char *path, bool _clear_layers, bool replace_existing, bool
@@ -472,7 +485,7 @@ index 8921b952..a33d96e1 100644
  	char *p        = to_lower_case(path);
  	bool  is_obj   = ends_with(p, ".obj");
  	bool  is_blend = ends_with(p, ".blend");
-@@ -67,6 +70,11 @@ void import_mesh_run(char *path, bool _clear_layers, bool replace_existing, bool
+@@ -70,6 +73,11 @@ void import_mesh_run(char *path, bool _clear_layers, bool replace_existing, bool
  		}
  	}
  
@@ -484,19 +497,21 @@ index 8921b952..a33d96e1 100644
  	g_project->mesh_assets = any_array_create_from_raw(
  	    (void *[]){
  	        path,
-@@ -150,6 +158,11 @@ void import_mesh_finish_import(void *_) {
+@@ -153,6 +161,13 @@ void import_mesh_finish_import(void *_) {
  	tab_meshes_reset_preview_map();
  	base_update_workflow();
  
 +#ifdef WITH_EXTERNAL
-+	void studio_udim_import_hint(void); // STUDIO-PATCH(udim-import): pixels per udim tile and project resolution advised, in external/
-+	studio_udim_import_hint();
++	// STUDIO-PATCH(udim-import): in external/, a texture set per material after a split by material and udim tile, pixels
++	// per udim tile and project resolution advised
++	void studio_udim_import_done(bool append);
++	studio_udim_import_done(import_mesh_append);
 +#endif
 +
  	if (import_mesh_needs_unwrap) {
  		import_mesh_needs_unwrap = false;
  		project_unwrap_mesh_box();
-@@ -174,11 +187,18 @@ bool _import_mesh_is_unique_name(char *s) {
+@@ -177,11 +192,18 @@ bool _import_mesh_is_unique_name(char *s) {
  
  char *_import_mesh_unique_name(char *name) {
  	// Returns the name or the next free .00X variant
@@ -518,7 +533,7 @@ index 8921b952..a33d96e1 100644
  	return res;
  }
 diff --git a/paint/sources/io/import_obj.c b/paint/sources/io/import_obj.c
-index 1b39ede6..d2dc3d03 100644
+index 1b39ede6..ac4b9923 100644
 --- a/paint/sources/io/import_obj.c
 +++ b/paint/sources/io/import_obj.c
 @@ -1,5 +1,7 @@
@@ -529,7 +544,7 @@ index 1b39ede6..d2dc3d03 100644
  
  void import_obj_run(char *path, bool replace_existing) {
  	buffer_t *b = data_get_blob(path);
-@@ -11,55 +13,175 @@ void import_obj_run(char *path, bool replace_existing) {
+@@ -11,55 +13,220 @@ void import_obj_run(char *path, bool replace_existing) {
  	data_delete_blob(path);
  }
  
@@ -540,7 +555,8 @@ index 1b39ede6..d2dc3d03 100644
 +// STUDIO-PATCH(udim-import): udim split, see paint/plugins/external/PATCHES.md. Upstream read the file as a single
 +// object and gave each tile a copy of all the vertices. Now each object is split in its tiles, with the vertices of the
 +// tile only, and obj_parse cuts the triangles over several tiles. A uv out of the tiles 1001-1990, or more tiles than
-+// the layer atlas holds, refuses the file with a message and imports nothing.
++// the layer atlas holds, refuses the file with a message and imports nothing. By material and tile (lot D1), each
++// material gives one object per tile, gathered from all its parts.
 +static void _import_obj_udim_free(raw_mesh_t *part) {
 +	if (part->udims != NULL) {
 +		for (i32 i = 0; i < part->udims->length; ++i) {
@@ -587,31 +603,58 @@ index 1b39ede6..d2dc3d03 100644
 -					}
 -					else {
 -						import_mesh_add_mesh(part);
--					}
--				}
--				else {
--					part->posa = i16_array_create_from_array(part->posa);
--					part->nora = i16_array_create_from_array(part->nora);
--					if (part->texa != NULL) {
--						part->texa = i16_array_create_from_array(part->texa);
-+// The triangles of one tile, with their own vertices (obj_parse never shares the corners of its triangles)
-+static raw_mesh_t *_import_obj_udim_tile(raw_mesh_t *part, u32_array_t *inda, char *name) {
-+	raw_mesh_t *mesh = calloc(1, sizeof(raw_mesh_t));
-+	mesh->name       = name;
-+	mesh->scale_pos  = part->scale_pos;
-+	mesh->scale_tex  = part->scale_tex;
-+	mesh->posa       = i16_array_create(inda->length * 4);
-+	mesh->nora       = i16_array_create(inda->length * 2);
-+	mesh->texa       = i16_array_create(inda->length * 2);
-+	mesh->inda       = u32_array_create(inda->length);
-+	for (i32 i = 0; i < inda->length; ++i) {
-+		u32 k = inda->buffer[i];
-+		memcpy(&mesh->posa->buffer[i * 4], &part->posa->buffer[k * 4], sizeof(i16) * 4);
-+		memcpy(&mesh->nora->buffer[i * 2], &part->nora->buffer[k * 2], sizeof(i16) * 2);
-+		memcpy(&mesh->texa->buffer[i * 2], &part->texa->buffer[k * 2], sizeof(i16) * 2);
-+		mesh->inda->buffer[i] = i;
++// The indices of a tile (u + 10 v) in the grid of a part, NULL out of it
++static u32_array_t *_import_obj_udim_indices(raw_mesh_t *part, i32 tile) {
++	i32 u = tile % UDIM_TILES_U;
++	i32 v = tile / UDIM_TILES_U;
++	return u < part->udims_u && v < part->udims_v ? part->udims->buffer[u + v * part->udims_u] : NULL;
++}
++
++// The triangles of one tile, with their own vertices (obj_parse never shares the corners of its triangles), from every
++// part of the group, named after the first. The positions go to the largest scale of the parts. The indices taken are
++// emptied: a later part of the group gives them no more. NULL if no part has the tile.
++static raw_mesh_t *_import_obj_udim_tile(raw_mesh_t_array_t *group, i32 tile) {
++	i32 length    = 0;
++	f32 scale_pos = 0.0;
++	for (i32 i = 0; i < group->length; ++i) {
++		u32_array_t *a = _import_obj_udim_indices(group->buffer[i], tile);
++		if (a != NULL && a->length > 0) {
++			length += a->length;
++			scale_pos = math_max(scale_pos, group->buffer[i]->scale_pos);
++		}
 +	}
-+	mesh->vertex_count = mesh->index_count = inda->length;
++	if (length == 0) {
++		return NULL;
++	}
++	raw_mesh_t *mesh = calloc(1, sizeof(raw_mesh_t));
++	mesh->name       = string("%s.%d", group->buffer[0]->name, udim_tile_id(tile % UDIM_TILES_U, tile / UDIM_TILES_U));
++	mesh->scale_pos  = scale_pos;
++	mesh->scale_tex  = group->buffer[0]->scale_tex;
++	mesh->posa       = i16_array_create(length * 4);
++	mesh->nora       = i16_array_create(length * 2);
++	mesh->texa       = i16_array_create(length * 2);
++	mesh->inda       = u32_array_create(length);
++	i32 n            = 0;
++	for (i32 i = 0; i < group->length; ++i) {
++		raw_mesh_t  *part  = group->buffer[i];
++		u32_array_t *a     = _import_obj_udim_indices(part, tile);
++		f32          scale = part->scale_pos / scale_pos;
++		for (i32 j = 0; a != NULL && j < a->length; ++j, ++n) {
++			u32 k = a->buffer[j];
++			for (i32 c = 0; c < 3; ++c) {
++				i16 p                         = part->posa->buffer[k * 4 + c];
++				mesh->posa->buffer[n * 4 + c] = scale == 1.0 ? p : (i16)roundf(p * scale);
++			}
++			mesh->posa->buffer[n * 4 + 3] = part->posa->buffer[k * 4 + 3]; // Normal z
++			memcpy(&mesh->nora->buffer[n * 2], &part->nora->buffer[k * 2], sizeof(i16) * 2);
++			memcpy(&mesh->texa->buffer[n * 2], &part->texa->buffer[k * 2], sizeof(i16) * 2);
++			mesh->inda->buffer[n] = n;
++		}
++		if (a != NULL) {
++			a->length = 0;
++		}
++	}
++	mesh->vertex_count = mesh->index_count = length;
 +	return mesh;
 +}
 +
@@ -626,7 +669,7 @@ index 1b39ede6..d2dc3d03 100644
 +	free(mesh); // The arrays and the name now belong to the mesh object
 +}
 +
-+static void _import_obj_udim(buffer_t *b, bool replace_existing) {
++static void _import_obj_udim(buffer_t *b, bool replace_existing, bool by_material) {
 +	bool used[UDIM_TILES_U * UDIM_TILES_V] = {0}; // Tile u + 10 v
 +
 +	raw_mesh_t_array_t *parts         = any_array_create_from_raw((void *[]){}, 0);
@@ -640,7 +683,7 @@ index 1b39ede6..d2dc3d03 100644
 +	u64                 pos           = 0;
 +	bool                has_next      = true;
 +	while (has_next) {
-+		raw_mesh_t *part = obj_parse(b, 'o', pos, true);
++		raw_mesh_t *part = obj_parse(b, by_material ? 'u' : 'o', pos, true); // usemtl or o
 +		pos              = part->pos;
 +		has_next         = part->has_next;
 +		if (string_equals(part->name, "")) {
@@ -702,15 +745,30 @@ index 1b39ede6..d2dc3d03 100644
 +				objects++;
 +			}
 +			else {
-+				for (i32 j = 0; j < part->udims->length; ++j) {
-+					u32_array_t *a = part->udims->buffer[j];
-+					if (a->length > 0) {
-+						char *name = string("%s.%d", part->name, udim_tile_id(j % part->udims_u, j / part->udims_u));
-+						_import_obj_udim_add(_import_obj_udim_tile(part, a, name), &first, replace_existing);
++				// By material, the later parts of the material bring their triangles too: an obj splits a material at each
++				// object and at each "v" after faces (Maya repeats usemtl in each object)
++				raw_mesh_t_array_t *group = any_array_create_from_raw((void *[]){part}, 1);
++				for (i32 j = i + 1; by_material && j < parts->length; ++j) {
++					raw_mesh_t *p = parts->buffer[j];
++					if (p != NULL && p->udims != NULL && string_equals(p->name, part->name)) {
++						any_array_push(group, p);
+ 					}
+ 				}
+-				else {
+-					part->posa = i16_array_create_from_array(part->posa);
+-					part->nora = i16_array_create_from_array(part->nora);
+-					if (part->texa != NULL) {
+-						part->texa = i16_array_create_from_array(part->texa);
++				for (i32 tile = 0; tile < UDIM_TILES_U * UDIM_TILES_V; ++tile) {
++					raw_mesh_t *mesh = _import_obj_udim_tile(group, tile);
++					if (mesh != NULL) {
++						_import_obj_udim_add(mesh, &first, replace_existing);
 +						objects++;
  					}
 -					import_mesh_add_mesh(part);
  				}
++				array_free(group);
++				free(group);
 +				_import_obj_udim_free(part);
  			}
 -			array_free(inda_full);
@@ -739,12 +797,50 @@ index 1b39ede6..d2dc3d03 100644
 +
 +void import_obj_parse(buffer_t *b, bool replace_existing) {
 +	split_type_t i          = g_context->split_by;
-+	bool         is_udim    = i == SPLIT_TYPE_UDIM;
++	bool         is_udim    = i == SPLIT_TYPE_UDIM || i == SPLIT_TYPE_MATERIAL_UDIM; // STUDIO-PATCH(udim-import)
 +	i32          split_code = (i == SPLIT_TYPE_OBJECT || is_udim) ? 'o' : 'u'; // usemtl
 +
 +	if (is_udim) { // STUDIO-PATCH(udim-import)
-+		_import_obj_udim(b, replace_existing);
++		_import_obj_udim(b, replace_existing, i == SPLIT_TYPE_MATERIAL_UDIM);
 +	}
  	else {
  		raw_mesh_t_array_t *parts     = any_array_create_from_raw((void *[]){}, 0);
  		raw_mesh_t_array_t *discarded = any_array_create_from_raw((void *[]){}, 0);
+diff --git a/paint/sources/ui/box_import_mesh.c b/paint/sources/ui/box_import_mesh.c
+index 9e160847..ad2b031e 100644
+--- a/paint/sources/ui/box_import_mesh.c
++++ b/paint/sources/ui/box_import_mesh.c
+@@ -32,19 +32,29 @@ void project_import_mesh_box_draw() {
+ 	void (*done)(void)     = _project_import_mesh_box_done;
+ 
+ 	if (ends_with(to_lower_case(path), ".obj") || ends_with(to_lower_case(path), ".fbx")) {
++		// STUDIO-PATCH(udim-import): udim tiles are a check next to the object or material split (lot D1), material and
++		// udim together give "<material>.<tile>" objects
+ 		string_array_t *split_by_combo = any_array_create_from_raw_tmp(
+ 		    (void *[]){
+ 		        tr("Object"),
+ 		        tr("Material"),
+-		        tr("UDIM Tile"),
+ 		    },
+-		    3);
++		    2);
++		split_type_t split = g_context->split_by;
++		i32          by    = split == SPLIT_TYPE_MATERIAL || split == SPLIT_TYPE_MATERIAL_UDIM ? SPLIT_TYPE_MATERIAL : SPLIT_TYPE_OBJECT;
++		bool         udim  = split == SPLIT_TYPE_UDIM || split == SPLIT_TYPE_MATERIAL_UDIM;
+ 		ui_text(tr("Split By"), UI_ALIGN_LEFT, 0);
+-		ui_inline_radio((int *)&g_context->split_by, split_by_combo, UI_ALIGN_LEFT);
+-		plugins_split_by = g_context->split_by;
++		ui_row2();
++		ui_inline_radio(&by, split_by_combo, UI_ALIGN_LEFT);
+ 		if (g_ui->is_hovered) {
+ 			ui_tooltip(tr("Split mesh into objects"));
+ 		}
++		ui_check(&udim, tr("UDIM Tiles"), "");
++		if (g_ui->is_hovered) {
++			ui_tooltip(tr("Split each object by UDIM tile too"));
++		}
++		g_context->split_by = udim ? (by == SPLIT_TYPE_MATERIAL ? SPLIT_TYPE_MATERIAL_UDIM : SPLIT_TYPE_UDIM) : by;
++		plugins_split_by    = g_context->split_by;
+ 	}
+ 
+ 	if (ends_with(to_lower_case(path), ".blend")) {

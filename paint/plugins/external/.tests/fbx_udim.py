@@ -1,4 +1,5 @@
-"""Banc du patch fbx-split (voir fbx.sh) : cas écrits ici en FBX ASCII, lus par fbx_test en split UDIM (2) ou matériau (1).
+"""Banc du patch fbx-split (voir fbx.sh) : cas écrits ici en FBX ASCII, lus par fbx_test en split UDIM (2), matériau (1)
+ou matériau et UDIM (3).
 
 fbx_udim.py <dossier> <fbx_test> [<fbx_test upstream>]      cas UDIM et matériaux
 fbx_udim.py same <dossier> <fbx_test> <fbx_test upstream>   non-régression des splits par objet et par matériau
@@ -9,14 +10,17 @@ pas de déformation, surfaces conservées), un nœud FBX par objet. Un fichier r
 tuiles) ne doit produire aucun mesh et un message qui donne le nombre de triangles et la première uv. En plus :
   - nœuds sans uv (mesh à part, sans tuile) mêlés à des nœuds avec uv ;
   - second jeu d'uv et couleurs de sommet, interpolés aux coupes ;
-  - split par matériau : plus de 64 matériaux, nœuds avec et sans uv sur un même matériau.
+  - split par matériau : plus de 64 matériaux, nœuds avec et sans uv sur un même matériau ;
+  - split par matériau et par tuile (lot D1) : un mesh par matériau et par tuile, <matériau>.<tuile>, rassemblé d'un
+    nœud à l'autre (mêmes vérifications que l'UDIM, par matériau) ; un nœud sans matériau donne ses tuiles sous son
+    nom, un nœud sans uv son mesh sans tuile.
 Avec l'exe upstream, les cas marqués « bug » doivent échouer (plantage, ou vérification fausse) : c'est la preuve que
 le banc voit les bugs corrigés.
 
 same : fichiers sans UDIM ni bug connu de l'upstream (nœuds avec et sans uv, second jeu d'uv, couleurs, uv hors de
 [0, 1], jusqu'à 64 matériaux) ; les splits par objet (0) et par matériau (1) sortent octet pour octet comme l'upstream.
 fuzz : mutations des fichiers de <dossier>/udim et <dossier>/same (nombres extrêmes : nan, inf, 1e30...), lues en
-split 0, 1 et 2 ; l'arbre courant ne doit ni planter ni signaler d'UB.
+split 0, 1, 2 et 3 ; l'arbre courant ne doit ni planter ni signaler d'UB.
 """
 import glob, os, random, re, subprocess, sys
 
@@ -260,6 +264,43 @@ def material_cases():
     return c
 
 
+def mat_udim_cases():
+    """Nœuds, attendu (tuiles et meshes) ; les vérifications de l'UDIM portent sur des objets par matériau."""
+    c = {}
+    a = [tri_uv(0.2, 0.2, 0.8, 0.2, 0.2, 0.8), tri_uv(1.2, 0.2, 1.8, 0.2, 1.2, 0.8), tri_uv(0.5, 0.3, 1.5, 0.3, 0.5, 0.7)]  # Le 3e à cheval
+    b = [tri_uv(0.3, 0.3, 0.7, 0.3, 0.3, 0.7, z=1.0), tri_uv(0.2, 1.2, 0.8, 1.2, 0.2, 1.8, z=1.0), tri_uv(1.3, 0.3, 1.7, 0.3, 1.3, 0.7, z=1.0)]
+    nodes = [("a", a, {"mats": ["skin", "cloth", "skin"]}), ("b", b, {"mats": ["skin", "cloth", "cloth"]})]
+    c["mat_udim"] = (nodes, {"tiles": {"skin": {1001, 1002}, "cloth": {1002, 1011}}, "invalid": 0, "cut": 1,
+                             "meshes": ["skin.1001", "cloth.1002", "skin.1002", "cloth.1011"]}, False)
+    # Nœud sans matériau (ses tuiles sous son nom), nœud sans uv en tête (son mesh, sans tuile, après les autres)
+    big = [T(((i, 0, 5), (0, 0)), ((i + 1, 0, 5), (0, 0)), ((i, 1, 5), (0, 0))) for i in range(4)]
+    nodes = [("plain", big, {"uv": False, "mats": ["skin"] * 4}), ("a", a[:2], {"mats": ["skin", "cloth"]}), ("bare", b[1:2], {})]
+    c["mat_udim_mixed"] = (nodes, {"tiles": {"skin": {1001}, "cloth": {1002}, "bare": {1011}}, "invalid": 0, "cut": 0,
+                                   "meshes": ["skin.1001", "cloth.1002", "bare.1011", "plain"]}, False)
+    c["mat_udim_neg"] = ([("a", [tri_uv(0.2, 0.2, 0.8, 0.2, 0.2, 0.8), tri_uv(-0.5, 0.2, -0.2, 0.2, -0.5, 0.8)], {"mats": ["skin", "cloth"]})],
+                         {"invalid": 1, "invalid_uv": (-0.5, 0.2)}, False)
+    return c
+
+
+def check_mat_udim(out, nodes, exp):
+    """Les triangles regroupés par matériau (le nom du nœud sans matériau), dans l'ordre où ils sont lus : nœuds à uv
+    d'abord ; les nœuds sans uv gardent leur nom."""
+    groups, order = {}, []
+    for name, tris, opt in [n for n in nodes if n[2].get("uv", True)]:
+        for k, t in enumerate(tris):
+            m = opt["mats"][k] if "mats" in opt else name
+            if m not in groups:
+                groups[m] = []
+                order.append(m)
+            groups[m].append(t)
+    virtual = [(m, groups[m], {}) for m in order] + [n for n in nodes if not n[2].get("uv", True)]
+    errs = check_udim(out, virtual, exp)
+    names = [m["name"] for m in parse(out)[1]]
+    if "meshes" in exp and names != exp["meshes"]:
+        errs.append("meshes %s, attendu %s" % (names, exp["meshes"]))
+    return errs
+
+
 def check_material(out, nodes, exp):
     _, meshes, msgs = parse(out)
     if exp.get("null") and not msgs["null"]:
@@ -350,7 +391,7 @@ def fuzz(d, n, exes):
                     data = data[:at]
             path = os.path.join(d, "fuzz.fbx")
             open(path, "wb").write(data)
-            for split in (0, 1, 2):
+            for split in (0, 1, 2, 3):
                 try:
                     r = subprocess.run([exe, path, str(split)], capture_output=True, timeout=20)
                     err = r.stderr.decode(errors="replace")
@@ -370,7 +411,7 @@ def fuzz(d, n, exes):
                     if e == 0:
                         open(os.path.join(fails, "%d_%d.fbx" % (k, split)), "wb").write(data)
         crashes = sum(v for k, v in stats.items() if not k.startswith("UB"))
-        print("%s : %d lectures (%d passent ufbx), %d plantages %s" % (os.path.basename(exe), 3 * n, read, crashes, stats))
+        print("%s : %d lectures (%d passent ufbx), %d plantages %s" % (os.path.basename(exe), 4 * n, read, crashes, stats))
 
 
 def main():
@@ -378,13 +419,13 @@ def main():
     up = sys.argv[3] if len(sys.argv) > 3 else None
     os.makedirs(d, exist_ok=True)
     fail = 0
-    for split, allc, chk in ((2, udim_cases(), check_udim), (1, material_cases(), check_material)):
+    for split, allc, chk in ((2, udim_cases(), check_udim), (1, material_cases(), check_material), (3, mat_udim_cases(), check_mat_udim)):
         for name, (nodes, exp, bug) in allc.items():
             path = os.path.join(d, name + ".fbx")
             write_fbx(path, nodes)
             out, err = run(exe, path, split)
             errs = [err] if err else chk(out, nodes, exp)
-            line = "  %s %s (%s)" % ("✅" if not errs else "❌", name, "udim" if split == 2 else "matériau")
+            line = "  %s %s (%s)" % ("✅" if not errs else "❌", name, {1: "matériau", 2: "udim", 3: "matériau × udim"}[split])
             if errs:
                 fail = 1
                 line += " : " + " ; ".join(errs[:3])

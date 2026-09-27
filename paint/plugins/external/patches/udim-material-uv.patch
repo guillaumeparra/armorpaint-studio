@@ -1,0 +1,83 @@
+diff --git a/paint/sources/render/make_texcoord.c b/paint/sources/render/make_texcoord.c
+index 2d3afcc0..1cb80562 100644
+--- a/paint/sources/render/make_texcoord.c
++++ b/paint/sources/render/make_texcoord.c
+@@ -131,14 +131,21 @@ void make_texcoord_run(node_shader_t *kong, bool is_atlas) {
+ 			node_shader_write_vert(kong, string_tmp("output.tex_coord = input.tex1 * %s;", scale));
+ 		}
+ 		else if (!is_atlas && util_mesh_udim_layer(g_context->layer)) {
+-			// Materials repeat per tile, bake reads layer textures in atlas space
++			// STUDIO-PATCH(udim-material-uv): materials in the UDIM space, continuous from a tile to its neighbours (upstream
++			// repeated them per tile); bake reads layer textures in atlas space
+ 			char *uv = "atlas_uv";
+ 			if (g_context->tool != TOOL_TYPE_BAKE) {
+ 				node_shader_add_constant(kong, "float atlas_stride", "_atlas_stride");
+-				uv = "(atlas_uv * constants.atlas_stride)";
++				node_shader_add_constant(kong, "float2 udim_offset", "_udim_offset");
++				uv = "(atlas_uv * constants.atlas_stride + constants.udim_offset)";
+ 			}
+ 			node_shader_write_vert(kong, string_tmp("output.tex_coord = %s * %s;", uv, scale));
+ 		}
++		else if (!is_atlas && g_context->tool != TOOL_TYPE_BAKE && layers_udim_tile_slot(g_context->layer) != -1) {
++			// STUDIO-PATCH(udim-material-uv): layer of a single tile, materials in the UDIM space as well
++			node_shader_add_constant(kong, "float2 udim_tile", "_udim_tile");
++			node_shader_write_vert(kong, string_tmp("output.tex_coord = (input.tex + constants.udim_tile) * %s;", scale));
++		}
+ 		else {
+ 			node_shader_write_vert(kong, string_tmp("output.tex_coord = input.tex * %s;", scale));
+ 		}
+diff --git a/paint/sources/render/render_path_paint.c b/paint/sources/render/render_path_paint.c
+index fc575e0b..014dae6a 100644
+--- a/paint/sources/render/render_path_paint.c
++++ b/paint/sources/render/render_path_paint.c
+@@ -171,7 +171,7 @@ void render_path_paint_commands_particle(i32 tid, char *texpaint, bool is_mask)
+ 		if (g_context->colorid_picked) {
+ 			render_path_bind_target("texpaint_colorid", "texpaint_colorid");
+ 		}
+-		render_path_draw_meshes("paint");
++		util_udim_draw_paint_meshes(); // STUDIO-PATCH(udim-material-uv): udim layers painted object by object
+ 	}
+ 	for (i32 _pi = 0; _pi < 32; ++_pi) {
+ 		if (g_context->particles[_pi].bullet != NULL) {
+@@ -524,7 +524,7 @@ void render_path_paint_commands_paint(bool dilation) {
+ 			if (bullet != NULL) {
+ 				bullet->visible = false;
+ 			}
+-			render_path_draw_meshes("paint");
++			util_udim_draw_paint_meshes(); // STUDIO-PATCH(udim-material-uv): udim layers painted object by object
+ 			if (bullet != NULL) {
+ 				bullet->visible = bullet_vis;
+ 			}
+diff --git a/paint/sources/uniforms.c b/paint/sources/uniforms.c
+index e9dd5b1a..000b4733 100644
+--- a/paint/sources/uniforms.c
++++ b/paint/sources/uniforms.c
+@@ -194,6 +194,12 @@ vec2_t uniforms_ext_vec2_link(object_t *object, shader_data_t *mat, char *link)
+ 		}
+ 		return (vec2_t){math_cos(-angle), math_sin(-angle)};
+ 	}
++	else if (string_equals(link, "_udim_offset")) { // STUDIO-PATCH(udim-material-uv): tile offsets of the object drawn
++		return util_udim_offset(object);
++	}
++	else if (string_equals(link, "_udim_tile")) {
++		return util_udim_tile_uv(object);
++	}
+ 	return vec2_nan();
+ }
+ 
+diff --git a/paint/sources/util/util_mesh.c b/paint/sources/util/util_mesh.c
+index 24121fe4..669245e7 100644
+--- a/paint/sources/util/util_mesh.c
++++ b/paint/sources/util/util_mesh.c
+@@ -471,6 +471,11 @@ void util_mesh_merge(mesh_object_t_array_t *paint_objects) {
+ 	render_path_raytrace_ready = false;
+ }
+ 
++// STUDIO-PATCH(udim-material-uv): the objects of the merged mesh, painted one by one for the udim layers
++mesh_object_t_array_t *util_mesh_merged_scope() {
++	return util_mesh_merged_objects;
++}
++
+ bool util_mesh_merge_refresh() {
+ 	mesh_object_t_array_t *objects = util_mesh_merged_objects;
+ 	if (g_context->merged_object == NULL || objects == NULL || objects->length == 0) {

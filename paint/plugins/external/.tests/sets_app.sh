@@ -3,7 +3,8 @@
 #   props.obj (crate, barrel, ball) : jeux changés par la fenêtre d'export (op atlases), export Visible un jeu de maps
 #     par jeu, nommé par <atlas> ; calque limité à un jeu (refus d'un jeu vidé), jeux enregistrés avec le .arm ;
 #   udim_cube.obj : par tuile UDIM (6 tuiles, <name>, <version>, <UDIM>), par matériau (body, cap : <object> ; Per
-#     Object ne sépare que les objets qui ont un calque à eux, ici cap) ;
+#     Object ne sépare que les objets qui ont un calque à eux, ici cap) ; par matériau et par tuile (lot D1) : un jeu
+#     par matériau, fenêtre en mode Per UDIM Tile (section des jeux, note, résumé) et export par jeu et par tuile ;
 #   un modèle de nom à variable inconnue : refusé, rien d'écrit.
 #
 #   sh .tests/sets_app.sh [dossier de travail]
@@ -151,6 +152,25 @@ check "variable inconnue <shader> : refusé, rien d'écrit" '[ "$(line udim bad)
 window cube '{"no_export": true, "dir": "'"$W/out_cube"'"}' "$W/cube_v002.arm"
 R=$W/cube.result.json
 check "fenêtre, cube UDIM : section des jeux masquée, 6 tuiles au projet" '[ -s "$R" ] && [ "$(json "$R" "r[\"sets\"][\"shown\"]")" = False ] && grep -q "6 UDIM tiles" "$R"'
+
+# 6. Cube UDIM par matériau et par tuile (lot D1) : jeux body (1001, 1002, 1003, 1011) et cap (1012, 1013) ; fenêtre
+#    en mode Per UDIM Tile : les deux jeux, la note du mode, le résumé jeux × tuiles ; export d'un jeu de maps par jeu,
+#    pour ses tuiles seulement.
+script cubemats <<EOF
+int main() {
+	studio_import_mesh("$M/udim_cube.obj", 3);
+	$MAT
+	console_log(string("t: sets %s", studio_atlases()));
+	project_filepath_set("$W/cubemats.arm");
+	project_save(false);
+	return 0;
+}
+EOF
+window cubemats '{"preset": "basic", "mode": 3, "padding": false, "dir": "'"$W/out_cubemats"'"}' "$W/cubemats.arm"
+R=$W/cubemats.result.json
+check "cube par matériau et par tuile : body.1001 ... cap.1013, un jeu par matériau" '[ "$(line cubemats sets | "$PY" -c "import json,sys; j=json.load(sys.stdin); print(\" \".join(\"%s:%s\" % (o[\"name\"], j[\"names\"][o[\"atlas\"]]) for o in j[\"objects\"]))")" = "body.1001:body body.1002:body body.1003:body body.1011:body cap.1012:cap cap.1013:cap" ]'
+check "fenêtre par tuile : jeux body (4 tuiles) et cap (2), note du mode, 9 maps × 6 tuiles de jeux" '[ -s "$R" ] && [ "$(json "$R" "r[\"sets\"][\"shown\"], r[\"sets\"][\"rows\"]")" = "(True, [['"'"'body  (4 UDIM tiles)'"'"', '"'"'body'"'"'], ['"'"'cap  (2 UDIM tiles)'"'"', '"'"'cap'"'"']])" ] && json "$R" "r[\"sets\"][\"note\"]" | grep -q "^Per UDIM Tile: one set of maps per texture set and tile" && [ "$(json "$R" "r[\"composition\"]")" = "9 maps × 6 texture set tiles (2 sets, 6 UDIM tiles)" ]'
+check "export par tuile : 9 maps de body sur ses 4 tuiles, de cap sur 1012 et 1013 seulement" '[ "$(json "$R" "r[\"export\"][\"ok\"]")" = True ] && [ $(ls "$W/out_cubemats" | grep -c "\.exr$") -eq 54 ] && [ $(ls "$W/out_cubemats" | grep -cE "_body_.*\.(1001|1002|1003|1011)\.exr$") -eq 36 ] && [ $(ls "$W/out_cubemats" | grep -cE "_cap_.*\.(1012|1013)\.exr$") -eq 18 ]'
 
 [ $FAIL -eq 0 ] && echo "== OK" || echo "== FAIL"
 exit $FAIL

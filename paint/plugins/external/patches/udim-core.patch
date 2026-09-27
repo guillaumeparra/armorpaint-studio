@@ -1,0 +1,131 @@
+diff --git a/paint/sources/global.h b/paint/sources/global.h
+index 5db2599e..8347316d 100644
+--- a/paint/sources/global.h
++++ b/paint/sources/global.h
+@@ -7,3 +7,4 @@
+ #include "functions.h"
+ #include "globals.h"
+ #include "types.h"
++#include "util/util_udim.h" // STUDIO-PATCH(udim-core)
+diff --git a/paint/sources/main.c b/paint/sources/main.c
+index 0f3c266b..8fa5e83f 100644
+--- a/paint/sources/main.c
++++ b/paint/sources/main.c
+@@ -206,6 +206,7 @@
+ #include "util/util_ui.c"
+ #include "util/util_uv.c"
+ #include "util/util_uv_unwrap.c"
++#include "util/util_udim.c" // STUDIO-PATCH(udim-core)
+ 
+ #include "args.c"
+ #include "base.c"
+diff --git a/paint/sources/util/util_udim.c b/paint/sources/util/util_udim.c
+new file mode 100644
+index 00000000..5979ab3a
+--- /dev/null
++++ b/paint/sources/util/util_udim.c
+@@ -0,0 +1,75 @@
++#include "../global.h"
++
++// STUDIO-PATCH(udim-core): see util_udim.h
++
++static mesh_object_t *util_udim_paint_object(object_t *object) {
++	mesh_object_t_array_t *paint_objects = g_project->_->paint_objects;
++	for (i32 i = 0; i < paint_objects->length; ++i) {
++		if (paint_objects->buffer[i]->base == object) {
++			return paint_objects->buffer[i];
++		}
++	}
++	return NULL;
++}
++
++static i32 util_udim_object_tile(object_t *object) {
++	if (!util_mesh_udim_active()) {
++		return -1;
++	}
++	mesh_object_t *o = util_udim_paint_object(object);
++	return o == NULL ? -1 : util_mesh_udim_tile(o->base->name); // Merged mesh or 2d plane: uvs already in atlas space
++}
++
++vec2_t util_udim_tile_uv(object_t *object) {
++	i32 tile = util_udim_object_tile(object);
++	if (tile < 0) {
++		return (vec2_t){0.0, 0.0};
++	}
++	// Uvs are stored with v flipped (tex.y = 1 - v): the tile goes down in tex space
++	return (vec2_t){(tile - 1001) % 10, -((tile - 1001) / 10)};
++}
++
++vec2_t util_udim_offset(object_t *object) {
++	i32 tile = util_udim_object_tile(object);
++	i32 slot = tile < 0 ? -1 : util_mesh_udim_slot(tile);
++	if (slot < 0) {
++		return (vec2_t){0.0, 0.0};
++	}
++	i32    stride = util_mesh_atlas_stride();
++	vec2_t uv     = util_udim_tile_uv(object);
++	return (vec2_t){uv.x - (slot % stride), uv.y - (slot / stride)};
++}
++
++// Shared layers and layers limited to a texture set, unless a layer filter keeps a single object. The bake and the
++// pickers keep the merged mesh: their shaders do not place the objects in their cell (make_paint.c, make_picking.c).
++static bool util_udim_paint_per_object() {
++	slot_layer_t *l = g_context->layer;
++	if (l == NULL || !util_mesh_udim_layer(l) || context_layer_filter_used()) {
++		return false;
++	}
++	i32 tool = g_context->tool;
++	return tool != TOOL_TYPE_BAKE && tool != TOOL_TYPE_COLORID && tool != TOOL_TYPE_PICKER && tool != TOOL_TYPE_MATERIAL && tool != TOOL_TYPE_CURSOR;
++}
++
++void util_udim_draw_paint_meshes() {
++	mesh_object_t         *merged = g_context->merged_object;
++	mesh_object_t_array_t *scope  = util_mesh_merged_scope();
++	if (merged == NULL || scope == NULL || scope->length == 0 || !util_udim_paint_per_object()) {
++		render_path_draw_meshes("paint");
++		return;
++	}
++	// The objects of the merged mesh are drawn instead of it, hidden ones excepted, then everything is put back
++	char        *merged_skip = merged->skip_context;
++	any_array_t *skips       = any_array_create(scope->length);
++	merged->skip_context     = "paint";
++	for (i32 i = 0; i < scope->length; ++i) {
++		skips->buffer[i]               = scope->buffer[i]->skip_context;
++		scope->buffer[i]->skip_context = "";
++	}
++	render_path_draw_meshes("paint");
++	for (i32 i = 0; i < scope->length; ++i) {
++		scope->buffer[i]->skip_context = skips->buffer[i];
++	}
++	merged->skip_context = merged_skip;
++	array_delete(skips);
++}
+diff --git a/paint/sources/util/util_udim.h b/paint/sources/util/util_udim.h
+new file mode 100644
+index 00000000..ef131e07
+--- /dev/null
++++ b/paint/sources/util/util_udim.h
+@@ -0,0 +1,23 @@
++#pragma once
++
++// STUDIO-PATCH(udim-core): UDIM of lot D1, see paint/plugins/external/PATCHES.md and ARMORPAINT_UDIM.md
++//
++// A UDIM mesh keeps one paint object per tile, named "<object>.<tile>" (body.1001, body.1002...), as the upstream
++// format has it: the .arm stays readable by upstream ArmorPaint and by older studio builds. The shared layers hold every
++// tile in its own cell of the layer atlas (util_mesh.c).
++
++// Material uvs of the udim layers: those of the DCC, tex + (tile u, -tile v) with the v flip of the stored uvs, continuous
++// from a tile to its neighbours. util_udim_tile_uv() gives (tile u, -tile v) of a tile object, for the layers of a single
++// tile (tex + tile uv); util_udim_offset() the same relative to its atlas cell, for the shared layers (atlas_uv * stride
++// + offset). Both zero for the merged mesh, the 2d plane and the objects without a tile, util_udim_offset() also for the
++// tiles without a cell.
++vec2_t util_udim_tile_uv(object_t *object);
++vec2_t util_udim_offset(object_t *object);
++
++// Draws the "paint" context. The udim layers are painted object by object, each object with its offset, instead of
++// through the merged mesh; the merged mesh stays for the uv, triangle and dilate maps, the raytracer, the bake and the
++// pickers, whose shaders read the layers in atlas space.
++void util_udim_draw_paint_meshes();
++
++// util_mesh.c: the objects of the merged mesh
++mesh_object_t_array_t *util_mesh_merged_scope();

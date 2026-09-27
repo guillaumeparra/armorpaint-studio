@@ -1,0 +1,74 @@
+diff --git a/paint/sources/ui/tab_meshes.c b/paint/sources/ui/tab_meshes.c
+index 133ab884..73eb7878 100644
+--- a/paint/sources/ui/tab_meshes.c
++++ b/paint/sources/ui/tab_meshes.c
+@@ -1039,6 +1039,41 @@ static char *tab_meshes_mesh_info(mesh_object_t *o, i32 i) {
+ 	return string_tmp("%s@%s", o->base->name, g_project->_->paint_objects->buffer[owner]->base->name);
+ }
+ 
++// STUDIO-PATCH(udim-tile-name): the udim tile of an object is the ".1001" suffix of its name (util_mesh_udim_tile), a
++// rename keeps it, see paint/plugins/external/PATCHES.md. Upstream renamed body.1001 to torso, an object without a tile,
++// or Box to Box.1005, a new tile: the tile table changed, and with it the layer slots the other tiles are read from.
++static char *tab_meshes_tile_suffix(char *name) {
++	return util_mesh_udim_tile(name) > 0 ? name + string_length(name) - 5 : "";
++}
++
++static char *tab_meshes_tile_base(char *name) {
++	return substring(name, 0, string_length(name) - string_length(tab_meshes_tile_suffix(name)));
++}
++
++// Renames the object i to the typed name followed by its tile suffix: a typed suffix is dropped, the suffix alone is no
++// name. Also used by the studio plugin (studio_object_rename). Returns the new name.
++char *tab_meshes_rename_object(i32 i, char *typed) {
++	mesh_object_t *o    = g_project->_->paint_objects->buffer[i];
++	char          *tile = tab_meshes_tile_suffix(o->base->name);
++	if (util_mesh_udim_tile(typed) > 0) {
++		if (util_mesh_udim_tile(typed) != util_mesh_udim_tile(tile)) {
++			console_info(string("%s: the UDIM tile of an object comes from its import, a rename keeps it", typed));
++		}
++		typed = substring(typed, 0, string_length(typed) - 5);
++	}
++	if (typed[0] == '\0' && tile[0] != '\0') {
++		return o->base->name;
++	}
++	char *new_name = string("%s%s", typed, tile);
++	tab_stages_rename_object(o->base->name, new_name);
++	o->base->name = new_name;
++	// Mesh data shared by linked duplicates is named after the object holding it
++	if (util_mesh_data_owner(o->data) == i) {
++		o->data->name = string_copy(o->base->name);
++	}
++	return new_name;
++}
++
+ void tab_meshes_draw_mesh_slot(mesh_object_t *o, i32 i) {
+ 	i32 step   = g_theme->ELEMENT_H;
+ 	f32 center = (step / 2.0) * UI_SCALE();
+@@ -1145,13 +1180,11 @@ void tab_meshes_draw_mesh_slot(mesh_object_t *o, i32 i) {
+ 	bool over_name = g_ui->input_x > g_ui->_window_x + name_x && g_ui->input_x < g_ui->_window_x + name_right;
+ 
+ 	if (tab_meshes_mesh_name_edit == o->base->uid) {
+-		tab_meshes_mesh_name = string_copy(o->base->name);
+-		char *new_name       = string_copy(ui_text_input(&tab_meshes_mesh_name, "", UI_ALIGN_LEFT, true, false));
+-		tab_stages_rename_object(o->base->name, new_name);
+-		o->base->name = new_name;
+-		// Mesh data shared by linked duplicates is named after the object holding it
+-		if (util_mesh_data_owner(o->data) == i) {
+-			o->data->name = string_copy(o->base->name);
++		// STUDIO-PATCH(udim-tile-name): the name before the udim tile suffix is edited, the suffix is shown next to it
++		char *base           = tab_meshes_tile_base(o->base->name);
++		tab_meshes_mesh_name = base;
++		if (!string_equals(ui_text_input(&tab_meshes_mesh_name, tab_meshes_tile_suffix(o->base->name), UI_ALIGN_LEFT, true, false), base)) {
++			tab_meshes_rename_object(i, tab_meshes_mesh_name);
+ 		}
+ 		if (g_ui->text_selected_id != ui_widget_id(&tab_meshes_mesh_name, UI_ID_TEXT)) {
+ 			tab_meshes_mesh_name_edit = -1;
+@@ -1176,7 +1209,7 @@ void tab_meshes_draw_mesh_slot(mesh_object_t *o, i32 i) {
+ 					if (over_name) {
+ 						// Double click name to rename
+ 						tab_meshes_mesh_name_edit = o->base->uid;
+-						tab_meshes_mesh_name      = string_copy(o->base->name);
++						tab_meshes_mesh_name      = tab_meshes_tile_base(o->base->name); // STUDIO-PATCH(udim-tile-name)
+ 						ui_start_text_edit(&tab_meshes_mesh_name, UI_ALIGN_LEFT);
+ 					}
+ 					else {

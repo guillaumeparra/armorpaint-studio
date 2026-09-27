@@ -7,9 +7,9 @@
 #
 # 1. same/ : fichiers sans UDIM ni bug connu (nœuds avec et sans uv, second jeu d'uv, couleurs, jusqu'à 64
 #    matériaux) : splits par objet et par matériau identiques, octet pour octet, à l'upstream.
-# 2. udim/ : cas UDIM (tuiles, coupes, refus, nœuds sans uv) et matériaux (plus de 64, uv mêlées) de fbx_udim.py ;
-#    l'upstream doit montrer chaque bug corrigé.
-# 3. fuzz  : mutations de same/ et udim/ (nombres extrêmes, jetons, octets), lues en split 0, 1 et 2 par l'arbre
+# 2. udim/ : cas UDIM (tuiles, coupes, refus, nœuds sans uv), matériaux (plus de 64, uv mêlées) et matériau × UDIM
+#    (lot D1) de fbx_udim.py ; l'upstream doit montrer chaque bug corrigé.
+# 3. fuzz  : mutations de same/ et udim/ (nombres extrêmes, jetons, octets), lues en split 0 à 3 par l'arbre
 #    courant et par l'upstream ; échec si l'arbre courant plante ou signale un UB (hors float-cast-overflow).
 # Le dossier .tests/ commence par un point : amake ne le compile pas dans l'app.
 
