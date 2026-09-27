@@ -1,9 +1,9 @@
 # Chemins des fichiers d'un projet .arm tels qu'enregistrés (chaînes armpack : 0xdb, longueur u32, octets) : maillage
 # source (.obj), textures et envmap (.png, .hdr).
-#   python3 arm_paths.py <projet.arm>                                  les liste
-#   python3 arm_paths.py <projet.arm> <dossier> [<dossier interdit>...]  vérifie : un maillage, une texture et une
-#       envmap, chacun en chemin relatif qui mène du dossier du .arm à <dossier> sans passer par un dossier interdit
-#       (nom d'un élément du chemin) ; code 1 et les écarts sinon.
+#   python3 arm_paths.py <projet.arm>                les liste
+#   python3 arm_paths.py <projet.arm> <fichier>...   vérifie qu'ils désignent exactement ces fichiers, chacun par un
+#       chemin relatif au dossier du .arm et normalisé (sans dossier/.. : un tel chemin ne se résout plus quand le
+#       dossier manque) ; code 1 et les écarts sinon.
 import os
 import struct
 import sys
@@ -28,18 +28,18 @@ def main(argv):
     if len(argv) == 1:
         print("\n".join(paths))
         return 0
-    expected, forbidden = os.path.abspath(argv[1]), argv[2:]
-    errors = []
-    if {os.path.splitext(p)[1] for p in paths} != {".obj", ".png", ".hdr"}:
-        errors.append("mesh, texture and envmap expected: %s" % paths)
+    expected = {os.path.abspath(f) for f in argv[1:]}
+    errors, found = [], set()
     for p in paths:
-        parts = p.replace("\\", "/").split("/")
-        if os.path.isabs(p):
+        q = p.replace("\\", "/")
+        if os.path.isabs(q):
             errors.append("absolute: %s" % p)
-        elif os.path.normpath(os.path.join(os.path.dirname(arm), os.path.dirname(p))) != expected:
-            errors.append("not in %s: %s" % (expected, p))
-        if any(name in parts for name in forbidden):
-            errors.append("through %s: %s" % ("/".join(forbidden), p))
+            continue
+        if os.path.normpath(q) != q:
+            errors.append("not normalized: %s" % p)
+        found.add(os.path.normpath(os.path.join(os.path.dirname(arm), q)))
+    if found != expected:
+        errors.append("files %s, expected %s" % (sorted(found), sorted(expected)))
     print("\n".join(errors or paths))
     return 1 if errors else 0
 

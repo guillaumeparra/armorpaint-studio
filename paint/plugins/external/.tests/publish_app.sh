@@ -3,13 +3,16 @@
 # et les hooks du moteur (tk-armorpaint/hooks/tk-multi-publish2) ; le hook du sidecar publish_app_hook.py relève ce qui
 # est publié (le site simulé vit le temps d'un lancement d'ArmorPaint).
 #   1. projet UDIM (tuiles 1001 et 1002) avec une texture et une envmap importées, enregistré par ArmorPaint au chemin de
-#      next_version (robot.v001.arm) ; réglages d'export dans le sidecar du projet : preset basic par tuile, deux maps ;
+#      next_version (robot.v001.arm), puis une texture rangée à côté de lui, dans le dossier de travail (decal.png) ;
+#      réglages d'export dans le sidecar du projet : preset basic par tuile, deux maps ;
 #   2. publish sans fenêtre (op publish, lancé en job par un script) : projet copié par ArmorPaint dans le dossier
 #      publish ; textures exportées (noms du template) puis copiées, une séquence <UDIM> par texture, de type UDIM Image,
 #      dépendante du projet ; vignettes du viewport ; projet ouvert ensuite à sa version suivante (v002) ;
-#   3. la copie publiée : chemins de la texture, de l'envmap et du maillage source relatifs à son dossier, sans passer
-#      par le dossier de travail (STUDIO-PATCH(project-copy), STUDIO-PATCH(arm-relative-paths)) ; rouverte sans ce
-#      dossier, elle retrouve texture et envmap ; une simple copie du fichier les perd (témoin) ;
+#   3. la copie publiée : chemins des textures, de l'envmap et du maillage source relatifs à son dossier et normalisés
+#      (STUDIO-PATCH(arm-relative-paths)), decal.png désignée dans le dossier de travail (STUDIO-PATCH(project-copy) :
+#      work/ et publish/ sont à la même profondeur, seul un fichier rangé dans l'un des deux distingue leurs chemins) ;
+#      rouverte, elle trouve toutes ses textures ; sans le dossier de travail, celles de src/ ; une simple copie du
+#      fichier les perd (témoin) ;
 #   4. fenêtre Publish (show_app "Publish...", Qt offscreen) pilotée par le hook comme par l'artiste : v002 publié,
 #      projet ouvert en v003.
 #
@@ -138,6 +141,22 @@ V1=$(line seed seed)
 WORK=$(dirname "$V1")
 PUB=$(dirname "$(dirname "$WORK")")/publish/armorpaint
 ok "projet enregistré : ${V1#"$W"/}"
+cp "$W/src/wood.png" "$WORK/decal.png"
+background decal "$V1" <<EOF
+int frame = 0;
+void update() {
+	if (++frame == 5) {
+		script_quit();
+	}
+}
+int main() {
+	script_import_asset("$WORK/decal.png", 0);
+	project_save(false);
+	script_notify_on_update(update);
+	return 0;
+}
+EOF
+check "texture du dossier de travail importée, projet réenregistré" '"$PY" "$T/arm_paths.py" "$V1" | grep -qx decal.png'
 cat > "$WORK/robot.export_settings.json" <<EOF
 {"export": {"preset": "basic", "dir": "$W/unused", "mode": 3, "padding": false,
  "presets": {"basic": {"disabled": ["opacity", "occlusion", "roughness", "metallic", "height", "emission", "subsurface"]}}}}
@@ -176,15 +195,12 @@ check "projet ouvert ensuite en v002 (enregistré par ArmorPaint)" \
 	'[ -f "$WORK/robot.v002.arm" ] && grep -q "studio: workfiles: save $WORK/robot.v002.arm" "$W/pub1.log"'
 
 echo "== 3. la copie publiée retrouve ses fichiers, même sans le dossier de travail"
-# check_paths <nom> <.arm> : les chemins de ses fichiers (arm_paths.py) sont relatifs, mènent de son dossier aux fichiers
-# de src/ et ne passent pas par work/.
-check_paths() {
-	if "$PY" "$T/arm_paths.py" "$2" "$W/src" work > "$W/check.out" 2>&1; then ok "$1"; else
-		ko "$1"
-		tail -3 "$W/check.out" | sed 's/^/     /'
-	fi
-}
-check_paths "copie publiée : chemins relatifs à publish/, vers src/ sans passer par work/" "$PUB/robot.v001.arm"
+NAME="copie publiée : chemins relatifs à publish/ et normalisés, vers src/ et vers decal.png du dossier de travail"
+if "$PY" "$T/arm_paths.py" "$PUB/robot.v001.arm" "$W/src/robot.obj" "$W/src/wood.png" "$W/src/sky.hdr" \
+	"$WORK/decal.png" > "$W/check.out" 2>&1; then ok "$NAME"; else
+	ko "$NAME"
+	tail -3 "$W/check.out" | sed 's/^/     /'
+fi
 PATHS='int main() {
 	project_t *p = script_get_project();
 	for (int i = 0; i < p->assets->length; ++i) {
@@ -193,11 +209,15 @@ PATHS='int main() {
 	console_log(string("t: envmap %s", p->envmap));
 	return 0;
 }'
-mv "$WORK" "$WORK.away" # le dossier de travail de l'artiste, absent chez les autres
 printf '%s\n' "$PATHS" | background copy "$PUB/robot.v001.arm"
+check "copie publiée rouverte : toutes ses textures trouvées" \
+	'[ -n "$(line copy asset)" ] && ! grep -q "Could not locate texture" "$W/copy.log"'
+mv "$WORK" "$WORK.away" # le dossier de travail de l'artiste, absent chez les autres
+printf '%s\n' "$PATHS" | background away "$PUB/robot.v001.arm"
 mv "$WORK.away" "$WORK"
-check "copie publiée rouverte sans le dossier de travail : texture et envmap trouvées dans src/" \
-	'[ -n "$(line copy asset)" ] && [ "$(norm "$(line copy envmap)")" = "$W/src/sky.hdr" ] && ! grep -q "Could not locate texture" "$W/copy.log"'
+check "rouverte sans le dossier de travail : texture et envmap trouvées dans src/, seule decal.png manque" \
+	'[ "$(norm "$(line away envmap)")" = "$W/src/sky.hdr" ] && [ "$(grep -c "Could not locate texture" "$W/away.log")" -eq 1 ] \
+	&& grep -q "Could not locate texture .*/decal.png" "$W/away.log"'
 cp "$V1" "$W/naive/robot.v001.arm"
 printf '%s\n' "$PATHS" | background naive "$W/naive/robot.v001.arm"
 check "témoin : une simple copie du .arm ne trouve plus sa texture" 'grep -q "Could not locate texture" "$W/naive.log"'

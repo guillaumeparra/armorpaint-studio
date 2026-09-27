@@ -5,8 +5,8 @@
 #      relatifs à son dossier vers src/, et l'envmap reste absolue en mémoire. Upstream : après le premier
 #      enregistrement, maillage et envmap gardaient en mémoire leur chemin relatif à a/, faux depuis b/deep/ (et pour
 #      Reimport Mesh) ;
-#   2. celui de a/ rouvert et enregistré dans c/ : ses chemins vont à src/ sans passer par a/ ; a/ renommé, celui de
-#      c/ rouvert retrouve texture et envmap. Upstream : ../a/../src/wood.png, perdu avec a/.
+#   2. celui de a/ rouvert et enregistré dans c/ : ses chemins vont à src/ sans passer par a/ (normalisés) ; a/
+#      renommé, celui de c/ rouvert retrouve texture et envmap. Upstream : ../a/../src/wood.png, perdu avec a/.
 #
 #   sh .tests/arm_paths_app.sh [dossier de travail]
 #   APP=<binaire ArmorPaint> pour un autre build (défaut : build Release de paint/).
@@ -47,9 +47,12 @@ background() {
 }
 line() { sed -n "s/^t: $2 //p" "$W/$1.log"; }
 norm() { "$PY" -c 'import os, sys; print(os.path.normpath(sys.argv[1]))' "$1"; }
-# check_paths <nom> <.arm> [dossier interdit] : chemins relatifs, de son dossier vers src/ (arm_paths.py).
+# check_paths <nom> <.arm> : ses chemins désignent le maillage, la texture et l'envmap de src/, relatifs à son dossier
+# et normalisés (arm_paths.py).
 check_paths() {
-	if "$PY" "$T/arm_paths.py" "$2" "$W/src" ${3:+"$3"} > "$W/check.out" 2>&1; then ok "$1"; else
+	if "$PY" "$T/arm_paths.py" "$2" "$W/src/robot.obj" "$W/src/wood.png" "$W/src/sky.hdr" > "$W/check.out" 2>&1; then
+		ok "$1"
+	else
 		ko "$1"
 		sed 's/^/     /' "$W/check.out" | tail -4
 	fi
@@ -101,7 +104,7 @@ int main() {
 	return 0;
 }
 EOF
-check_paths "c/r.arm : relatifs vers src/, sans passer par a/" "$W/c/r.arm" a
+check_paths "c/r.arm : relatifs vers src/, sans passer par a/" "$W/c/r.arm"
 mv "$W/a" "$W/a.away"
 background reopen "$W/c/r.arm" <<'EOF'
 int main() {
