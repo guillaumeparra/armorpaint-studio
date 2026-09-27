@@ -1,0 +1,50 @@
+diff --git a/base/sources/iron_path.c b/base/sources/iron_path.c
+index 1b459cae..fa88d955 100644
+--- a/base/sources/iron_path.c
++++ b/base/sources/iron_path.c
+@@ -183,8 +183,11 @@ char *path_data(void) {
+ }
+ 
+ char *path_to_relative(char *from, char *to) {
+-	any_array_t *a = string_split(from, PATH_SEP);
+-	any_array_t *b = string_split(to, PATH_SEP);
++	// STUDIO-PATCH(arm-relative-paths): normalized first, a path through dir/.. would give a relative path through dir
++	char        *from_normalized = path_normalize(from);
++	char        *to_normalized   = path_normalize(to);
++	any_array_t *a               = string_split(from_normalized, PATH_SEP);
++	any_array_t *b               = string_split(to_normalized, PATH_SEP);
+ 	if (a->length > 0 && !path_is_folder(from)) {
+ 		free(array_pop(a));
+ 	}
+@@ -215,6 +218,8 @@ char *path_to_relative(char *from, char *to) {
+ 	string_buffer_free(&sb);
+ 	string_split_free(a);
+ 	string_split_free(b);
++	free(from_normalized);
++	free(to_normalized);
+ 	return p;
+ }
+ 
+diff --git a/paint/sources/io/export_arm.c b/paint/sources/io/export_arm.c
+index fbd679e2..95e8b704 100644
+--- a/paint/sources/io/export_arm.c
++++ b/paint/sources/io/export_arm.c
+@@ -279,6 +279,9 @@ void export_arm_run_project(char *path) {
+ 	bool same_drive = g_project->envmap != NULL ? char_at(relative_to, 0)[0] == char_at(g_project->envmap, 0)[0] : true;
+ #endif
+ 
++	// STUDIO-PATCH(arm-relative-paths): the file gets relative mesh and envmap paths, the project keeps absolute ones
++	string_array_t *mesh_assets_abs = g_project->mesh_assets;
++	char           *envmap_abs      = g_project->envmap;
+ 	g_project->version         = string_copy(manifest_version_project);
+ 	g_project->material_groups = mgroups;
+ 	g_project->material_datas  = mdata2;
+@@ -396,6 +399,8 @@ void export_arm_run_project(char *path) {
+ 
+ 	buffer_t *buffer = util_encode_project(g_project);
+ 	iron_file_save_bytes(path, buffer, buffer->length + 1);
++	g_project->mesh_assets = mesh_assets_abs; // STUDIO-PATCH(arm-relative-paths)
++	g_project->envmap      = envmap_abs;
+ 	array_free(buffer);
+ 	free(buffer);
+ 

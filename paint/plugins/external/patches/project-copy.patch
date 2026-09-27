@@ -1,0 +1,17 @@
+diff --git a/paint/sources/io/export_arm.c b/paint/sources/io/export_arm.c
+index 95e8b704..4a9be6f0 100644
+--- a/paint/sources/io/export_arm.c
++++ b/paint/sources/io/export_arm.c
+@@ -220,6 +220,12 @@ void export_arm_run_project(char *path) {
+ 	}
+ 
+ 	char *relative_to = string_equals(g_project->_->filepath, "") ? path : g_project->_->filepath;
++#ifdef WITH_EXTERNAL // STUDIO-PATCH(project-copy): a copy of the project for a publish finds its files from its own folder, see external/PATCHES.md
++	bool studio_project_copy(void);
++	if (studio_project_copy()) {
++		relative_to = path;
++	}
++#endif
+ 	string_array_t *texture_files = export_arm_assets_to_files(relative_to, g_project->_->assets);
+ 	string_array_t *font_files  = export_arm_fonts_to_files(relative_to, g_project->_->fonts);
+ 	string_array_t *sound_files = export_arm_sounds_to_files(relative_to, g_project->_->sounds);

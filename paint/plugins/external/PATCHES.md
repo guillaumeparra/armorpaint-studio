@@ -948,3 +948,102 @@ plus `ATLAS_MAX_SLOTS - 1`. Rejouer la section « 70 tuiles » d'`.tests/udim_ap
 - Les tuiles au-delà de 64 ne sont pas peignables : la limite elle-même disparaît avec la phase D2 (un jeu de
   textures par tuile).
 - Un calque de tuile sans case est gardé dans le projet mais n'apparaît dans aucun export.
+
+---
+
+## arm-relative-paths
+
+| | |
+|---|---|
+| Fichiers | `paint/sources/io/export_arm.c` (`export_arm_run_project`), `base/sources/iron_path.c` (`path_to_relative`) |
+| Commit studio | `209bae06` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-27) |
+| Trouvé | 2026-09-27, banc du publish (`.tests/publish_app.sh`, lot C4) : la copie publiée désignait sa texture par `../../work/armorpaint/../../…` |
+
+**Bug.** Deux défauts dans les chemins des fichiers d'un `.arm` enregistré (maillage source, textures importées,
+envmap) :
+- `export_arm_run_project()` écrit dans le fichier les chemins du maillage source et de l'envmap relatifs au `.arm`
+  en les mettant à la place de ceux du projet ouvert (`g_project->mesh_assets`, `g_project->envmap`), qui ne
+  redeviennent jamais absolus. Après un premier enregistrement, un Save As dans un autre dossier écrit des chemins
+  relatifs au premier dossier (`../src/robot.obj` depuis `b/deep/`, au lieu de `../../src/robot.obj`). Reimport Mesh
+  (`project_reimport_mesh`, qui teste `iron_file_exists` sur ce chemin relatif) ouvre alors le navigateur de fichiers
+  au lieu de réimporter. Les textures ne sont pas touchées : leurs chemins sont recalculés à chaque enregistrement
+  depuis `g_project->_->assets`, qui reste absolu.
+- un projet ouvert garde des chemins qui passent par son dossier : `import_arm_run_project()` les recompose en
+  `<dossier du .arm>/<chemin relatif>` sans les normaliser (`/w/a/../src/wood.png`), et `path_to_relative()` compare
+  les éléments un à un. Enregistré dans `c/`, le projet désigne `../a/../src/wood.png`, qui ne se résout plus si `a/`
+  manque : dossier renommé, ou dossier de travail absent chez qui ouvre une copie publiée. Résultat : « Could not
+  locate texture », textures roses.
+
+**Correctif.**
+- `export_arm_run_project()` garde les chemins absolus du maillage et de l'envmap avant d'y mettre les chemins
+  relatifs, et les remet une fois le fichier écrit.
+- `path_to_relative()` normalise les deux chemins (`path_normalize`, qui retire les `dossier/..`) avant de les
+  comparer. Seul `export_arm.c` l'appelle.
+
+Deux patches touchent `export_arm_run_project()` : [project-copy](#project-copy) (`relative_to`, plus haut) et
+celui-ci, indépendants. Pour régénérer celui-ci : `git diff 209bae06^ 209bae06 -- base/sources/iron_path.c
+paint/sources/io/export_arm.c` (ou le commit qui l'a refait).
+
+**Test.** `.tests/arm_paths_app.sh` : ArmorPaint en `--background`, chemins lus dans les `.arm` par
+`.tests/arm_paths.py`. Un projet avec maillage, texture et envmap pris dans `src/` est enregistré dans `a/` puis dans
+`b/deep/` pendant la même session : chaque fichier a des chemins relatifs à son dossier vers `src/`, et l'envmap
+reste absolue en mémoire. `a/p.arm` rouvert et enregistré dans `c/` : chemins vers `src/` sans passer par `a/`. Avec
+`a/` renommé, `c/r.arm` rouvert retrouve texture et envmap. Au 2026-09-27, tout passe ; sans le patch, 4 contrôles
+sur 5 échouent (`../src/robot.obj` depuis `b/deep/`, envmap relative en mémoire, `../a/../src/wood.png`, « Could not
+locate texture »). La copie publiée en dépend aussi : `.tests/publish_app.sh`, étape 3.
+
+**Signes que l'upstream l'a corrigé.** `export_arm_run_project()` ne remplace plus `g_project->mesh_assets` et
+`g_project->envmap` (ou les remet), `import_arm_run_project()` normalise les chemins qu'il recompose, ou
+`path_to_relative()` normalise lui-même. Rejouer `.tests/arm_paths_app.sh` sur l'upstream sans le patch.
+
+**Non couvert.**
+- Reimport Mesh : déduit du code de `project_reimport_mesh`, pas joué par le banc (pas accessible par script).
+- En mémoire, les chemins du projet ouvert gardent leurs `dossier/..` (upstream) ; seuls les chemins écrits sont
+  normalisés.
+- `path_normalize()` ne retire que les `dossier/..` : ni les `./`, ni les liens symboliques.
+- Fichier sur un autre disque que le projet (Windows) : écrit en absolu, comme l'upstream. Testé sur macOS
+  uniquement.
+
+---
+
+## project-copy
+
+| | |
+|---|---|
+| Fichier | `paint/sources/io/export_arm.c` (`export_arm_run_project`) |
+| Commit studio | `1256a538` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-27) |
+| Injection | 6 lignes sous `#ifdef WITH_EXTERNAL` : pendant une copie, `relative_to` est le chemin écrit — l'app compile toujours sans `external/` |
+
+**Motif.** Le publish du lot C4 enregistre dans ShotGrid une copie du projet, placée dans le dossier du template de
+publish (`tk-armorpaint/hooks/tk-multi-publish2/basic/publish_session.py`). Un `.arm` désigne ses fichiers (textures
+importées, maillage source, polices, sons, envmap) par des chemins relatifs à son dossier : copié tel quel ailleurs,
+il ne les trouve plus (« Could not locate texture »). ArmorPaint écrit donc la copie lui-même (requête host
+`publish_copy`, `external/studio_publish.c`), mais `export_arm_run_project(path)` calcule ces chemins depuis le projet
+ouvert (`g_project->_->filepath`), pas depuis `path`.
+
+**Correctif.** Avec `WITH_EXTERNAL`, `relative_to` devient `path` pendant l'écriture d'une copie
+(`studio_project_copy()`, vrai le temps de l'appel dans `publish_copy`) : les chemins sont relatifs à la copie. Le
+projet ouvert ne change pas : `export_arm_run_project()` s'arrête avant les fichiers récents quand `path` n'est pas
+le projet ouvert.
+
+Pour régénérer : `git diff 1256a538^ 1256a538 -- paint/sources/io/export_arm.c` (un seul hunk ; ceux
+d'[arm-relative-paths](#arm-relative-paths), plus bas dans la même fonction, sont dans son propre `.patch`).
+
+**Test.** `.tests/publish_app.sh`, étape 3. Le site simulé range `work/armorpaint/` et `publish/armorpaint/` à la
+même profondeur, comme tk-config-default2 : un fichier rangé ailleurs (`src/`) a le même chemin relatif depuis les
+deux dossiers, et ne distingue pas le patch. Le banc importe donc aussi une texture rangée dans le dossier de travail
+(`decal.png`). Sur la copie publiée, `arm_paths.py` vérifie que chaque chemin est relatif, normalisé et mène au
+fichier attendu : `../../work/armorpaint/decal.png` pour celle-ci. Rouverte, la copie trouve toutes ses textures ;
+avec `work/` renommé, texture et envmap sont trouvées dans `src/`, et seule `decal.png` manque ; témoin : une simple
+copie du `.arm` perd sa texture. Au 2026-09-27, tout passe (19 contrôles). Sans le patch, la copie désigne
+`decal.png` dans `publish/`, et deux contrôles de l'étape 3 échouent (chemins, réouverture).
+
+**Signes que l'upstream l'a changé.** `relative_to` n'est plus calculé depuis `g_project->_->filepath`, ou
+`export_arm_run_project()` prend le dossier de référence en paramètre : le patch devient inutile. Un conflit sur ces
+lignes : refaire l'injection juste avant les appels `export_arm_*_to_files(relative_to, …)`.
+
+**Non couvert.** La copie est écrite depuis l'état en mémoire, juste après l'enregistrement du projet par le hook : un
+changement entre les deux (impossible pendant le publish, qui tient ArmorPaint) ne serait pas dans le fichier de
+travail.
