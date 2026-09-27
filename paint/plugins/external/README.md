@@ -23,8 +23,8 @@ Ce dossier est compilé dans ArmorPaint par le hook upstream `paint/plugins/exte
   `external-project`. Le code studio lui-même ne peut pas en ajouter.
 - `.ocio/` : sources du shim C d'OpenColorIO (`studio_ocio_lib.cpp`, projet CMake), construit par
   `tools/build_ocio.sh` ; voir « Gestion couleur OCIO ».
-- `.shotgrid/` : sources de Toolkit (tk-core, Workfiles et ses frameworks) pour la démo ShotGrid et les tests ;
-  le venv PySide6 y est créé par `tools/setup_shotgrid.sh`, hors de git.
+- `.shotgrid/` : sources de Toolkit (tk-core, Workfiles, Publish et leurs frameworks) pour la démo ShotGrid et les
+  tests ; le venv PySide6 y est créé par `tools/setup_shotgrid.sh`, hors de git.
 - `tools/armorpaint.sh` : lance la version studio (build compris) ; `--shotgrid-demo` pour le site simulé. Sans
   `STUDIO_PYTHON`, il prend le venv PySide6 de `.shotgrid/` (créé au besoin) pour la fenêtre d'export.
 
@@ -42,7 +42,8 @@ Modules, un par lot (voir `ARMORPAINT_LOTS.md` à la racine d'armorpaint) :
 | `studio_ocio` (import, préférences, shader exact) | A4-A6 | à faire |
 | `studio_sg`, `studio_shotgrid`, `studio_json`, `assets/studio_sg_*.py` | C2 | ✅ sidecar ShotGrid (Toolkit), superviseur, API de scripting (macOS ; validé sur site simulé) |
 | `studio_workfiles`, `tk-armorpaint/` | C3 | ✅ Workfiles (tk-multi-workfiles2) et menu ShotGrid, par le moteur Toolkit tk-armorpaint (macOS ; validé sur site simulé) |
-| `studio_shotgrid` (UI) | C4-C5 | à faire |
+| `studio_publish`, `tk-armorpaint/hooks/tk-multi-publish2/` | C4 | ✅ publish ShotGrid par tk-multi-publish2 : projet copié par ArmorPaint, textures exportées puis publiées, séquences `<UDIM>`, vignette du viewport (macOS ; validé sur site simulé) |
+| `studio_shotgrid` (contexte, résilience) | C5 | à faire |
 | `studio_export_window`, `assets/studio_export_window.py`, `studio_atlas` | B6 | ✅ fenêtre d'export Qt (PySide6) à la place de la boîte d'export : presets studio, espace OCIO, préflight en direct, nom des fichiers, jeux de textures (macOS) |
 
 Build : `../base/make --compile` depuis `paint/`. Le log de démarrage affiche `studio: external <version>
@@ -178,13 +179,15 @@ Le nom de publish suit la convention Toolkit : le nom de fichier sans sa version
 | `list_commands` | `task_id` ? ou `project_id` ? | `{context, commands, favourites, has_ui}` : le menu du moteur tk-armorpaint, voir C3 |
 | `show_app` | `command`, `task_id` ? ou `project_id` ? | `{command, context}` à la fin de la commande (fermeture de la fenêtre) |
 | `texture_pattern` | `path`, `project_id` ? | `{template, pattern, pattern_udim}` : chemin des textures exportées depuis le fichier de travail `path`, marqueurs `<channel>`, `<UDIM>`, `<ext>` ; `template` null (et `reason`) hors pipeline. Voir B3 |
+| `publish` | `description` ?, `skip` ?, `task_id` ? ou `project_id` ? | `{context, publishes, skipped, finalized, messages}` : publish du projet ouvert sans fenêtre, voir C4 |
 | `ping`, `shutdown` | — | `{}` |
 
 Codes d'erreur (`/error/code`) : du sidecar, `bad_request`, `unknown_op`, `auth_required` (pas de session Desktop,
 ou expirée : jamais d'invite de mot de passe), `sg_unreachable`, `sg_error`, `toolkit_unavailable` (tk-core
 introuvable), `toolkit_error`, `not_found`, `template_missing` (la config n'a pas le template de travail ou de textures),
-`internal`, `app_unavailable` (moteur tk-armorpaint absent de la config, ou commande inconnue : Qt manquant…) ; du superviseur, `sidecar_failed`, `sidecar_died`, `timeout`, `cancelled`. `restart_required` n'arrive
-à l'appelant que si le rejeu échoue lui aussi.
+`internal`, `app_unavailable` (moteur tk-armorpaint absent de la config, ou commande inconnue : Qt manquant…),
+`publish_invalid`, `publish_failed`, `nothing_to_publish` (op `publish`) ; du superviseur, `sidecar_failed`,
+`sidecar_died`, `timeout`, `cancelled`. `restart_required` n'arrive à l'appelant que si le rejeu échoue lui aussi.
 
 ### Scripts (minic)
 
@@ -275,6 +278,7 @@ engines:
     menu_favourites:
       - {app_instance: tk-multi-workfiles2, name: File Open...}
       - {app_instance: tk-multi-workfiles2, name: File Save...}
+      - {app_instance: tk-multi-publish2, name: Publish...}      # voir C4
     apps:
       tk-multi-workfiles2:
         location: {type: app_store, name: tk-multi-workfiles2, version: v0.15.x}
@@ -294,6 +298,138 @@ github.com/shotgunsoftware ; voir l'en-tête du script.) Ces sources sont versio
 `.shotgrid/README.md`) : `tools/armorpaint.sh --shotgrid-demo` lance la démo avec elles, et crée au besoin le python
 PySide6 (`.shotgrid/venv`, propre à la machine, par `tools/setup_shotgrid.sh`).
 
+## Publish ShotGrid (C4)
+
+Le publish est celui de Toolkit : la fenêtre de **tk-multi-publish2**, ouverte dans le sidecar comme File Open (menu
+ShotGrid > Publish..., **Ctrl+Alt+P**, Cmd+Alt sur macOS), avec les hooks du moteur
+(`tk-armorpaint/hooks/tk-multi-publish2/basic/`). L'op `publish` fait la même chose sans fenêtre.
+
+Ce qui est publié, dans le contexte ShotGrid courant (la tâche de la dernière fenêtre, ou `task_id`) :
+
+- **le projet** (`collector.py`, `publish_session.py`) : enregistré, copié à l'emplacement du template de publish,
+  enregistré dans ShotGrid avec une vignette du viewport, puis ouvert à sa version suivante, comme dans les moteurs
+  des DCC. Type de publish : `STUDIO_SG_PUBLISH_TYPE` (`ArmorPaint Project`), celui que liste File Open. Sans
+  template de publish, le projet est publié en place ;
+- **les textures** (`publish_textures.py`), sous le projet : une par texture du preset et par variante (objet, jeu de
+  textures). En export par tuile, une **séquence `<UDIM>`** : un seul publish pour toutes ses tuiles, de type
+  `UDIM Image` (`Texture` sinon), dépendant du publish du projet. ArmorPaint exporte au publish, une seule fois, les
+  textures cochées, nommées par le template des textures (B3) ; chaque fichier est ensuite copié à l'emplacement du
+  `Publish Template` du plugin (sans lui, publié en place).
+
+La copie du projet est écrite par ArmorPaint (patch `project-copy`, `PATCHES.md`) : un `.arm` désigne ses fichiers
+(textures importées, maillage source, envmap) par des chemins relatifs à son dossier, qu'une simple copie du fichier
+perdrait. La copie publiée les retrouve, même sur un poste sans le dossier de travail de l'artiste, sauf les fichiers
+rangés dans ce dossier.
+
+**Réglages de l'export**, le premier qui existe :
+
+1. le dernier export de la fenêtre d'export pour ce projet (sidecar du projet, voir « Export studio ») ;
+2. l'export courant de la session, celui que refait Ctrl+E ;
+3. le preset studio du réglage `Export Preset` du collecteur, couches visibles, par tuile si le maillage a des tuiles
+   UDIM.
+
+Sans aucun, le projet est publié seul. L'export courant n'est pas changé. La collecte n'écrit rien : ArmorPaint fait
+le préflight (B5), et un problème bloquant arrête le publish à la validation.
+
+**Garde-fous.**
+
+- Une texture sans version dans son nom est décochée : l'export suivant réécrirait le fichier publié. Il faut un
+  template des textures avec `{version}`, ou un nom de fichier avec `<file>` ou `<version>`.
+- Un nom que le template des textures refuse (canal `base_color` face à `filter_by: alphanumeric`, extension hors des
+  `choices`) bloque le publish quand le plugin a un `Publish Template`. Sans, c'est un avertissement : tk-multi-publish2
+  publierait le fichier en place sans rien dire.
+- Une clé UDIM sans `default: "<UDIM>"` est signalée : ShotGrid enregistrerait la séquence en `%04d`, que les
+  chargeurs de textures UDIM ne reconnaissent pas.
+- Un projet d'une autre entité ou étape que le contexte est refusé, textures comprises : ouvert autrement que par
+  File Open (menu File d'ArmorPaint, fichiers récents), il garde le contexte de la dernière fenêtre, et ses publishes
+  iraient à la tâche d'un autre élément. File Open l'ouvre dans le contexte de sa tâche (bouton dans la fenêtre).
+  Contrôle d'après le path cache de Toolkit : un dossier qu'il ne connaît pas n'est pas contrôlé.
+- Un projet jamais enregistré, ou changé depuis la collecte, est une erreur (bouton Save As dans la fenêtre). Un
+  projet hors du template de travail est signalé. Une version suivante déjà sur le disque est une erreur, avec un
+  bouton qui enregistre à la première version libre.
+
+Configuration Toolkit du studio, ici pour les assets (de même pour les shots) :
+
+```yaml
+# core/templates.yml, en plus de ceux de C2 et B3
+paths:
+    armorpaint_asset_publish: '@asset_root/publish/armorpaint/{name}.v{version}.arm'
+    armorpaint_asset_textures_publish: '@asset_root/publish/armorpaint/textures/v{version}/{name}_{channel}[.{UDIM}].{texture_ext}'
+```
+
+```yaml
+# environnements de tâche : engines.tk-armorpaint.apps
+tk-multi-publish2:
+  location: {type: app_store, name: tk-multi-publish2, version: v2.11.2}
+  collector: '{self}/collector.py:{engine}/tk-multi-publish2/basic/collector.py'
+  collector_settings: {Work Template: armorpaint_asset_work, Export Preset: <preset studio>}
+  publish_plugins:
+    - name: Publish to Flow Production Tracking      # fichiers glissés dans la fenêtre
+      hook: '{self}/publish_file.py'
+      settings: {}
+    - name: Publish ArmorPaint Project
+      hook: '{self}/publish_file.py:{engine}/tk-multi-publish2/basic/publish_session.py'
+      settings: {Publish Template: armorpaint_asset_publish}
+    - name: Publish Textures
+      hook: '{self}/publish_file.py:{engine}/tk-multi-publish2/basic/publish_textures.py'
+      settings: {Publish Template: armorpaint_asset_textures_publish, Publish Type: Texture, UDIM Publish Type: UDIM Image}
+```
+
+**Op `publish`**, sans fenêtre :
+
+- args : `description` ? (le commentaire de chaque publish), `skip` ? (éléments à ne pas publier, par nom,
+  `robot_base.<UDIM>.png`, ou par type, `armorpaint.texture`), `task_id` ? ou `project_id` ? (contexte, comme
+  `show_app`) ;
+- data : `{context, publishes, skipped, finalized, messages}`. `publishes` : `[{item, type, id, name, path,
+  version_number, published_file_type}]` ; `messages` : avertissements et erreurs des hooks, `[{level, message}]` ;
+  `finalized` faux : tout est publié, mais la finalisation (version suivante du projet) a échoué, voir `messages` ;
+- erreurs : `publish_invalid` (à la validation, rien n'est publié), `publish_failed` (pendant le publish ; le message
+  dit ce qui l'est déjà), `nothing_to_publish`, `app_unavailable` (tk-multi-publish2 absent de l'environnement).
+
+Comme la fenêtre, l'op agit sur le projet par des requêtes host : elle tourne en job (`studio_sg_start`), et l'app
+doit rendre ses frames jusqu'à la fin. Script testé dans ArmorPaint avec son interface (`--background` ne l'est pas) :
+
+```c
+int job = 0;
+void poll() {
+	if (job != 0 && studio_sg_state(job) == 3) {
+		console_log(string("publish ok=%d %s", studio_sg_ok(job), studio_sg_get(job, "/error/message")));
+		studio_sg_release(job);
+		job = 0;
+	}
+}
+int main() {
+	job = studio_sg_start("publish", "{\"description\":\"Lookdev v1\"}", 0);
+	script_notify_on_update(poll);
+	return 0;
+}
+```
+
+**Requêtes host** du publish (`studio_publish.c`), en plus de celles de Workfiles :
+
+| Op | args | data |
+|---|---|---|
+| `publish_preflight` | `naming`, `choices` ?, `skip` ? | `{path, naming_template, export: {ok, report, error}}` : préflight de l'export, rien n'est écrit |
+| `publish_export` | idem | idem, après l'export |
+| `publish_thumbnail` | `path` | `{path, width, height}` : PNG du viewport (1280 px au plus), quelques frames plus tard |
+| `publish_copy` | `path` | `{path, size}` : copie du projet enregistré (`.arm`), écrite à côté puis renommée |
+
+`naming` : le modèle des noms de textures (`{template, pattern, pattern_udim}` de l'op `texture_pattern`), calculé
+par le sidecar, qui ne peut pas répondre à ArmorPaint tant que la fenêtre est ouverte. `choices` : les réglages d'un
+export de la fenêtre d'export ; absent, l'export courant. `skip` : les fichiers à ne pas écrire,
+`[[texture, variante, tuile], …]`. Dans `report`, chaque fichier d'une tuile porte `sequence`, son chemin avec
+`<UDIM>` à la place de la tuile. Erreurs : `not_saved`, `bad_request`, `write_failed`, `no_viewport`, `busy`.
+
+**Limites connues.**
+
+- Validé sur le site simulé seulement : l'envoi des vignettes (mockgun les ignore), les types de publish et les
+  chargeurs de textures UDIM du studio sont à vérifier à la recette (C6).
+- Pas de Version de review : le plugin `upload_version.py` de tk-multi-publish2 n'est pas configuré.
+- La vignette est l'image du viewport, sans compas ni sphères d'environnement.
+- Un fichier rangé dans le dossier de travail (texture importée depuis `work/`) est désigné là par la copie
+  publiée : il manque sur un poste sans ce dossier.
+- Windows : pas de sidecar (voir C2).
+
 ## Nommage des exports (B3)
 
 Quand le projet ouvert est un fichier de travail ShotGrid, les textures exportées prennent le chemin du template
@@ -306,7 +442,7 @@ ses textures, et le dossier choisi dans la fenêtre d'export est ignoré. La con
 # core/templates.yml
 keys:
     channel: {type: str}                    # nom de texture du preset d'export (base, nor, occ…)
-    UDIM: {type: sequence, format_spec: "04"}
+    UDIM: {type: sequence, format_spec: "04", default: "<UDIM>"}   # default : pour le publish (C4)
     texture_ext: {type: str, choices: [png, jpg, exr]}
 paths:
     armorpaint_asset_textures: '@asset_root/work/armorpaint/textures/v{version}/{name}_{channel}[.{UDIM}].{texture_ext}'
@@ -733,7 +869,10 @@ char *studio_ocio_view_probe(int argb);          // diagnostic : 0xAARRGGBB pass
 .tests/obj.sh [dossier de travail]     # import OBJ (patches obj-global-indices, obj-float-exponent, udim-import) ; FUZZ=<n> pour le nombre de mutations
 .tests/fbx.sh [dossier de travail]     # import FBX (patch fbx-split) : splits = upstream, UDIM, matériaux, fuzz ; FUZZ=<n>
 .tests/udim_app.sh [dossier]           # UDIM dans l'app (lot D0) : import OBJ/FBX, refus, ajout, 70 tuiles (atlas, peinture, export), conseil de résolution
-STUDIO_TEST_TK_CORE=<tk-core> .tests/sg.sh [dossier de travail]   # ShotGrid (C2), noms des exports (B3) ; STUDIO_TEST_TK_APPS pour le moteur (C3)
+.tests/sg.sh [dossier de travail]     # ShotGrid hors app : sidecar (C2), noms des exports (B3), moteur (C3), publish (C4) ; Toolkit de .shotgrid/
+.tests/publish_app.sh [dossier]        # publish ShotGrid (C4) dans l'app, site simulé : op publish, puis fenêtre Publish (Qt offscreen) ; copie publiée rouverte sans le dossier de travail ; PY=<python PySide6>
+.tests/arm_paths_app.sh [dossier]      # chemins enregistrés dans les .arm (patch arm-relative-paths) : relatifs, normalisés, rouverts sans l'ancien dossier
+python3 .tests/arm_paths.py <projet.arm> [fichier...]   # chemins des fichiers d'un .arm ; avec des fichiers, vérifie qu'il les désigne, relatifs et normalisés
 .tests/export.sh [dossier de travail]  # export studio (B2, B4, B5) hors app : encodeurs relus par libpng/libtiff, expressions, presets, préflight, conseil de résolution UDIM ; FUZZ=<n>
 .tests/export_app.sh [dossier]         # export studio dans l'app : scripts, --export-textures, pixels = upstream, manifeste, atomicité
 .tests/ocio.sh [dossier de travail]    # OCIO (A1) hors app : ABI, module, références PyOpenColorIO, threads, erreurs ; OCIO_TEST_CONFIGS=<configs>
@@ -766,11 +905,20 @@ chaque fichier et le compare à PyOpenColorIO appliqué à la texture brute : id
 `export.sh` requiert libpng et libtiff (`brew install libpng libtiff`) ; `export_app.sh`, Pillow et `tiffinfo`.
 
 `sg.sh` fait tourner le sidecar sur un site ShotGrid simulé (`sg_fixture.py` : mockgun avec le schéma d'un vrai
-site, la configuration Toolkit de `sg_fixture/config`, une session Desktop enregistrée, un vrai amorçage). Il lui
-faut un clone de tk-core (`git clone --depth 1 --branch v0.24.2 https://github.com/shotgunsoftware/tk-core` ;
-**pas** le paquet PyPI `tk-core`, qui n'est pas celui d'Autodesk). Sans `STUDIO_TEST_TK_CORE`, seuls le lecteur
-JSON et le superviseur (contre `sg_fake.py`) tournent. Dans l'app, le site simulé remplace le vrai sidecar avec
+site, la configuration Toolkit de `sg_fixture/config`, une session Desktop enregistrée, un vrai amorçage). tk-core
+et les apps viennent de `.shotgrid/` ; `STUDIO_TEST_TK_CORE` et `STUDIO_TEST_TK_APPS` en désignent d'autres (un
+autre tk-core : `git clone --depth 1 --branch <tag> https://github.com/shotgunsoftware/tk-core`, **pas** le paquet
+PyPI `tk-core`, qui n'est pas celui d'Autodesk). Python du sidecar : `.shotgrid/venv` s'il a PySide6, sinon
+`python3`, et les tests des fenêtres et du publish sont sautés. Les tests du publish (`TestPublish`, contre un faux
+ArmorPaint) essaient des variantes du site : `STUDIO_TEST_UDIM_DEFAULT=0` (clé UDIM sans `default: "<UDIM>"`),
+`STUDIO_TEST_CHANNEL_FILTER=<filtre>` (`filter_by` de la clé du canal), `STUDIO_TEST_TEXTURES_COPY=0` (textures
+publiées en place). Dans l'app, le site simulé remplace le vrai sidecar avec
 `STUDIO_SG_BRIDGE=<external>/.tests/sg_fixture.py STUDIO_TEST_WORKDIR=<dossier> STUDIO_TEST_TK_CORE=<tk-core>`.
+
+`publish_app.sh` lance ArmorPaint sur ce site (scénario `demo`, avec tk-multi-publish2), le hook du sidecar
+`publish_app_hook.py` relevant ce qui est publié ; la fenêtre Publish y est pilotée comme par l'artiste. Le site
+simulé range `work/` et `publish/` à la même profondeur, comme tk-config-default2 : le banc importe aussi une texture
+rangée dans le dossier de travail, seul cas où les chemins de la copie publiée dépendent du patch `project-copy`.
 
 `run.sh` requiert les outils OpenEXR (`brew install openexr`) comme référence indépendante. La couche jobs et
 l'API de scripting se vérifient dans l'app : `ArmorPaint --background --script <fichier>` avec un script comme

@@ -412,12 +412,25 @@ connaît déjà et que la config du studio règle déjà, ouvertes par un moteur
 
 **Tests** : 3 tests du moteur dans `sg.sh` (menu avec et sans Qt, changement de contexte, moteur absent), 22 tests du sidecar en tout ; contrôles du réveil dans le superviseur (238). Démo `external/.tests/demo_workfiles.sh` : production simulée (Assets, Shots, versions créées par ArmorPaint en `--background`), File Open au démarrage ; open puis save vérifiés sur une instance au repos.
 
-### C4 — Publish · **6 j**
+### C4 — Publish · **6 j** — ✅ **fait le 2026-09-27** (macOS ; validé sur site simulé)
 
-- Enchaîner : preflight (B5) → export studio (B3/B4) → `register_publish` → upload de la thumbnail
-- Thumbnail : réutiliser `viewport_save_texture_to_file` (déjà dans l'API)
-- Créer les `PublishedFile` avec le bon type, les dépendances, les métadonnées
-- Publier la **séquence UDIM** comme une entité unique (`<name>.<UDIM>.exr`), pas N publishes
+Comme en C3, **pas de publish maison** : la fenêtre de tk-multi-publish2 (v2.11.2, vendorée dans `external/.shotgrid/`),
+ouverte par le moteur tk-armorpaint, avec ses hooks (`external/tk-armorpaint/hooks/tk-multi-publish2/basic/`). Menu
+ShotGrid > Publish..., Ctrl/Cmd+Alt+P ; op `publish` du sidecar pour publier sans fenêtre (scripts). Côté ArmorPaint,
+`external/studio_publish.c` répond aux requêtes host des hooks.
+
+- ✅ **Enchaînement** : collecte (préflight B5 fait par ArmorPaint, rien n'est écrit) → validation → export studio (B3/B4, une seule fois, textures cochées seulement) → copie dans le template de publish → `PublishedFile` → vignette → projet ouvert à sa version suivante.
+- ✅ **Projet** : copie écrite par ArmorPaint (requête host `publish_copy`), ses chemins relatifs à la copie (patch `project-copy`) ; type `ArmorPaint Project`, celui de File Open.
+- ✅ **Textures** : un publish par texture et par variante ; la **séquence UDIM en un seul publish** (`robot_base.<UDIM>.png`, type `UDIM Image`), dépendante du publish du projet. Réglages de l'export : ceux de la fenêtre d'export pour ce projet (son sidecar), sinon l'export courant, sinon le preset du réglage `Export Preset`.
+- ✅ **Vignette** : l'image finale du viewport, comme Capture Screenshot (sans compas ni sphères, 1280 px au plus), au lieu de `viewport_save_texture_to_file`.
+- ✅ **Garde-fous** : textures sans version décochées ; nom refusé par le template bloquant (tk-multi-publish2 le publierait en place sans rien dire) ; clé UDIM sans `default: "<UDIM>"` signalée ; projet d'une autre entité que le contexte refusé (ouvert par le menu File d'ArmorPaint, il garde le contexte de la dernière fenêtre : sans ce contrôle, ses publishes allaient à la tâche d'un autre asset) ; projet changé depuis la collecte ; version suivante déjà sur le disque.
+- ✅ **Bugs upstream trouvés en route, corrigés** (patch `arm-relative-paths`) : après un enregistrement ailleurs, maillage et envmap gardaient en mémoire un chemin relatif à l'ancien dossier (Reimport Mesh ouvrait le sélecteur de fichiers, le Save As suivant écrivait des chemins faux) ; chemins `a/../src/…` non normalisés, perdus avec `a/`.
+- Non fait : Version de review (plugin `upload_version.py` non configuré) ; publish en `--background` non testé.
+- ⚠️ À valider en C6 sur le vrai site : envoi des vignettes (mockgun les ignore), types de publish, chargeurs de textures UDIM du studio.
+
+**Injection upstream** : 6 lignes dans `export_arm.c` (`project-copy`), plus le correctif `arm-relative-paths` (`export_arm.c`, `iron_path.c`).
+
+**Tests** : `sg.sh`, 9 tests du publish contre un faux ArmorPaint (séquences UDIM, clé sans default, nom refusé avec et sans Publish Template, sources des réglages, textures sans version, validation qui ne publie rien, projet d'un autre contexte, export en échec) ; 34 tests du sidecar en tout, 238 contrôles du superviseur. `publish_app.sh`, dans ArmorPaint : op `publish`, puis fenêtre Publish pilotée comme par l'artiste (Qt offscreen), copie publiée rouverte sans le dossier de travail ; 19 contrôles, dont 2 échouent sans `project-copy`. `arm_paths_app.sh` : 5 contrôles, dont 4 échouent sans `arm-relative-paths`.
 
 ### C5 — Contexte & résilience · **5 j**
 
@@ -480,7 +493,7 @@ Décidé le 2026-09-26. Analyse, architecture et détail des phases : **`ARMORPA
 → *Export colorimétriquement juste d'abord ; le viewport ensuite.*
 
 **Phase 4 — industrialisation · 3 semaines**
-`B7` (headless réel) → `C4` (publish) → `C5` → `B6` → `C6`
+`B7` (headless réel) → ✅ `C4` (publish) → `C5` → `B6` → `C6`
 
 ### Risques principaux
 
@@ -490,7 +503,7 @@ Décidé le 2026-09-26. Analyse, architecture et détail des phases : **`ARMORPA
 | Headless nécessite un GPU | 🟠 limite B7 | Nœuds de ferme équipés, ou lavapipe |
 | ~~Upstream refuse la PR C1~~ | — | Sans objet : C1 fait dans `external/`, sans patch |
 | Postes Windows | 🟠 bloque C2 sur Windows | `studio_proc` Windows à écrire et tester sur une machine Windows (le sidecar Python, lui, est portable) |
-| Toolkit du studio | 🟠 C2 validé sur site simulé seulement | Recette C6 sur le vrai site : session Desktop, amorçage de la config de prod, templates ArmorPaint ajoutés |
+| Toolkit du studio | 🟠 C2 à C4 validés sur site simulé seulement | Recette C6 sur le vrai site : session Desktop, amorçage de la config de prod, templates ArmorPaint ajoutés, publish (vignettes, types, chargeurs UDIM) |
 | Réécriture upstream (§1.1) | 🔴 | Tout dans `external/`, dépôt séparé, `PATCHES.md` |
 | **Le mur VRAM reste entier** | 🔴 | Levé en partie par le chantier D (D4 : allocation par tuile, undo par tuile, éviction) — voir `ARMORPAINT_UDIM.md` |
 

@@ -1,10 +1,10 @@
-# Moteur Toolkit d'ArmorPaint (lot C3).
+# Moteur Toolkit d'ArmorPaint (lots C3 et C4).
 #
 # ArmorPaint est en C, sans Python ni Qt : le moteur tourne dans le sidecar ShotGrid (assets/studio_sg_bridge.py),
 # qui l'amorce comme une intégration DCC (ToolkitManager). C'est le montage des moteurs Adobe (tk-photoshopcc) : les
-# fenêtres des apps Toolkit (tk-multi-workfiles2…) s'ouvrent dans le processus du sidecar, et ce qu'elles font sur la
-# scène revient à ArmorPaint par le canal host du protocole (host_request()). Les hooks d'app du moteur sont dans
-# hooks/<app>/ ; la configuration du studio les désigne par "{engine}/<app>/<hook>.py".
+# fenêtres des apps Toolkit (tk-multi-workfiles2, tk-multi-publish2…) s'ouvrent dans le processus du sidecar, et ce
+# qu'elles font sur la scène revient à ArmorPaint par le canal host du protocole (host_request()). Les hooks d'app du
+# moteur sont dans hooks/<app>/ ; la configuration du studio les désigne par "{engine}/<app>/<hook>.py".
 #
 # Les fenêtres sont modales : ArmorPaint les ouvre par la requête show_app, qui dure jusqu'à leur fermeture. Le
 # QApplication n'est créé qu'à la première fenêtre (les autres requêtes du sidecar n'affichent rien). Ensuite, le

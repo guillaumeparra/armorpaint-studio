@@ -1,4 +1,4 @@
-# Moteur Toolkit d'ArmorPaint (lot C3) : voir engine.py.
+# Moteur Toolkit d'ArmorPaint (lots C3 et C4) : voir engine.py ; hooks de Workfiles et de Publish dans hooks/.
 configuration:
     debug_logging:
         type: bool
