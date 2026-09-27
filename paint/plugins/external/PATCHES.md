@@ -1679,7 +1679,7 @@ patches ([headless](#headless), [studio-export](#studio-export), [udim-export-se
 **Test.** `.tests/batch_app.sh` : exports upstream, par tuile UDIM, par objet et avec espace OCIO imposé (fichiers du
 rapport = fichiers sur le disque, manifeste compris) ; code 1 pour un maillage absent, un préflight bloqué, une erreur de
 script, un `console_error` ; sorties de script et rapport `running` lu pendant le run ; code 2 pour 12 lignes fausses,
-sans rien écrire ; un preset studio vers un dossier absent le crée (code 0). Au 2026-09-27 : 32 vérifications passent. Les bancs qui provoquent des erreurs exprès
+sans rien écrire ; un preset studio vers un dossier absent le crée (code 0). Au 2026-09-27 : 33 vérifications passent (dont celle du patch [script-project-new](#script-project-new)). Les bancs qui provoquent des erreurs exprès
 (`import_app.sh`, `udim_app.sh`, `sg_context_app.sh`) attendent désormais le code 1 sur ces cas.
 
 **Signes que l'upstream l'a corrigé.** Un `exit` avec un code non nul dans `args.c` ou `main.c` en `--background`, ou
@@ -1689,3 +1689,37 @@ un compteur d'erreurs dans `console.c`. Garder quand même le rapport : il n'a p
 l'upstream ne signale que par `iron_log` (sans `console_error`) ne comptent pas, sauf celles de `--export-textures`
 vérifiées d'avance. Les fichiers de `--export-mesh` et `--export-material` ne sont pas listés dans le rapport. Un crash
 ou un `alarm` laisse le rapport à `running` : c'est le signe qu'il faut lire.
+
+---
+
+## script-project-new
+
+| | |
+|---|---|
+| Fichier | `paint/sources/minic_impl.c` (`script_project_new`) |
+| Commit studio | voir `git log -S'STUDIO-PATCH(script-project-new)'` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-27) |
+| Constaté depuis | `85f6cf1c` (2026-09-27) |
+
+**Motif.** `script_project_new` appelle `project_new(true)`, qui laisse la remise à zéro des calques
+(`project_new_reset_layers` → `layers_init`, et `project_new_resize_layers` si la résolution change) à l'image suivante.
+Un script qui crée un projet puis peint dans la foulée (remplissage, import, `project_save`) voit sa peinture effacée à
+l'image suivante, avant que `project_save` (lui aussi à l'image suivante, placé après dans la file) n'écrive le `.arm` :
+le projet enregistré a des calques gris, sans erreur. Un export fait dans le même script voit, lui, la peinture. Touche
+tout script batch (lot B7) et le banc de publish (C4), dont le projet de départ était gris. Dans l'interface, rien ne se
+passe entre « Nouveau projet » et l'image suivante : pas de symptôme.
+
+**Correctif.** Sous `WITH_EXTERNAL`, `script_project_new` lance tout de suite ce que `project_new` vient de mettre en
+file (`studio_run_next_frames`, `external/studio_atlas.c`, déjà utilisé par `studio_import_mesh` pour la fin d'un import
+de maillage), entre `script_gpu_begin` et `script_gpu_end` : pas de dessin en cours. Les fonctions en file avant l'appel
+ne sont pas touchées.
+
+**Test.** `.tests/batch_app.sh`, « nouveau projet peint puis enregistré par le même script » : `script_project_new`,
+import de `props.obj`, remplissage, `project_save` en `--background`, puis export du `.arm` relu : la couleur du
+remplissage est dans la base color (grise, uniforme, sans le patch).
+
+**Signes que l'upstream l'a corrigé.** `project_new` qui remet les calques à zéro sans `sys_notify_on_next_frame`, ou
+`script_project_new` qui vide la file lui-même. Rejouer le test sans le patch.
+
+**Non couvert.** `project_new` appelé d'ailleurs (menu, `import_arm`) garde le comportement upstream : pas de script
+derrière pour peindre dans la même image.

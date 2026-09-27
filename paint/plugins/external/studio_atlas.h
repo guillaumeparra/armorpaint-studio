@@ -35,3 +35,9 @@ bool studio_atlas_active(void);
 // UDIM (OBJ, FBX), hors ajout à un maillage : un jeu de textures par matériau. En UDIM : pixels de chaque tuile et
 // projet conseillé (studio_udim_hint), dans la barre d'état si elle est libre, dans la console seule sinon.
 void studio_udim_import_done(bool append);
+
+// Lance tout de suite, dans l'ordre, les fonctions mises en attente de l'image suivante (sys_notify_on_next_frame)
+// depuis l'indice from de la file, et les en retire. Pour un script qui enchaîne : ce qu'ArmorPaint finit à l'image
+// suivante (calques remis à zéro après un nouveau projet ou un import) effacerait sinon la peinture faite dans la foulée.
+// Hors d'un dessin (script_gpu_begin, ou draw_end avant).
+void studio_run_next_frames(int from);

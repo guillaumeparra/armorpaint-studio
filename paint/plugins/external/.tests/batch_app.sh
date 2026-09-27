@@ -6,7 +6,7 @@
 #
 #   sh .tests/batch_app.sh [dossier de travail]
 #   APP=<binaire ArmorPaint> pour un autre build (défaut : build Release de paint/).
-# Demande : python3 ; swiftc (Xcode) pour vérifier qu'aucune fenêtre n'est à l'écran, sinon ce contrôle est sauté.
+# Demande : python3 avec PIL ; swiftc (Xcode) pour vérifier qu'aucune fenêtre n'est à l'écran, sinon ce contrôle est sauté.
 set -eu
 EXT=$(cd "$(dirname "$0")/.." && pwd)
 APP=${APP:-$EXT/../../build/build/Release/ArmorPaint.app/Contents/MacOS/ArmorPaint}
@@ -37,7 +37,7 @@ same_files() {
 unset STUDIO_EXPORT_PRESETS STUDIO_EXPORT_COLOR_SPACE STUDIO_SG_NAMING STUDIO_PREFS
 
 rm -rf "$W"/out_* "$W"/*.json "$W"/*.arm "$W"/*.log "$W"/*.c "$W/windows"
-mkdir -p "$W/out_up" "$W/out_tile" "$W/out_object" "$W/out_cs" "$W/out_blocked" "$W/out_usage"
+mkdir -p "$W/out_fresh" "$W/out_up" "$W/out_tile" "$W/out_object" "$W/out_cs" "$W/out_blocked" "$W/out_usage"
 
 MAT='slot_material_t *m = script_material_create("mat");
 	ui_node_t *rgb = script_material_create_node_at("RGB", -400.0, 0.0);
@@ -160,6 +160,25 @@ EOF
 run outputs --background --script "$W/outputs.c" --report "$W/outputs.json"
 check "sorties de script dans le rapport (clé remplacée, texte échappé), code 0" '[ $RC -eq 0 ] && jtrue "$W/outputs.json" "r[\"outputs\"] == {\"version\": \"13\", \"path\": \"a \\\"quoted\\\" path\"}" && grep -q "^t: code=0" "$W/outputs.log"'
 check "rapport écrit dès le démarrage : status running pendant le run" 'grep -q "\"status\": \"running\"" "$W/outputs.log" && [ ! -e "$W/outputs.json.tmp" ]'
+
+# Nouveau projet peint et enregistré dans le même script (patch script-project-new) : la remise à zéro des calques que
+# project_new laisse à l'image suivante n'efface plus la peinture avant l'enregistrement.
+cat > "$W/fresh.c" <<EOF
+int main() {
+	script_project_new();
+	studio_import_mesh("$M/props.obj", 0);
+	$MAT
+	project_filepath_set("$W/fresh.arm");
+	project_save(false);
+	return 0;
+}
+EOF
+run fresh --background --script "$W/fresh.c"
+run fresh_export "$W/fresh.arm" --background --export-textures png generic "$W/out_fresh"
+check "nouveau projet peint puis enregistré par le même script : peinture relue du .arm" '[ $RC -eq 0 ] && python3 -c "
+import sys; from PIL import Image
+c = Image.open(sys.argv[1]).convert(\"RGB\").getcolors(1 << 20)
+sys.exit(not any(n > 1000 and rgb == (204, 89, 26) for n, rgb in c))" "$W/out_fresh/fresh_base.png"'
 
 echo "== code 2 : ligne de commande fausse, rien n'est lancé"
 usage() { # usage <nom> <message attendu> <arguments...>

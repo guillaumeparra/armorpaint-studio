@@ -972,6 +972,11 @@ void studio_batch_output(char *key, char *value); // "outputs" du rapport : ce q
 int  studio_batch_exit_code(void);                // code de retour si le run s'arrêtait maintenant (0 ou 1)
 ```
 
+Un script peut créer un projet, le peindre et l'enregistrer d'une traite : `script_project_new` et
+`studio_import_mesh` finissent leur travail avant de rendre la main (patch `script-project-new` : sans lui, la remise
+à zéro des calques de `project_new`, laissée à l'image suivante, effaçait la peinture avant l'enregistrement).
+`project_save` écrit le `.arm` à l'image suivante, une fois `main` terminé ; le run ne s'arrête qu'après.
+
 Hors `--background`, les options `--export-*` valent pour l'export de `--export-textures` (une ligne fausse est
 signalée au journal et les options ignorées) ; ni rapport ni code de retour.
 

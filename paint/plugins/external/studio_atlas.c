@@ -433,6 +433,15 @@ static minic_val_t mn_studio_set_atlases(minic_val_t *a, int n) {
 	return minic_val_ptr(string_copy(ok ? "" : err));
 }
 
+void studio_run_next_frames(int from) {
+	for (int guard = 0; (i32)_sys_on_next_frames->length > from && guard < 64; ++guard) {
+		callback_t *cb = _sys_on_next_frames->buffer[from];
+		array_splice(_sys_on_next_frames, from, 1);
+		cb->f(cb->data);
+		free(cb);
+	}
+}
+
 // Importe un maillage à la place de celui du projet (calques vidés), découpé comme le « Split By » de la boîte
 // d'import : 0 par objet, 1 par matériau, 2 par tuile UDIM, 3 par matériau et par tuile UDIM (un jeu de textures par
 // matériau). Pour les scripts batch et les bancs.
@@ -453,12 +462,7 @@ static minic_val_t mn_studio_import_mesh(minic_val_t *a, int n) {
 	// pour que la suite du script (jeux de textures, masques de calque) voie les objets dans leur ordre final.
 	i32 before = (i32)_sys_on_next_frames->length;
 	import_mesh_run(path, true, true, false);
-	for (int guard = 0; (i32)_sys_on_next_frames->length > before && guard < 64; ++guard) {
-		callback_t *cb = _sys_on_next_frames->buffer[before];
-		array_splice(_sys_on_next_frames, before, 1);
-		cb->f(cb->data);
-		free(cb);
-	}
+	studio_run_next_frames(before);
 	if (in_use) {
 		draw_begin(current, false, 0);
 	}
