@@ -804,6 +804,28 @@ class TestPublish(Base):
         self.assertEqual(s.error("publish", {"task_id": 1, "skip": ["armorpaint.session"]})[0], "nothing_to_publish")
         self.assertEqual(s.error("publish", {"task_id": 1, "skip": "all"})[0], "bad_request")
 
+    def test_project_of_another_context(self):
+        # Ouvert autrement que par File Open (menu File d'ArmorPaint, fichiers récents), le projet garde le contexte de
+        # la dernière fenêtre : ici la tâche d'un autre asset (tree). Ses publishes iraient à cette tâche : refusé.
+        s, host = self.start_publish()
+        host.current = {"preset": "basic", "dir": self.workdir, "mode": 3}
+        code, reply = s.error("publish", {"task_id": 2}, timeout=180)
+        self.assertEqual(code, "publish_invalid")
+        message = reply["error"]["message"]
+        self.assertIn("robot.v001.arm (Publish ArmorPaint Project): The project belongs to", message)
+        self.assertIn("robot_base.<UDIM>.png (Publish Textures): The project belongs to", message)
+        self.assertIn("File Open", message)
+        self.assertEqual(self.published(s), {})
+        self.assertNotIn("publish_export", host.ops())
+        # Textures seules, sans le projet : refusées aussi.
+        code, reply = s.error("publish", {"task_id": 2, "skip": ["armorpaint.session"]}, timeout=180)
+        self.assertEqual(code, "publish_invalid")
+        self.assertEqual(self.published(s), {})
+        # Dans le contexte de sa tâche, il se publie.
+        result = s.data("publish", {"task_id": 1}, timeout=180)
+        self.assertTrue(result["finalized"], result)
+        self.assertEqual(len(self.published(s)), 3)
+
     def test_export_failure(self):
         s, host = self.start_publish()
         host.current = {"preset": "basic", "dir": self.workdir, "mode": 3}

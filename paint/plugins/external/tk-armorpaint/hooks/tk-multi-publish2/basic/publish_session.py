@@ -60,6 +60,10 @@ class ArmorPaintSessionPublishPlugin(HookBaseClass):
             message = "The ArmorPaint project has never been saved."
             self.logger.error(message, extra=self._save_as_action())
             raise Exception(message)
+        mismatch = item.properties.get("context_mismatch")  # collector.py
+        if mismatch:
+            self.logger.error(mismatch, extra=self._file_open_action())
+            raise Exception(mismatch)
         path = sgtk.util.ShotgunPath.normalize(path)
         work_template = item.properties.get("work_template")
         if work_template is not None and not work_template.validate(path):
@@ -128,6 +132,18 @@ class ArmorPaintSessionPublishPlugin(HookBaseClass):
     def _publish_type(self):
         session = self.parent.engine.sidecar_session()
         return session.settings["publish_type"] if session is not None else "ArmorPaint Project"
+
+    def _file_open_action(self):
+        app = self.parent.engine.apps.get("tk-multi-workfiles2")
+        if app is None or not hasattr(app, "show_file_open_dlg"):
+            return None
+        return {
+            "action_button": {
+                "label": "File Open...",
+                "tooltip": "Open the project in the context of its task",
+                "callback": app.show_file_open_dlg,
+            }
+        }
 
     def _save_as_action(self):
         app = self.parent.engine.apps.get("tk-multi-workfiles2")

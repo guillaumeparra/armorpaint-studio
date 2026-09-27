@@ -72,6 +72,9 @@ class ArmorPaintTexturesPublishPlugin(HookBaseClass):
         return {"accepted": True, "checked": True}
 
     def validate(self, settings, item):
+        mismatch = item.parent.properties.get("context_mismatch") if item.parent is not None else None
+        if mismatch:  # collector.py : publiées dans ce contexte, elles iraient à la tâche d'un autre élément
+            raise Exception(mismatch)
         shared = self._shared(item)
         shared["export"] = None  # la validation précède chaque publish : un nouvel export
         if shared.get("naming_error"):

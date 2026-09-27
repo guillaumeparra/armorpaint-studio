@@ -86,12 +86,34 @@ class ArmorPaintSessionCollector(HookBaseClass):
         work_template = engine.get_template_by_name(name) if name else None
         if work_template is not None:
             item.properties["work_template"] = work_template
+        mismatch = self._context_mismatch(path, item.context) if path else None
+        if mismatch:
+            item.properties["context_mismatch"] = mismatch  # refusé à la validation, projet et textures
         thumbnail = self._thumbnail()
         if thumbnail:
             set_thumbnail(item, thumbnail)
             item.properties["armorpaint_thumbnail"] = thumbnail
         self.logger.info("Collected the ArmorPaint project: %s" % (path or "never saved",))
         return item
+
+    def _context_mismatch(self, path, context):
+        """Message si le projet appartient à une autre entité ou étape que le contexte du publish, None sinon. Ouvert
+        autrement que par File Open (menu File d'ArmorPaint, fichiers récents), le projet garde le contexte ShotGrid de
+        la dernière fenêtre : ses publishes iraient à la tâche d'un autre élément. Un chemin inconnu du path cache ne
+        dit rien : pas de contrôle."""
+        try:
+            found = self.parent.sgtk.context_from_path(path)
+        except Exception as e:  # noqa: BLE001 — TankError : pas de contrôle
+            self.logger.debug("Context of %s: %s" % (path, e))
+            return None
+        for kind in ("entity", "step"):
+            mine, theirs = getattr(found, kind), getattr(context, kind)
+            if mine and (not theirs or (mine["type"], mine["id"]) != (theirs["type"], theirs["id"])):
+                return (
+                    "The project belongs to %s, not to the publish context %s: open it with ShotGrid > File Open..., "
+                    "which switches to its task." % (found, context)
+                )
+        return None
 
     def _thumbnail(self):
         path = os.path.join(tempfile.gettempdir(), "armorpaint_publish_%d.png" % os.getpid())
