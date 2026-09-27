@@ -8,17 +8,30 @@
 # matériau, puis ArmorPaint recharge ses textures (op update). Sans « Live », aperçu 512 et bouton Update.
 #
 # Matériau : <dossier du .arm>/<projet>_subzero/<Nom>/ (projet jamais enregistré : dossier demandé une fois), avec
-# les textures <Nom>_<canal>.tga (.exr pour normale et hauteur dans un projet en 16 ou 32 bits) et la recette
-# subzero.json (paquet, graphe, valeurs, preset, taille, sorties, version de sbsrender). <Nom> est un seul mot
+# les textures <Nom>_<canal>.<ext> et la recette subzero.json (paquet, graphe, valeurs, preset, taille, format,
+# sorties, version de sbsrender). Format (lot E6) : menu à côté de la taille, EXR half par défaut ($SUBZERO_FORMAT) ;
+# une recette de la v0, sans format, reste en TGA. Un changement de format laisse les anciennes textures : ArmorPaint
+# les retire du projet à la mise à jour, puis la fenêtre supprime leurs fichiers. <Nom> est un seul mot
 # (« ColorfulPlanks ») : les règles de nom d'ArmorPaint (couleur ou donnée, canal) ne voient alors que le canal, et
 # les noms de fichiers, qui servent de noms d'assets, restent uniques dans le projet. Décalque (couleur de base avec un
-# alpha utile) : couleur réécrite en RGB, alpha dans <Nom>_opacity.tga, car ArmorPaint multiplie la couleur par l'alpha.
+# alpha utile) : couleur réécrite sans alpha, alpha dans <Nom>_opacity.<ext>, car ArmorPaint multiplie la couleur par
+# l'alpha (sauf en JPEG, qui n'a pas d'alpha).
+#
+# Couleur (lot E11, subzero_color.py) : après le rendu, chaque carte passe dans l'espace OCIO réglé (couleur de base
+# srgb_tx et données Raw par défaut, sans conversion), dans la configuration d'ArmorPaint ; la liaison envoyée donne
+# cet espace, et celui du rendu précédent (color_space_was) pour qu'une texture que l'artiste n'a pas changée suive le
+# réglage. Vignettes et nuanciers passent par la transformation d'affichage du viewport. Le bouton Settings ouvre le
+# panneau des réglages : chacun est une variable d'environnement (SUBZERO_OCIO_*, et sans ArmorPaint OCIO et
+# STUDIO_OCIO_*), appliquée à la fenêtre ou enregistrée dans studio.env (studio_env.py). ArmorPaint n'a lu studio.env
+# qu'à son démarrage : la fenêtre relit ses variables de couleur à l'ouverture, sauf celles de l'environnement.
 #
 # SUBZERO_TEST=<fichier.json> : essai sans intervention (.tests/subzero_app.sh, .tests/subzero_window_ui.py). Le
 # fichier donne "open" ({"file"} ou {"dir"} : paquet, ou matériau déjà envoyé à rééditer ; absent : celui de l'état),
-# "graph", "preset", "values" ({id: valeur}), "size" (log2, ou null pour celle du projet), "live", "dir" (dossier de
-# base d'un projet jamais enregistré), "action" ("create", "update", "duplicate" ou "none"), "result" (fichier écrit
-# à la fin) et "screenshot". La fenêtre les applique, agit, écrit le résultat, puis se ferme.
+# "graph", "preset", "values" ({id: valeur}), "size" (log2, ou null pour celle du projet), "format" (clé de
+# subzero_render.FORMATS), "live", "dir" (dossier de
+# base d'un projet jamais enregistré), "action" ("create", "update", "duplicate" ou "none"), "settings" ({variable:
+# valeur ou null}, avec "save": true pour écrire studio.env), "result" (fichier écrit à la fin), "screenshot" et
+# "settings_screenshot" (panneau Settings). La fenêtre les applique, agit, écrit le résultat, puis se ferme.
 
 import datetime
 import hashlib
@@ -34,15 +47,18 @@ import time
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+import studio_env
 import studio_qt
 import subzero_7z
+import subzero_color
+import subzero_exr
 import subzero_meta
 import subzero_render
 from studio_qt import ERROR, MUTED, SUCCESS, WARNING, log, muted
 
 RECIPE = "subzero.json"
 PREVIEW_SIZE = 9  # 512
-THUMB = 88
+THUMB = 72  # sept vignettes sur la largeur de la fenêtre
 SOON_MS = 300  # réglage au clavier ou à la molette : rendu après ce délai sans nouveau changement
 
 # Canaux d'ArmorPaint : socket de la sortie PBR (import_folder.c) et suffixe du fichier, reconnu par les règles de nom.
@@ -58,7 +74,12 @@ CHANNELS = [
 CHANNEL_LABEL = {c[0]: c[1] for c in CHANNELS}
 CHANNEL_SOCKET = {c[0]: c[2] for c in CHANNELS}
 CHANNEL_SUFFIX = {c[0]: c[3] for c in CHANNELS}
-DATA_EXR = ("normal", "height")  # en EXR half dans un projet en 16 ou 32 bits
+COLOR_SPACES = {"base": "srgb_tx"}  # sans PyOpenColorIO (lot E6) : espace intégré de ce qu'écrit sbsrender
+
+# Variables des réglages de couleur (lot E11) : celles de subzero, puis celles d'ArmorPaint (réglées ici sans lui).
+MAP_VARS = [(ch, subzero_color.map_var(CHANNEL_SUFFIX[ch])) for ch in CHANNEL_LABEL]
+SUBZERO_VARS = [subzero_color.VAR_COLOR, subzero_color.VAR_DATA] + [v for _, v in MAP_VARS] + [subzero_color.VAR_PICKING]
+COLOR_VARS = SUBZERO_VARS + list(subzero_color.HOST_VARS)
 
 # Usage (ou identifiant) d'une sortie -> canal.
 USAGE_CHANNEL = {
@@ -92,6 +113,14 @@ PROJECT_CHANNELS = {"basecolor", "normal", "roughness", "metallic", "height", "a
 
 
 # ---- Règles pures (testées sans Qt) ------------------------------------------------------------------------------------
+
+
+def env_flag(name, default):
+    """Variable d'environnement booléenne (lot E5) : 0, false, no, off ou vide = faux ; absente = default."""
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in ("", "0", "false", "no", "off")
 
 
 def slug(label):
@@ -208,8 +237,20 @@ def render_values(graph, values):
 
 def split_alpha(base, opacity=None):
     """Couleur de base dont l'alpha n'est pas partout opaque (décalque) : ArmorPaint multiplie la couleur par l'alpha
-    (image_texture_node.c), d'où des bords sombres sous l'opacité. La couleur est réécrite en RGB ; l'alpha va dans
-    opacity (niveaux de gris) s'il est donné. Vrai si réécrit. TGA non compressé seulement, ce qu'écrit sbsrender."""
+    (image_texture_node.c, sauf en JPEG), d'où des bords sombres sous l'opacité. La couleur est réécrite sans alpha ;
+    l'alpha va dans opacity (niveaux de gris, même format) s'il est donné. Vrai si réécrit."""
+    ext = os.path.splitext(base)[1].lower()
+    if ext == ".tga":
+        return split_alpha_tga(base, opacity)
+    if ext == ".exr":
+        return subzero_exr.split_alpha(base, opacity)
+    if ext in (".png", ".tif", ".tiff"):
+        return split_alpha_qt(base, opacity)
+    return False
+
+
+def split_alpha_tga(base, opacity=None):
+    """split_alpha d'un TGA non compressé, ce qu'écrit sbsrender."""
     try:
         with open(base, "rb") as f:
             data = f.read()
@@ -235,6 +276,7 @@ def split_alpha(base, opacity=None):
         with open(tmp, "wb") as f:
             f.write(bytes([0, 0, kind, 0, 0, 0, 0, 0]) + data[8:16] + bytes([bpp, desc]))
             f.write(body)
+            f.write(TGA_FOOTER)
         os.replace(tmp, path)
 
     if opacity:
@@ -243,9 +285,71 @@ def split_alpha(base, opacity=None):
     return True
 
 
-def links(files):
-    """Liaisons pour ArmorPaint : [{"file", "output" (0 couleur, 1 alpha), "socket"}]."""
-    return [{"file": path, "output": 0, "socket": CHANNEL_SOCKET[ch]} for ch, path in files.items()]
+def links(files, spaces=None, was=None):
+    """Liaisons pour ArmorPaint : [{"file", "output" (0 couleur, 1 alpha), "socket", "color_space", "color_space_was"}].
+    spaces : {canal: espace du fichier} (défaut COLOR_SPACES) ; was : ceux du rendu précédent envoyé."""
+    spaces = COLOR_SPACES if spaces is None else spaces
+    out = []
+    for ch, path in files.items():
+        link = {"file": path, "output": 0, "socket": CHANNEL_SOCKET[ch]}
+        if spaces.get(ch):
+            link["color_space"] = spaces[ch]
+            if (was or {}).get(ch):
+                link["color_space_was"] = was[ch]
+        out.append(link)
+    return out
+
+
+def recipe_spaces(recipe):
+    """Espaces des textures d'une recette : ceux qu'elle note (E11), la couleur de base en srgb_tx pour une recette
+    du lot E6 (avec format), aucun pour la v0."""
+    color = recipe.get("color")
+    if isinstance(color, dict) and isinstance(color.get("spaces"), dict):
+        return dict(color["spaces"])
+    return dict(COLOR_SPACES) if recipe.get("format") else {}
+
+
+def convert_maps(color, files, fmt):
+    """Cartes rendues passées dans l'espace réglé (subzero_color.Color, thread du rendu) ; rend ({canal: espace du
+    fichier}, [avertissements], [canaux réécrits]). Sans OCIO : fichiers tels quels, espaces de COLOR_SPACES (lot E6).
+    Une conversion ratée laisse le fichier tel que sbsrender l'a écrit, dans son espace source."""
+    if color is None or not color.ready:
+        return {ch: cs for ch, cs in COLOR_SPACES.items() if ch in files}, [], []
+    spaces, notes, converted = {}, [], []
+    plan = color.plan([(ch, CHANNEL_SUFFIX[ch]) for ch in files])
+    for ch, path in files.items():
+        src, dst, err = plan[ch]
+        if err:
+            notes.append(err)
+        if not src:
+            notes.append("%s: no %s in the OCIO configuration, left as rendered" % (
+                CHANNEL_LABEL[ch], "sRGB texture space" if ch in subzero_color.COLOR_MAPS else "data space"))
+            if ch in COLOR_SPACES:
+                spaces[ch] = COLOR_SPACES[ch]
+            continue
+        try:
+            if color.convert_file(path, src, dst):
+                converted.append(ch)
+        except subzero_color.Error as e:
+            notes.append(str(e))
+            spaces[ch] = src
+            continue
+        spaces[ch] = dst
+        if dst != src and not subzero_render.FORMATS[fmt]["float"] and color.encoding(dst) == "scene-linear":
+            notes.append("%s in %s (scene-linear) as 8-bit %s: banding, prefer EXR" % (
+                CHANNEL_LABEL[ch], dst, subzero_render.FORMATS[fmt]["label"]))
+    return spaces, notes, converted
+
+
+def stale_files(folder, keep):
+    """Textures d'un rendu précédent du dossier (<Nom>_<canal>.<ext>, un autre format ou une sortie retirée) qui ne sont
+    pas dans keep (chemins)."""
+    prefix = os.path.basename(folder.rstrip("/"))
+    exts = {f["ext"] for f in subzero_render.FORMATS.values()}
+    keep = {os.path.normpath(k) for k in keep}
+    names = ("%s_%s%s" % (prefix, suffix, ext) for suffix in CHANNEL_SUFFIX.values() for ext in sorted(exts))
+    return [os.path.join(folder, n) for n in names
+            if os.path.isfile(os.path.join(folder, n)) and os.path.normpath(os.path.join(folder, n)) not in keep]
 
 
 def file_sha256(path):
@@ -370,30 +474,84 @@ def read_icons(desc, sbsar):
     return {url: members[m] for url, m in wanted.items() if members.get(m)}
 
 
-def read_gray_tga(path):
-    """TGA en niveaux de gris non compressé (type 3, celui des sorties grises de sbsrender), que Qt ne lit pas."""
+TGA_FOOTER = bytes(8) + b"TRUEVISION-XFILE.\0"  # pied TGA 2.0, qu'écrit sbsrender : Qt refuse un TGA sans lui
+
+
+def read_tga(path):
+    """TGA non compressé : gris 8 bits (type 3, sorties grises de sbsrender, que Qt ne lit pas), couleur 24 ou 32 bits
+    (type 2), même sans le pied TGA 2.0 (couleur de base réécrite par split_alpha avant le lot E11). QImage nulle
+    sinon."""
     with open(path, "rb") as f:
         head = f.read(18)
-        if len(head) < 18 or head[2] != 3 or head[16] != 8:
+        if len(head) < 18 or head[1] or (head[2], head[16]) not in ((3, 8), (2, 24), (2, 32)):
             return QtGui.QImage()
-        w, h = head[12] | head[13] << 8, head[14] | head[15] << 8
+        w, h, n = head[12] | head[13] << 8, head[14] | head[15] << 8, head[16] // 8
         f.seek(18 + head[0])
-        data = f.read(w * h)
-    if len(data) < w * h:
+        data = f.read(w * h * n)
+    if len(data) < w * h * n:
         return QtGui.QImage()
-    image = QtGui.QImage(data, w, h, w, QtGui.QImage.Format_Grayscale8).copy()
-    return image if head[17] & 0x20 else image.transformed(QtGui.QTransform().scale(1, -1))  # origine en bas à gauche
+    fmt = {1: QtGui.QImage.Format_Grayscale8, 3: QtGui.QImage.Format_BGR888, 4: QtGui.QImage.Format_ARGB32}[n]
+    image = QtGui.QImage(data, w, h, w * n, fmt).copy()  # ARGB32 : octets B, G, R, A en petit-boutiste, comme le TGA
+    flip = QtGui.QTransform().scale(-1 if head[17] & 0x10 else 1, 1 if head[17] & 0x20 else -1)  # origine en bas
+    return image if flip.isIdentity() else image.transformed(flip)
 
 
-def load_thumbs(files):
-    """{canal: QImage réduite} ; les EXR (que Qt ne lit pas) sont absents."""
+def read_exr_thumb(path, proc=None):
+    """Vignette d'un EXR (Qt ne le lit pas) : sans compression, ZIPS ou ZIP, un pixel sur n ; QImage nulle sinon.
+    proc : transformation de couleur (subzero_color), appliquée aux valeurs flottantes."""
+    try:
+        w, h, kind, data = subzero_exr.thumbnail(path, THUMB * 2, floats=proc is not None)
+    except (OSError, subzero_exr.Error) as e:
+        log("thumbnail of %s: %s" % (os.path.basename(path), e))
+        return QtGui.QImage()
+    if kind == "gray":
+        return QtGui.QImage(data, w, h, w, QtGui.QImage.Format_Grayscale8).copy()
+    if proc is not None:
+        return subzero_color.floats_image(data, w, h, proc)
+    return QtGui.QImage(data, w, h, w * 3, QtGui.QImage.Format_RGB888).copy()
+
+
+def split_alpha_qt(base, opacity=None):
+    """split_alpha d'un PNG ou d'un TIFF 8 bits, par Qt (thread du rendu)."""
+    image = QtGui.QImageReader(base).read()
+    if image.isNull() or not image.hasAlphaChannel():
+        return False
+    alpha = image.convertToFormat(QtGui.QImage.Format_Alpha8)
+    w, h, bpl = alpha.width(), alpha.height(), alpha.bytesPerLine()
+    bits = bytes(alpha.constBits())
+    if all(bits[y * bpl:y * bpl + w].count(255) == w for y in range(h)):
+        return False
+    fmt = "tif" if base.lower().endswith((".tif", ".tiff")) else "png"
+
+    def save(img, path):
+        tmp = path + ".tmp"
+        if not img.save(tmp, fmt):
+            raise OSError("could not write %s" % path)
+        os.replace(tmp, path)
+
+    if opacity:
+        save(QtGui.QImage(bits, w, h, bpl, QtGui.QImage.Format_Grayscale8).copy(), opacity)
+    save(image.convertToFormat(QtGui.QImage.Format_RGB888), base)
+    return True
+
+
+def load_thumbs(files, color=None, spaces=None):
+    """{canal: QImage réduite}, vue comme dans le viewport (color : subzero_color.Color, spaces : {canal: espace du
+    fichier}) ; absent si le fichier ne se lit pas."""
     thumbs = {}
     for ch, path in files.items():
-        if path.lower().endswith(".exr"):
-            continue
-        image = read_gray_tga(path) if path.lower().endswith(".tga") else QtGui.QImage()
+        proc = color.view_processor((spaces or {}).get(ch), ch) if color is not None else None
+        lower = path.lower()
+        done = False
+        if lower.endswith(".exr"):
+            image = read_exr_thumb(path, proc)
+            done = not image.isNull()
+        else:
+            image = read_tga(path) if lower.endswith(".tga") else QtGui.QImage()
         if image.isNull():
             image = QtGui.QImageReader(path).read()
+        if not done and proc is not None:
+            image = subzero_color.apply_image(image, proc)
         if not image.isNull():
             thumbs[ch] = image.scaled(THUMB * 2, THUMB * 2, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
     return thumbs
@@ -403,23 +561,40 @@ def load_thumbs(files):
 
 
 class Editor(QtWidgets.QWidget):
-    """Widget d'un paramètre. changed(valeur, mode) : "drag" (curseur tenu), "soon" (clavier, molette), "now"."""
+    """Widget d'un paramètre. changed(valeur, mode) : "drag" (curseur tenu), "soon" (clavier, molette), "now".
+    kind, disposition à la Painter : "stacked" (libellé et valeur, curseur dessous), "inline" (libellé à gauche),
+    "check" (case qui porte le libellé) ; value_widget : valeur montrée sur la ligne du libellé."""
 
     changed = QtCore.Signal(object, str)
+    kind = "inline"
 
     def __init__(self, inp):
         super().__init__()
         self.inp = inp
+        self.value_widget = None
         self.lay = QtWidgets.QVBoxLayout(self)
         self.lay.setContentsMargins(0, 0, 0, 0)
-        self.lay.setSpacing(2)
+        self.lay.setSpacing(4)
 
     def set_value(self, value):
         raise NotImplementedError
 
 
+class ValueBox(QtWidgets.QDoubleSpinBox):
+    """Valeur à la Painter, sans zéros inutiles : 0.5, 1.3, 1."""
+
+    def textFromValue(self, value):
+        text = "%.*f" % (self.decimals(), value)
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+        return "0" if text == "-0" else text
+
+
 class SliderEditor(Editor):
-    """Curseur de 1 à 4 composantes, entier ou flottant ; angle en degrés à l'écran (tours pour sbsrender)."""
+    """Curseur de 1 à 4 composantes, entier ou flottant ; angle en degrés à l'écran (tours pour sbsrender). Une
+    composante : valeur sur la ligne du libellé ; plusieurs : une ligne par composante (nom, curseur, valeur)."""
+
+    kind = "stacked"
 
     def __init__(self, inp, angle=False):
         super().__init__(inp)
@@ -439,11 +614,12 @@ class SliderEditor(Editor):
             if a is None or b is None or b <= a:
                 a, b = (0, 10) if self.is_int else (0.0, 1.0)
             row = QtWidgets.QHBoxLayout()
-            row.setSpacing(6)
+            row.setSpacing(8)
             if self.n > 1:
                 tag = QtWidgets.QLabel(labels[k] if k < len(labels) else "XYZW"[k])
                 tag.setObjectName("muted")
-                tag.setFixedWidth(62)
+                tag.setMinimumWidth(14)
+                tag.setMaximumWidth(62)
                 row.addWidget(tag)
             slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
             steps = int(b - a) if self.is_int else 1000
@@ -452,7 +628,7 @@ class SliderEditor(Editor):
                 spin = QtWidgets.QSpinBox()
                 spin.setRange(-10 ** 9 if not inp.get("clamp") else int(a), 10 ** 9 if not inp.get("clamp") else int(b))
             else:
-                spin = QtWidgets.QDoubleSpinBox()
+                spin = ValueBox()
                 step = float(inp.get("step") or 0.01) * self.scale
                 spin.setDecimals(1 if angle else max(2, min(4, -int(math.floor(math.log10(step))) if step > 0 else 3)))
                 spin.setSingleStep(step if step > 0 else 0.01)
@@ -461,10 +637,15 @@ class SliderEditor(Editor):
                 else:
                     spin.setRange(-1e6, 1e6)
             spin.setKeyboardTracking(False)
-            spin.setFixedWidth(84)
+            spin.setObjectName("value")
+            spin.setFixedWidth(64)
+            spin.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
             spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
             row.addWidget(slider, 1)
-            row.addWidget(spin)
+            if self.n > 1:
+                row.addWidget(spin)
+            else:
+                self.value_widget = spin
             self.lay.addLayout(row)
             self.rows.append((slider, spin, a, b))
             slider.valueChanged.connect(lambda pos, k=k: self._slid(k, pos))
@@ -518,11 +699,19 @@ class SliderEditor(Editor):
 
 
 class ToggleEditor(Editor):
+    """Case à cocher qui porte le libellé du paramètre, comme dans Painter ; libellés propres de l'interrupteur
+    (autres que False/True) en info-bulle."""
+
+    kind = "check"
+
     def __init__(self, inp):
         super().__init__(inp)
         labels = inp.get("button_labels") or ()
-        text = labels[1] if len(labels) == 2 and tuple(labels) != ("False", "True") else ""
-        self.box = QtWidgets.QCheckBox(text)
+        self.box = QtWidgets.QCheckBox(inp.get("label") or inp["identifier"])
+        tip = [inp.get("description") or ""]
+        if len(labels) == 2 and tuple(labels) != ("False", "True"):
+            tip.append("Off: %s · On: %s" % tuple(labels))
+        self.box.setToolTip("\n".join(t for t in tip if t))
         self.lay.addWidget(self.box)
         self.box.toggled.connect(lambda on: self.changed.emit(1 if on else 0, "now"))
 
@@ -548,31 +737,72 @@ class ComboEditor(Editor):
         self.combo.blockSignals(False)
 
 
+def clamp01(values):
+    return [max(0.0, min(1.0, float(x))) for x in values]
+
+
 class ColorEditor(Editor):
-    def __init__(self, inp):
+    """Couleur d'un paramètre, dans l'espace du graphe (sRGB encodé, comme les cartes couleur de sbsrender). Lot E11 :
+    le nuancier passe par la transformation d'affichage, comme les vignettes, et le sélecteur travaille dans l'espace
+    de choix des couleurs ($SUBZERO_OCIO_PICKING, sinon le rôle color_picking)."""
+
+    def __init__(self, inp, color=None):
         super().__init__(inp)
         self.alpha = inp["type"] == "float4"
+        self.color = color
+        self.shown = ""  # couleur du nuancier (#rrggbb)
         self.button = QtWidgets.QPushButton()
-        self.button.setFixedHeight(24)
+        self.button.setFixedHeight(20)
         self.lay.addWidget(self.button)
         self.button.clicked.connect(self._pick)
         self._value = inp["default"]
 
+    def set_color(self, color):
+        self.color = color
+        self.set_value(self._value)
+
+    def _spaces(self):
+        """(espace du graphe, espace de choix) ; (None, None) sans OCIO."""
+        c = self.color
+        graph = c.source("base") if c is not None and c.ready else None
+        return (graph, c.picking()[0] or graph) if graph else (None, None)
+
+    def _convert(self, rgb, src, dst):
+        try:
+            return self.color.convert_rgb(rgb, src, dst)
+        except subzero_color.Error as e:
+            log(str(e))
+            return list(rgb)
+
     def set_value(self, value):
         self._value = list(value)
-        c = self._qcolor()
-        self.button.setStyleSheet("QPushButton { background: %s; border: 1px solid #3a3a3a; border-radius: 4px; }" % c.name())
-        self.button.setToolTip(" ".join("%.3f" % x for x in self._value))
-
-    def _qcolor(self):
-        v = [max(0.0, min(1.0, float(x))) for x in self._value] + [1.0]
-        return QtGui.QColor.fromRgbF(v[0], v[1], v[2], v[3] if self.alpha else 1.0)
+        graph, picking = self._spaces()
+        rgb = clamp01(self._value[:3])
+        c = QtGui.QColor.fromRgbF(*clamp01(self.color.view_rgb(rgb, graph) if graph else rgb))
+        self.shown = c.name()
+        self.button.setStyleSheet("QPushButton { background: %s; border: 1px solid #4d4d4d; border-radius: 3px; "
+                                  "padding: 0; min-height: 0; } QPushButton:hover { border-color: #8c8c8c; }" % c.name())
+        tip = " ".join("%.3f" % x for x in self._value)
+        if graph and picking != graph:
+            tip += "\n%s: %s" % (picking, " ".join("%.3f" % x for x in self._convert(rgb, graph, picking)))
+        self.button.setToolTip(tip)
 
     def _pick(self):
+        graph, picking = self._spaces()
+        rgb = [float(x) for x in self._value[:3]]
+        convert = graph is not None and picking != graph
+        if convert:
+            rgb = self._convert(rgb, graph, picking)
+        a = float(self._value[3]) if self.alpha and len(self._value) > 3 else 1.0
+        start = QtGui.QColor.fromRgbF(*clamp01(rgb + [a]))
+        title = (self.inp.get("label") or "") + (" (%s)" % picking if picking else "")
         options = QtWidgets.QColorDialog.ShowAlphaChannel if self.alpha else QtWidgets.QColorDialog.ColorDialogOptions()
-        c = QtWidgets.QColorDialog.getColor(self._qcolor(), self, self.inp.get("label") or "", options)
+        c = QtWidgets.QColorDialog.getColor(start, self, title, options)
         if c.isValid():
-            v = [round(c.redF(), 6), round(c.greenF(), 6), round(c.blueF(), 6)] + ([round(c.alphaF(), 6)] if self.alpha else [])
+            rgb = [c.redF(), c.greenF(), c.blueF()]
+            if convert:
+                rgb = self._convert(rgb, picking, graph)
+            v = [round(x, 6) for x in rgb] + ([round(c.alphaF(), 6)] if self.alpha else [])
             self.set_value(v)
             self.changed.emit(v, "now")
 
@@ -604,7 +834,7 @@ class ImageEditor(Editor):
             self.changed.emit(path, "now")
 
 
-def make_editor(inp):
+def make_editor(inp, color=None):
     widget, typ = inp.get("widget"), inp["type"]
     if typ == "image":
         return ImageEditor(inp)
@@ -613,19 +843,39 @@ def make_editor(inp):
     if widget == "combobox":
         return ComboEditor(inp)
     if widget == "color" and typ in ("float3", "float4"):
-        return ColorEditor(inp)
+        return ColorEditor(inp, color)
     if widget == "angle":
         return SliderEditor(inp, angle=True)
     return SliderEditor(inp)
 
 
+class ElidedLabel(QtWidgets.QLabel):
+    """Une ligne, coupée par … si elle ne tient pas ; texte entier en info-bulle."""
+
+    def __init__(self):
+        super().__init__()
+        self.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+
+    def setText(self, text):
+        super().setText(text)
+        self.setToolTip(text)
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        painter.setPen(self.palette().color(QtGui.QPalette.WindowText))
+        text = self.fontMetrics().elidedText(self.text(), QtCore.Qt.ElideRight, self.width())
+        painter.drawText(self.rect(), QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, text)
+
+
 class ParamRow(object):
-    def __init__(self, inp, editor, label, reset):
-        self.inp, self.editor, self.label, self.reset = inp, editor, label, reset
+    def __init__(self, inp, editor, box, reset):
+        self.inp, self.editor, self.box, self.reset = inp, editor, box, reset
 
 
 class Params(QtWidgets.QWidget):
-    """Paramètres d'un graphe, groupés dans l'ordre du fichier, conditions de visibilité appliquées."""
+    """Paramètres d'un graphe, groupés dans l'ordre du fichier, conditions de visibilité appliquées. Disposition de
+    Painter : paramètres sans groupe en tête, puis groupes repliables ; ↺ (retour au défaut) visible si la valeur a
+    changé."""
 
     changed = QtCore.Signal(str, object, str)
 
@@ -633,10 +883,60 @@ class Params(QtWidgets.QWidget):
         super().__init__()
         self.lay = QtWidgets.QVBoxLayout(self)
         self.lay.setContentsMargins(0, 0, 0, 0)
-        self.lay.setSpacing(6)
+        self.lay.setSpacing(10)
         self.rows = {}
-        self.groups = []  # [(bouton, conteneur, [identifiants])]
+        self.groups = []  # [(studio_qt.Group, None pour les paramètres sans groupe ; [identifiants])]
         self.graph = None
+        self.color = None  # subzero_color.Color des nuanciers
+
+    def set_color(self, color):
+        self.color = color
+        for row in self.rows.values():
+            if isinstance(row.editor, ColorEditor):
+                row.editor.set_color(color)
+
+    def _row(self, inp, editor):
+        """Ligne d'un paramètre : (widget, bouton ↺)."""
+        box = QtWidgets.QWidget()
+        lay = QtWidgets.QVBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
+        head = QtWidgets.QHBoxLayout()
+        head.setSpacing(8)
+        reset = QtWidgets.QToolButton()
+        reset.setObjectName("reset")
+        reset.setText("↺")
+        reset.setToolTip("Reset to default")
+        policy = reset.sizePolicy()
+        policy.setRetainSizeWhenHidden(True)
+        reset.setSizePolicy(policy)
+        label = QtWidgets.QLabel(inp.get("label") or inp["identifier"])
+        if inp.get("description"):
+            label.setToolTip(inp["description"])
+        # ↺ juste avant la valeur : le bord droit des valeurs, des curseurs et des menus reste aligné.
+        if editor.kind == "stacked":
+            head.addWidget(label, 1)
+            head.addWidget(reset)
+            if editor.value_widget is not None:
+                head.addWidget(editor.value_widget)
+            lay.addLayout(head)
+            lay.addWidget(editor)
+        elif editor.kind == "check":
+            head.addWidget(editor, 1)
+            head.addWidget(reset)
+            lay.addLayout(head)
+        else:
+            column = QtWidgets.QWidget()
+            column.setFixedWidth(120)
+            left = QtWidgets.QHBoxLayout(column)
+            left.setContentsMargins(0, 0, 0, 0)
+            left.setSpacing(4)
+            left.addWidget(label, 1)
+            left.addWidget(reset)
+            head.addWidget(column)
+            head.addWidget(editor, 1)
+            lay.addLayout(head)
+        return box, reset
 
     def build(self, graph, values):
         while self.lay.count():
@@ -653,46 +953,24 @@ class Params(QtWidgets.QWidget):
                 order.append(g)
                 members[g] = []
             members[g].append(inp)
+        order.sort(key=lambda g: g != "")  # sans groupe d'abord, comme dans Painter
         for g in order:
-            box = QtWidgets.QWidget()
-            grid = QtWidgets.QGridLayout(box)
-            grid.setContentsMargins(0 if not g else 10, 2, 0, 4)
-            grid.setHorizontalSpacing(10)
-            grid.setVerticalSpacing(6)
-            grid.setColumnStretch(1, 1)
             if g:
-                head = QtWidgets.QToolButton()
-                head.setText(" " + g.replace("/", " / "))
-                head.setCheckable(True)
-                head.setChecked(True)
-                head.setArrowType(QtCore.Qt.DownArrow)
-                head.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
-                head.setStyleSheet("QToolButton { border: none; font-weight: 600; color: %s; }" % MUTED)
-                head.toggled.connect(lambda on, b=box, h=head: (b.setVisible(on), h.setArrowType(
-                    QtCore.Qt.DownArrow if on else QtCore.Qt.RightArrow)))
-                self.lay.addWidget(head)
+                group = studio_qt.Group(g.replace("/", " / "))
+                self.lay.addWidget(group)
+                body = group.body
             else:
-                head = None
-            for r, inp in enumerate(members[g]):
-                label = QtWidgets.QLabel(inp.get("label") or inp["identifier"])
-                label.setMinimumWidth(130)
-                if inp.get("description"):
-                    label.setToolTip(inp["description"])
-                editor = make_editor(inp)
+                group, body = None, self.lay
+            for inp in members[g]:
+                editor = make_editor(inp, self.color)
                 editor.set_value(values.get(inp["identifier"], inp["default"]))
-                reset = QtWidgets.QToolButton()
-                reset.setText("↺")
-                reset.setToolTip("Reset to default")
-                reset.setAutoRaise(True)
-                grid.addWidget(label, r, 0, QtCore.Qt.AlignTop)
-                grid.addWidget(editor, r, 1)
-                grid.addWidget(reset, r, 2, QtCore.Qt.AlignTop)
+                box, reset = self._row(inp, editor)
+                body.addWidget(box)
                 ident = inp["identifier"]
                 editor.changed.connect(lambda v, mode, ident=ident: self.changed.emit(ident, v, mode))
                 reset.clicked.connect(lambda _=False, ident=ident: self._reset(ident))
-                self.rows[ident] = ParamRow(inp, editor, label, reset)
-            self.lay.addWidget(box)
-            self.groups.append((head, box, [i["identifier"] for i in members[g]]))
+                self.rows[ident] = ParamRow(inp, editor, box, reset)
+            self.groups.append((group, [i["identifier"] for i in members[g]]))
         self.lay.addStretch(1)
         self.refresh(values)
 
@@ -712,21 +990,323 @@ class Params(QtWidgets.QWidget):
         env = env_values(self.graph, values)
         for ident, row in self.rows.items():
             cond = row.inp.get("visibleif")
-            visible = not cond or condition(cond, env)
-            row.label.setVisible(visible)
-            row.editor.setVisible(visible)
-            row.reset.setVisible(visible)
-            row.reset.setEnabled(values.get(ident, row.inp["default"]) != row.inp["default"])
-        for head, box, idents in self.groups:
-            any_visible = any(not self.rows[i].label.isHidden() for i in idents)
-            if head is not None:
-                head.setVisible(any_visible)
-                box.setVisible(any_visible and head.isChecked())
-            else:
-                box.setVisible(any_visible)
+            row.box.setVisible(not cond or condition(cond, env))
+            row.reset.setVisible(values.get(ident, row.inp["default"]) != row.inp["default"])
+        for group, idents in self.groups:
+            if group is not None:
+                group.setVisible(any(not self.rows[i].box.isHidden() for i in idents))
+
+    def modified(self):
+        return any(not row.reset.isHidden() for row in self.rows.values())
 
 
 # ---- Fenêtre -------------------------------------------------------------------------------------------------------------
+
+
+# ---- Réglages (lot E11) -----------------------------------------------------------------------------------------------
+
+WINDOW = "window"  # origine d'une variable changée par Apply, pas enregistrée
+
+
+class SettingsDialog(QtWidgets.QDialog):
+    """Panneau Settings : gestion couleur (celle d'ArmorPaint, ou OCIO et STUDIO_OCIO_* sans lui), espace des cartes
+    livrées, espace de choix des couleurs. Chaque réglage est une variable d'environnement : Apply la change pour la
+    fenêtre, Save l'écrit aussi dans studio.env. Une vraie variable d'environnement ne se change pas ici : studio.env ne
+    passe pas devant."""
+
+    def __init__(self, window):
+        super().__init__(window)
+        self.window = window
+        self.fields = {}  # variable -> (widget, valeur voulue : fonction, None pour le défaut)
+        self.setWindowTitle("subzero Settings")
+        self.setModal(False)
+        self.resize(540, 680)
+        # Même facture que la fenêtre : sections défilantes, barre du bas (fichier, état, boutons).
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        self.banner = QtWidgets.QLabel()
+        self.banner.setObjectName("banner")
+        self.banner.setWordWrap(True)
+        self.banner.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        self.banner.hide()
+        banner_bar = QtWidgets.QFrame()
+        banner_bar.setObjectName("bar")
+        banner_lay = QtWidgets.QVBoxLayout(banner_bar)
+        banner_lay.setContentsMargins(10, 10, 10, 10)
+        banner_lay.addWidget(self.banner)
+        self.banner.setVisible(False)
+        self.banner_bar = banner_bar
+        root.addWidget(banner_bar)
+        self.scroll = QtWidgets.QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        root.addWidget(self.scroll, 1)
+        bottom = QtWidgets.QFrame()
+        bottom.setObjectName("bar")
+        foot = QtWidgets.QVBoxLayout(bottom)
+        foot.setContentsMargins(10, 8, 10, 8)
+        foot.setSpacing(6)
+        root.addWidget(bottom)
+        self.file_label = muted()
+        self.file_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        foot.addWidget(self.file_label)
+        buttons = QtWidgets.QHBoxLayout()
+        buttons.setSpacing(8)
+        self.status = muted()
+        close = QtWidgets.QPushButton("Close")
+        self.apply_button = QtWidgets.QPushButton("Apply")
+        self.apply_button.setToolTip("Use these settings in this window, without saving them")
+        self.save_button = QtWidgets.QPushButton("Save")
+        self.save_button.setObjectName("primary")
+        buttons.addWidget(self.status, 1)
+        buttons.addWidget(close)
+        buttons.addWidget(self.apply_button)
+        buttons.addWidget(self.save_button)
+        foot.addLayout(buttons)
+        close.clicked.connect(self.close)
+        self.apply_button.clicked.connect(lambda: self._apply(False))
+        self.save_button.clicked.connect(lambda: self._apply(True))
+        self.reload()
+
+    def reload(self):
+        """Reconstruit le panneau depuis la fenêtre : configuration, variables et leur origine."""
+        w, c = self.window, self.window.color
+        self.fields = {}
+        old = self.scroll.takeWidget()
+        if old is not None:
+            old.deleteLater()
+        body = QtWidgets.QWidget()
+        self.lay = QtWidgets.QVBoxLayout(body)
+        self.lay.setContentsMargins(12, 10, 12, 14)
+        self.lay.setSpacing(8)
+        if w.host_mode:
+            self._host_section(c)
+        else:
+            self._standalone_section(c)
+        self._maps_section(c)
+        self._colors_section(c)
+        self.lay.addStretch(1)
+        self.scroll.setWidget(body)
+        notes = ([c.error] if c.error else []) + c.warnings + [e for _, _, e in w.plan().values() if e]
+        if c.ready and c.picking()[1]:
+            notes.append(c.picking()[1])
+        self.banner.setText("\n".join(notes))
+        self.banner.setVisible(bool(notes))
+        self.banner_bar.setVisible(bool(notes))
+        target = w.env_file()
+        self.save_button.setEnabled(bool(target))
+        self.file_label.setText("Save writes to %s" % target if target else
+                                "Nothing to save to: $STUDIO_ENV is empty. Apply still works for this window.")
+
+    # -- construction
+
+    def _section(self, title, note=None):
+        """Section à la Painter : trait (sauf la première), titre en capitales, note."""
+        if self.lay.count():
+            self.lay.addSpacing(4)
+            self.lay.addWidget(studio_qt.separator())
+        self.lay.addWidget(studio_qt.section_title(title))
+        if note:
+            self.lay.addWidget(muted(note))
+
+    def _grid(self, parent=None):
+        grid = QtWidgets.QGridLayout()
+        grid.setContentsMargins(0, 2, 0, 2)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(3)
+        grid.setColumnMinimumWidth(0, 110)
+        grid.setColumnStretch(1, 1)
+        if parent is None:
+            self.lay.addLayout(grid)
+        else:
+            parent.setLayout(grid)
+        return grid
+
+    def _row(self, grid, label, widget, var=None, value=None):
+        """Ligne libellé, réglage ; var : sa variable, montrée dessous avec son origine ; value : sa valeur voulue."""
+        r = grid.rowCount()
+        grid.addWidget(QtWidgets.QLabel(label), r, 0)
+        grid.addWidget(widget, r, 1)
+        if var is None:
+            return
+        grid.addWidget(self._origin(var), r + 1, 1)
+        grid.setRowMinimumHeight(r + 2, 6)
+        if var in self.window.locked:
+            widget.setEnabled(False)
+            widget.setToolTip("$%s is set in the environment: studio.env cannot change it" % var)
+        self.fields[var] = (widget, value)
+
+    def _origin(self, var):
+        where = self.window.origins.get(var)
+        if where == studio_env.ENVIRONMENT:
+            text, tip = "environment (locked)", "Set before ArmorPaint started: it wins over studio.env"
+        elif where == WINDOW:
+            text, tip = "this window, not saved", "Applied here only: Save writes it to studio.env"
+        elif where:
+            text, tip = os.path.basename(where), where
+        else:
+            text, tip = "not set", "Default value"
+        label = QtWidgets.QLabel("$%s · %s" % (var, text))
+        label.setObjectName("caption")
+        label.setToolTip(tip)
+        return label
+
+    @staticmethod
+    def _combo(default_text, items, current, describe=None):
+        """Menu : défaut (None), puis items [(texte, valeur)] ou None pour un séparateur ; current : valeur de la
+        variable, ajoutée si le menu ne l'a pas (alias, rôle, inconnue)."""
+        combo = QtWidgets.QComboBox()
+        combo.setMinimumContentsLength(16)
+        combo.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        combo.addItem(default_text, None)
+        for item in items:
+            if item is None:
+                combo.insertSeparator(combo.count())
+            else:
+                combo.addItem(item[0], item[1])
+        if current:
+            i = combo.findData(current)
+            if i < 0:
+                combo.addItem(describe(current) if describe else "%s (unknown)" % current, current)
+                i = combo.count() - 1
+            combo.setCurrentIndex(i)
+        return combo
+
+    def _space_row(self, grid, label, var, default_text, c):
+        items = []
+        if c.ready:
+            items = [(c.describe(r), r) for r in c.roles()] + [None] + [(n, n) for _, n in c.spaces()]
+
+        def describe(value):
+            return c.describe(value) if c.ready and c.resolve(value) else "%s (unknown)" % value
+
+        combo = self._combo(default_text, items, (os.environ.get(var) or "").strip(), describe)
+        combo.setEnabled(c.ready)
+        if not c.ready:
+            combo.setToolTip(c.error or "")
+        self._row(grid, label, combo, var, combo.currentData)
+
+    def _host_section(self, c):
+        host = self.window.state.get("ocio") or {}
+        self._section("Color management", "Set in ArmorPaint: subzero converts the maps in the configuration that "
+                                          "reads them, and shows thumbnails and colors like its viewport.")
+        grid = self._grid()
+
+        def value(text, tip=""):
+            label = QtWidgets.QLabel(text or "—")
+            label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+            label.setToolTip(tip)
+            return label
+
+        origin = host.get("origin") or ""
+        self._row(grid, "Configuration", value(host.get("name") or c.name,
+                                               "%s%s" % (host.get("config") or "", " (%s)" % origin if origin else "")))
+        if not host.get("enabled"):
+            self._row(grid, "Status", value(host.get("status") or "off"))
+        self._row(grid, "Display", value(host.get("display")))
+        self._row(grid, "View", value(host.get("view")))
+        self._row(grid, "Look", value(host.get("look") or "None"))
+        self._row(grid, "Viewport", value("view transform on" if host.get("viewport") else "off: shown as rendered"))
+        prefs = QtWidgets.QPushButton("Color Preferences...")
+        prefs.clicked.connect(lambda: self.window.channel.request("show_prefs", {"tab": "color"}, lambda d, e: None))
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(prefs)
+        row.addStretch(1)
+        self.lay.addLayout(row)
+
+    def _standalone_section(self, c):
+        self._section("Color management", "Without ArmorPaint, the same variables as ArmorPaint: $OCIO gives the "
+                                          "configuration; display, view and look show thumbnails and colors.")
+        grid = self._grid()
+        edit = QtWidgets.QLineEdit(os.environ.get("OCIO", ""))
+        edit.setPlaceholderText(subzero_color.DEFAULT_CONFIG)
+        browse = QtWidgets.QPushButton("Browse...")
+        holder = QtWidgets.QWidget()
+        row = QtWidgets.QHBoxLayout(holder)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(edit, 1)
+        row.addWidget(browse)
+        browse.clicked.connect(lambda: self._browse_config(edit))
+        self._row(grid, "Configuration", holder, "OCIO", lambda: edit.text().strip() or None)
+        if not c.ready:
+            return
+        cfg = c.config
+        display = self._combo("Default (%s)" % cfg.getDefaultDisplay(), [(d, d) for d in c.displays()],
+                              os.environ.get("STUDIO_OCIO_DISPLAY"))
+        view = QtWidgets.QComboBox()
+
+        def fill_views(keep):
+            d = display.currentData()
+            d = d if d in c.displays() else cfg.getDefaultDisplay()  # inconnu : remplacé par le défaut, comme Color
+            view.clear()
+            view.addItem("Default (%s)" % cfg.getDefaultView(d), None)
+            for v in c.views(d):
+                view.addItem(v, v)
+            i = view.findData(keep) if keep else 0
+            if i < 0:
+                view.addItem("%s (unknown)" % keep, keep)
+                i = view.count() - 1
+            view.setCurrentIndex(i)
+
+        fill_views(os.environ.get("STUDIO_OCIO_VIEW"))
+        display.currentIndexChanged.connect(lambda _: fill_views(view.currentData()))
+        look = self._combo("None", [(lk, lk) for lk in c.looks()], os.environ.get("STUDIO_OCIO_LOOK"))
+        viewport = QtWidgets.QCheckBox("Show thumbnails and colors through the view transform")
+        viewport.setChecked(subzero_color.env_flag(os.environ.get("STUDIO_OCIO_VIEWPORT"), True))
+        self._row(grid, "Display", display, "STUDIO_OCIO_DISPLAY", display.currentData)
+        self._row(grid, "View", view, "STUDIO_OCIO_VIEW", view.currentData)
+        self._row(grid, "Look", look, "STUDIO_OCIO_LOOK", look.currentData)
+        self._row(grid, "Viewport", viewport, "STUDIO_OCIO_VIEWPORT", lambda: None if viewport.isChecked() else "0")
+
+    def _browse_config(self, edit):
+        start = edit.text() if os.path.isfile(edit.text()) else os.path.expanduser("~")
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "OCIO configuration", start,
+                                                        "OCIO configurations (*.ocio);;All files (*)")
+        if path:
+            edit.setText(path)
+
+    def _maps_section(self, c):
+        src = c.source("base") if c.ready else None
+        data = c.data_space() if c.ready else None
+        self._section("Maps", "Color space of the textures sent to ArmorPaint. sbsrender writes color maps sRGB-encoded "
+                              "and data maps raw; another space converts them after rendering (EXR keeps the precision).")
+        grid = self._grid()
+        self._space_row(grid, "Color maps", subzero_color.VAR_COLOR, "Default: as rendered (%s)" % (src or "sRGB"), c)
+        self._space_row(grid, "Data maps", subzero_color.VAR_DATA, "Default: %s" % (data or "Raw"), c)
+        group = studio_qt.Group("Per map", opened=any(os.environ.get(v) for _, v in MAP_VARS))
+        holder = QtWidgets.QWidget()
+        per_map = self._grid(holder)
+        per_map.setColumnMinimumWidth(0, 110 - studio_qt.Group.INDENT)  # réglages alignés sur ceux du dessus
+        for ch, var in MAP_VARS:
+            kind = "color maps" if ch in subzero_color.COLOR_MAPS else "data maps"
+            self._space_row(per_map, CHANNEL_LABEL[ch], var, "Same as %s" % kind, c)
+        group.body.addWidget(holder)
+        self.lay.addWidget(group)
+
+    def _colors_section(self, c):
+        self._section("Colors", "Space of the color pickers of the parameters; swatches show colors like the thumbnails.")
+        grid = self._grid()
+        picking = (c.resolve("color_picking") or c.source("base")) if c.ready else None
+        self._space_row(grid, "Color picking", subzero_color.VAR_PICKING,
+                        "Default: color_picking (%s)" % picking if picking else "Default: color_picking", c)
+
+    # -- actions
+
+    def desired(self):
+        """{variable: valeur voulue, None pour le défaut} des réglages modifiables."""
+        return {var: value() for var, (widget, value) in self.fields.items() if widget.isEnabled()}
+
+    def _apply(self, save):
+        error = self.window.apply_settings(self.desired(), save=save)
+        if error:
+            self.status.setText(error)
+            self.status.setStyleSheet("color: %s;" % ERROR)
+        else:
+            target = self.window.env_file()
+            self.status.setText("Saved to %s" % os.path.basename(target) if save else "Applied to this window")
+            self.status.setStyleSheet("color: %s;" % SUCCESS)
 
 
 class SubzeroWindow(QtWidgets.QWidget):
@@ -745,6 +1325,8 @@ class SubzeroWindow(QtWidgets.QWidget):
         self.entries = {}
         self.preset = None
         self.size = None  # log2, None : celle du projet
+        self.fmt = subzero_render.default_format()  # format du rendu final (clé de subzero_render.FORMATS)
+        self.final_seq = 0  # rendus finaux lancés : le nettoyage suit la réponse du dernier
         self.mapping = []  # [[sortie, canal, raison]]
         self.overrides = {}  # sortie -> canal choisi à la main ("" : aucun)
         self.material_dir = None  # dossier du matériau envoyé
@@ -755,6 +1337,12 @@ class SubzeroWindow(QtWidgets.QWidget):
         self.dirty = False  # réglages changés depuis le dernier rendu final
         self.preview_dir = os.path.join(subzero_render.CACHE_DIR, "preview", str(os.getpid()))
         self.job = None  # dernier travail soumis
+        self.color = subzero_color.Color(host={"enabled": False, "status": "waiting for ArmorPaint"})
+        self.origins = {}  # variable de couleur -> fichier, studio_env.ENVIRONMENT ou WINDOW
+        self.locked = set()  # variables de l'environnement, que studio.env ne change pas
+        self.applied_spaces = {}  # {canal: espace} des textures du matériau envoyé, pour color_space_was
+        self.thumb_files = None  # ({canal: fichier}, {canal: espace}) des vignettes montrées
+        self.settings = None  # SettingsDialog
         self.worker = Worker()
         self.worker.stepped.connect(self._on_step)
         self.worker.finished.connect(self._on_finished)
@@ -769,6 +1357,7 @@ class SubzeroWindow(QtWidgets.QWidget):
         channel.events["open"] = self._on_open_event
         channel.events["prefs"] = self._on_prefs_event
         channel.events["project"] = self._on_project_event
+        channel.events["ocio"] = self._on_ocio_event
         channel.closed.connect(self._on_host_gone)
         self._status("Loading...")
         channel.request("state", None, self._on_state)
@@ -776,59 +1365,90 @@ class SubzeroWindow(QtWidgets.QWidget):
     # -- construction
 
     def _build(self):
+        # Disposition du panneau Shader Settings de Painter : barre du haut (matériau, boutons de même largeur, nom,
+        # vignettes), sections défilantes (MATERIAL, PARAMETERS, OUTPUTS), barre du bas (état, envoi).
         root = QtWidgets.QVBoxLayout(self)
-        root.setContentsMargins(16, 14, 16, 12)
-        root.setSpacing(10)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
+        top = QtWidgets.QFrame()
+        top.setObjectName("bar")
+        head = QtWidgets.QVBoxLayout(top)
+        head.setContentsMargins(10, 10, 10, 10)
+        head.setSpacing(7)
         header = QtWidgets.QHBoxLayout()
+        header.setSpacing(10)
         self.icon = QtWidgets.QLabel()
         self.icon.setFixedSize(48, 48)
-        self.icon.setStyleSheet("background: #1b1b1b; border-radius: 4px;")
+        self.icon.setStyleSheet("background: #252525; border-radius: 3px;")
         titles = QtWidgets.QVBoxLayout()
-        titles.setSpacing(1)
+        titles.setSpacing(2)
         self.title = QtWidgets.QLabel("No material")
-        font = self.title.font()
-        font.setPointSizeF(font.pointSizeF() * 1.35)
-        font.setWeight(QtGui.QFont.DemiBold)
-        self.title.setFont(font)
+        self.title.setObjectName("title")
         self.subtitle = muted("Open a .sbs or .sbsar file, or drop one here.")
+        titles.addStretch(1)
         titles.addWidget(self.title)
         titles.addWidget(self.subtitle)
+        titles.addStretch(1)
+        header.addWidget(self.icon)
+        header.addLayout(titles, 1)
+        head.addLayout(header)
+
+        buttons = QtWidgets.QHBoxLayout()
+        buttons.setSpacing(6)
         self.open_button = QtWidgets.QPushButton("Open...")
         self.reload_button = QtWidgets.QPushButton("Reload")
         self.reload_button.setToolTip("Read the file again (after saving it in Designer)")
-        header.addWidget(self.icon)
-        header.addLayout(titles, 1)
-        header.addWidget(self.open_button)
-        header.addWidget(self.reload_button)
-        root.addLayout(header)
+        self.settings_button = QtWidgets.QPushButton("Settings")
+        self.settings_button.setToolTip("Color spaces of the maps and colors (OCIO)")
+        for b in (self.open_button, self.reload_button, self.settings_button):
+            buttons.addWidget(b, 1)
+        head.addLayout(buttons)
         self.open_button.clicked.connect(self._browse_package)
         self.reload_button.clicked.connect(self._reload)
+        self.settings_button.clicked.connect(self._show_settings)
+
+        form = QtWidgets.QGridLayout()
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(6)
+        form.setColumnMinimumWidth(0, 120)
+        form.setColumnStretch(1, 1)
+        self.graph_label = QtWidgets.QLabel("Graph")
+        self.graph_combo = QtWidgets.QComboBox()
+        self.name = QtWidgets.QLineEdit()
+        self.name.setPlaceholderText("Material name")
+        form.addWidget(self.graph_label, 0, 0)
+        form.addWidget(self.graph_combo, 0, 1)
+        form.addWidget(QtWidgets.QLabel("Material name"), 1, 0)
+        form.addWidget(self.name, 1, 1)
+        head.addLayout(form)
+        self.graph_combo.activated.connect(self._on_graph)
 
         self.banner = QtWidgets.QLabel()
+        self.banner.setObjectName("banner")
         self.banner.setWordWrap(True)
-        self.banner.setStyleSheet("background: #3a2a1a; color: %s; border-radius: 4px; padding: 6px 8px;" % WARNING)
         self.banner.hide()
         self.prefs_button = QtWidgets.QPushButton("Open Preferences")
         self.prefs_button.hide()
         self.prefs_button.clicked.connect(lambda: self.channel.request("show_prefs", None, lambda d, e: None))
         banner_row = QtWidgets.QHBoxLayout()
         banner_row.addWidget(self.banner, 1)
-        banner_row.addWidget(self.prefs_button)
-        root.addLayout(banner_row)
+        banner_row.addWidget(self.prefs_button, 0, QtCore.Qt.AlignVCenter)
+        head.addLayout(banner_row)
 
         thumbs = QtWidgets.QHBoxLayout()
         thumbs.setSpacing(6)
         self.thumbs = {}
         for ch, label, _, _ in CHANNELS:
             box = QtWidgets.QVBoxLayout()
-            box.setSpacing(2)
+            box.setContentsMargins(0, 0, 0, 0)
+            box.setSpacing(3)
             image = QtWidgets.QLabel()
             image.setFixedSize(THUMB, THUMB)
             image.setAlignment(QtCore.Qt.AlignCenter)
-            image.setStyleSheet("background: #1b1b1b; border-radius: 3px; color: #555555;")
+            image.setStyleSheet("background: #252525; border-radius: 2px;")
             caption = QtWidgets.QLabel(label)
-            caption.setObjectName("muted")
+            caption.setObjectName("caption")
             caption.setAlignment(QtCore.Qt.AlignCenter)
             box.addWidget(image)
             box.addWidget(caption)
@@ -838,85 +1458,109 @@ class SubzeroWindow(QtWidgets.QWidget):
             thumbs.addWidget(holder)
             self.thumbs[ch] = (holder, image)
         thumbs.addStretch(1)
-        root.addLayout(thumbs)
+        head.addLayout(thumbs)
+        root.addWidget(top)
 
-        top = QtWidgets.QGridLayout()
-        top.setHorizontalSpacing(10)
-        top.setVerticalSpacing(6)
-        self.graph_combo = QtWidgets.QComboBox()
+        body = QtWidgets.QWidget()
+        content = QtWidgets.QVBoxLayout(body)
+        content.setContentsMargins(12, 10, 12, 14)
+        content.setSpacing(10)
+
+        content.addWidget(studio_qt.section_title("Material"))
+        grid = QtWidgets.QGridLayout()
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(8)
+        grid.setColumnMinimumWidth(0, 120)
+        grid.setColumnStretch(1, 1)
         self.preset_combo = QtWidgets.QComboBox()
         self.seed = QtWidgets.QSpinBox()
         self.seed.setRange(0, 10 ** 6)
         self.seed.setKeyboardTracking(False)
+        self.seed.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
         self.seed_button = QtWidgets.QPushButton("Random")
         self.size_combo = QtWidgets.QComboBox()
+        self.format_combo = QtWidgets.QComboBox()
+        for key, f in subzero_render.FORMATS.items():
+            self.format_combo.addItem(f["label"], key)
+        self.format_combo.setToolTip("File format of the textures sent to ArmorPaint (previews stay in TGA)")
         seed_row = QtWidgets.QHBoxLayout()
+        seed_row.setSpacing(6)
         seed_row.addWidget(self.seed, 1)
         seed_row.addWidget(self.seed_button)
-        self.graph_label = QtWidgets.QLabel("Graph")
         self.seed_label = QtWidgets.QLabel("Random Seed")
-        top.addWidget(self.graph_label, 0, 0)
-        top.addWidget(self.graph_combo, 0, 1)
-        top.addWidget(QtWidgets.QLabel("Preset"), 1, 0)
-        top.addWidget(self.preset_combo, 1, 1)
-        top.addWidget(self.seed_label, 2, 0)
-        top.addLayout(seed_row, 2, 1)
-        top.addWidget(QtWidgets.QLabel("Size"), 3, 0)
-        top.addWidget(self.size_combo, 3, 1)
-        top.setColumnStretch(1, 1)
-        root.addLayout(top)
-        self.graph_combo.activated.connect(self._on_graph)
+        grid.addWidget(QtWidgets.QLabel("Preset"), 0, 0)
+        grid.addWidget(self.preset_combo, 0, 1)
+        grid.addWidget(self.seed_label, 1, 0)
+        grid.addLayout(seed_row, 1, 1)
+        size_row = QtWidgets.QHBoxLayout()
+        size_row.setSpacing(8)
+        size_row.addWidget(self.size_combo, 1)
+        size_row.addSpacing(4)
+        size_row.addWidget(QtWidgets.QLabel("Format"))
+        size_row.addWidget(self.format_combo, 1)
+        grid.addWidget(QtWidgets.QLabel("Size"), 2, 0)
+        grid.addLayout(size_row, 2, 1)
+        content.addLayout(grid)
         self.preset_combo.activated.connect(self._on_preset)
         self.seed.valueChanged.connect(lambda v: self._on_param("$randomseed", v, "now"))
         self.seed_button.clicked.connect(lambda: self.seed.setValue(int.from_bytes(os.urandom(3), "little") % 10 ** 6))
         self.size_combo.activated.connect(self._on_size)
+        self.format_combo.activated.connect(self._on_format)
 
+        content.addSpacing(4)
+        content.addWidget(studio_qt.separator())
+        content.addWidget(studio_qt.section_title("Parameters"))
         self.params = Params()
         self.params.changed.connect(self._on_param)
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-        scroll.setWidget(self.params)
-        root.addWidget(scroll, 1)
+        content.addWidget(self.params)
+        restore = QtWidgets.QHBoxLayout()
+        restore.addStretch(1)
+        self.restore_button = QtWidgets.QPushButton("Restore defaults")
+        self.restore_button.setToolTip("Default value of every parameter (the random seed is kept)")
+        restore.addWidget(self.restore_button)
+        content.addLayout(restore)
+        self.restore_button.clicked.connect(lambda: (self.preset_combo.setCurrentIndex(0), self._on_preset(0)))
 
-        self.outputs_head = QtWidgets.QToolButton()
-        self.outputs_head.setCheckable(True)
-        self.outputs_head.setArrowType(QtCore.Qt.RightArrow)
-        self.outputs_head.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
-        self.outputs_head.setStyleSheet("QToolButton { border: none; font-weight: 600; color: %s; }" % MUTED)
+        content.addSpacing(4)
+        content.addWidget(studio_qt.separator())
+        content.addWidget(studio_qt.section_title("Outputs"))
+        self.outputs_group = studio_qt.Group("Channels", opened=False)
+        self.outputs_head = self.outputs_group.head
         self.outputs = QtWidgets.QTreeWidget()
         self.outputs.setHeaderLabels(["Output", "Channel"])
         self.outputs.setRootIsDecorated(False)
-        self.outputs.setMaximumHeight(170)
-        self.outputs.hide()
-        self.outputs_head.toggled.connect(lambda on: (self.outputs.setVisible(on), self.outputs_head.setArrowType(
-            QtCore.Qt.DownArrow if on else QtCore.Qt.RightArrow)))
-        root.addWidget(self.outputs_head)
-        root.addWidget(self.outputs)
+        self.outputs.setMaximumHeight(210)
+        self.outputs_group.body.addWidget(self.outputs)
+        content.addWidget(self.outputs_group)
+        content.addStretch(1)
 
-        bottom = QtWidgets.QHBoxLayout()
-        self.name = QtWidgets.QLineEdit()
-        self.name.setPlaceholderText("Material name")
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(body)
+        root.addWidget(scroll, 1)
+
+        bottom = QtWidgets.QFrame()
+        bottom.setObjectName("bar")
+        actions = QtWidgets.QHBoxLayout(bottom)
+        actions.setContentsMargins(10, 8, 10, 8)
+        actions.setSpacing(8)
+        self.status = ElidedLabel()
         self.live = QtWidgets.QCheckBox("Live")
-        self.live.setChecked(True)
+        self.live.setChecked(env_flag("SUBZERO_LIVE", True))
         self.live.setToolTip("Update the material in ArmorPaint after each change")
-        bottom.addWidget(QtWidgets.QLabel("Material"))
-        bottom.addWidget(self.name, 1)
-        bottom.addWidget(self.live)
-        root.addLayout(bottom)
-        self.live.toggled.connect(lambda on: (self._update_buttons(), on and self.dirty and self._commit()))
-
-        actions = QtWidgets.QHBoxLayout()
-        self.status = muted()
         self.duplicate_button = QtWidgets.QPushButton("Duplicate")
         self.duplicate_button.setToolTip("Send as a new material, in a new folder")
         self.send_button = QtWidgets.QPushButton("Send to ArmorPaint")
         self.send_button.setObjectName("primary")
         self.send_button.setDefault(True)
         actions.addWidget(self.status, 1)
+        actions.addWidget(self.live)
         actions.addWidget(self.duplicate_button)
         actions.addWidget(self.send_button)
-        root.addLayout(actions)
+        root.addWidget(bottom)
+        self.live.toggled.connect(lambda on: (self._update_buttons(), on and self.dirty and self._commit()))
         self.send_button.clicked.connect(self._send)
         self.duplicate_button.clicked.connect(lambda: self._send(duplicate=True))
 
@@ -932,6 +1576,7 @@ class SubzeroWindow(QtWidgets.QWidget):
         self.duplicate_button.setVisible(sent)
         self.duplicate_button.setEnabled(ready)
         self.reload_button.setEnabled(self.package is not None)
+        self.restore_button.setEnabled(self.graph is not None)
         self.live.setVisible(sent)
 
     # -- état et évènements d'ArmorPaint
@@ -942,6 +1587,9 @@ class SubzeroWindow(QtWidgets.QWidget):
             return
         self.state = data or {}
         self.test_log["state"] = self.state
+        self._read_origins()
+        self._sync_env()
+        self._make_color()
         sizes = [("Project (%d)" % self._project_res(), None)] + [(str(1 << n), n) for n in (9, 10, 11, 12)]
         self.size_combo.clear()
         for label, n in sizes:
@@ -988,15 +1636,158 @@ class SubzeroWindow(QtWidgets.QWidget):
 
     def _on_project_event(self, message):
         # Autre projet : le matériau envoyé n'y est plus ; le prochain envoi en crée un.
+        ocio = self.state.get("ocio")
         self.state.update(message.get("state") or {})
         self.material_dir = None
         self.material_name = None
         self.base_dir = None
+        self.applied_spaces = {}
         self._update_buttons()
+        if self.state.get("ocio") != ocio:  # l'état envoyé tient lieu d'évènement ocio
+            self._color_changed()
+
+    def _on_ocio_event(self, message):
+        # Configuration, affichage du viewport ou import OCIO changés dans ArmorPaint.
+        self.state["ocio"] = (message.get("state") or {}).get("ocio")
+        self._color_changed()
 
     def _on_host_gone(self):
         log("ArmorPaint closed the connection")
         QtWidgets.QApplication.instance().quit()
+
+    # -- couleur (lot E11)
+
+    @property
+    def host_mode(self):
+        """Vrai si ArmorPaint donne sa gestion couleur (état avec "ocio") ; faux sans lui : OCIO et STUDIO_OCIO_*."""
+        return "ocio" in self.state
+
+    def _managed_vars(self):
+        return SUBZERO_VARS if self.host_mode else COLOR_VARS
+
+    def env_file(self):
+        """studio.env où Save écrit : celui d'ArmorPaint, sinon celui de studio_env ; "" ou None sans fichier."""
+        if "env" in self.state:
+            return (self.state.get("env") or {}).get("file") or ""
+        return studio_env.write_target()
+
+    def _read_origins(self):
+        env = self.state.get("env")
+        if env is not None:
+            origins = dict(env.get("origins") or {})
+        else:
+            origins = {n: studio_env.origin(n) for n in COLOR_VARS if n in os.environ}
+        self.locked = {n for n, o in origins.items() if o == studio_env.ENVIRONMENT}
+        self.origins = origins
+
+    def _sync_env(self):
+        """Variables de couleur relues dans studio.env : ArmorPaint ne l'a lu qu'à son démarrage, et un réglage
+        enregistré depuis doit compter sans le relancer. Celles de l'environnement restent."""
+        try:
+            found = studio_env.defined()
+        except OSError as e:
+            log("studio.env: %s" % e)
+            return
+        for name in self._managed_vars():
+            if name in self.locked:
+                continue
+            if name in found:
+                os.environ[name], self.origins[name] = found[name]
+            else:
+                os.environ.pop(name, None)
+                self.origins.pop(name, None)
+
+    def _make_color(self):
+        self.color = subzero_color.Color(host=self.state.get("ocio") if self.host_mode else None)
+        c = self.color
+        log("color: %s" % (c.error or "%s (%s, %s)" % (c.name, c.config_source, c.origin)))
+        for w in c.warnings:
+            log("color: %s" % w)
+        self.params.set_color(c)
+        self.settings_button.setToolTip("Color spaces of the maps and colors (OCIO)" + ("\n" + c.error if c.error else ""))
+
+    def _source(self, channel):
+        """Espace de ce qu'écrit sbsrender pour le canal, None sans OCIO."""
+        return self.color.source(channel) if self.color.ready else None
+
+    def plan(self):
+        """{canal: (source, cible, erreur)} de tous les canaux ; {} sans OCIO."""
+        if not self.color.ready:
+            return {}
+        return self.color.plan([(ch, CHANNEL_SUFFIX[ch]) for ch in CHANNEL_LABEL])
+
+    def _color_key(self):
+        linked = {ch for _, ch in self.linked()}
+        return (self.color.config_source if self.color.ready else None,
+                sorted((ch, dst) for ch, (_, dst, _) in self.plan().items() if ch in linked))
+
+    def _color_changed(self):
+        """Configuration ou réglages changés : vignettes et nuanciers revus ; le matériau envoyé est rendu à nouveau si
+        l'espace d'une de ses cartes change (tout de suite avec Live, sinon au prochain Update)."""
+        before = self._color_key()
+        self._make_color()
+        self._refresh_thumbs()
+        if self.settings is not None and self.settings.isVisible():
+            self.settings.reload()
+        if self._color_key() != before and self.material_dir is not None:
+            self.dirty = True
+            self._update_buttons()
+            if self.live.isChecked():
+                self._commit()
+
+    def _refresh_thumbs(self):
+        if self.thumb_files is None:
+            return
+        files, spaces = self.thumb_files
+        self._show_thumbs(load_thumbs({ch: p for ch, p in files.items() if os.path.isfile(p)}, self.color, spaces))
+
+    def _show_settings(self):
+        if self.settings is None:
+            self.settings = SettingsDialog(self)
+        else:
+            self.settings.reload()
+        self.settings.show()
+        self.settings.raise_()
+        self.settings.activateWindow()
+
+    def apply_settings(self, desired, save=False):
+        """desired : {variable: valeur, None pour le défaut}. Change les variables de la fenêtre (pas celles de
+        l'environnement) et, avec save, les écrit dans studio.env. Rend un message d'erreur, None si tout va bien."""
+        editable = {v: (x or None) for v, x in desired.items() if v not in self.locked}
+        for var, value in editable.items():
+            if value is None:
+                os.environ.pop(var, None)
+                self.origins.pop(var, None)
+            elif os.environ.get(var) != value:
+                os.environ[var] = value
+                self.origins[var] = WINDOW
+        error = None
+        if save:
+            target = self.env_file()
+            if not target:
+                error = "no studio.env to write: $STUDIO_ENV is empty"
+            else:
+                try:
+                    written = studio_env.store(target, editable)
+                    log("%s: %s" % (target, ", ".join("%s=%s" % (k, "" if v is None else v) for k, v in written.items())
+                                    or "already up to date"))
+                    self._sync_env()
+                except (OSError, ValueError) as e:
+                    error = "could not write %s: %s" % (target, e)
+        self.test_log.setdefault("settings", []).append({"desired": desired, "save": save, "error": error})
+        self._color_changed()
+        return error
+
+    def _color_log(self):
+        c = self.color
+        return {"ready": c.ready, "error": c.error, "config": c.config_source, "name": c.name, "origin": c.origin,
+                "display": c.display, "view": c.view, "look": c.look, "viewport": c.viewport, "warnings": c.warnings,
+                "plan": {ch: list(v) for ch, v in self.plan().items()},
+                "picking": list(c.picking()) if c.ready else None, "origins": self.origins,
+                "locked": sorted(self.locked), "file": self.env_file(),
+                "env": {v: os.environ[v] for v in COLOR_VARS if v in os.environ},
+                "applied": self.applied_spaces, "thumbs": self.thumb_files[1] if self.thumb_files else None,
+                "swatches": {k: r.editor.shown for k, r in self.params.rows.items() if isinstance(r.editor, ColorEditor)}}
 
     # -- travaux
 
@@ -1028,11 +1819,13 @@ class SubzeroWindow(QtWidgets.QWidget):
         elif job.kind == "open":
             self._opened(job, result)
         elif job.kind in ("preview", "final"):
+            self.thumb_files = (result["files"], result["spaces"])
             self._show_thumbs(result["thumbs"])
             if job.kind == "preview":
                 self._status("Preview %d px in %.2f s" % (1 << PREVIEW_SIZE, result["seconds"]))
             self.test_log.setdefault("renders", []).append({"kind": job.kind, "seconds": result["seconds"],
-                                                           "files": result["files"]})
+                                                           "files": result["files"], "spaces": result["spaces"],
+                                                           "converted": result.get("converted")})
             self._test_next()
 
     def _failed(self, job, error):
@@ -1125,12 +1918,16 @@ class SubzeroWindow(QtWidgets.QWidget):
             self.material_dir = info["folder"]
             self.material_name = recipe.get("name")
             self.overrides = dict(recipe.get("overrides") or {})
+            self._set_format(recipe.get("format") or "tga")  # v0 : TGA
             self._set_graph(graph, values=recipe.get("values") or {}, entries=recipe.get("entries") or {},
                             preset=recipe.get("preset"), size=recipe.get("size"))
             self.name.setText(recipe.get("name") or graph.get("label") or "")
             files = {ch: os.path.join(self.material_dir, f) for ch, f in (recipe.get("files") or {}).items()
                      if os.path.isfile(os.path.join(self.material_dir, f))}
-            self._show_thumbs(load_thumbs(files))
+            self.applied_spaces = recipe_spaces(recipe)
+            spaces = {ch: self.applied_spaces.get(ch) or self._source(ch) for ch in files}
+            self.thumb_files = (files, spaces)
+            self._show_thumbs(load_thumbs(files, self.color, spaces))
             self.dirty = False
             self._status("Editing %s" % self.material_name)
         elif keep is not None:
@@ -1141,7 +1938,9 @@ class SubzeroWindow(QtWidgets.QWidget):
         else:
             self.material_dir = None
             self.material_name = None
+            self.applied_spaces = {}
             self.overrides = {}
+            self._set_format(subzero_render.default_format())
             self._set_graph(graph)
             self.name.setText(graph.get("label") or os.path.splitext(os.path.basename(pkg["path"]))[0])
             self._commit()
@@ -1232,6 +2031,16 @@ class SubzeroWindow(QtWidgets.QWidget):
         self.size = self.size_combo.itemData(index)
         self._changed()
 
+    def _set_format(self, fmt):
+        self.fmt = fmt if fmt in subzero_render.FORMATS else subzero_render.default_format()
+        self.format_combo.setCurrentIndex(max(0, self.format_combo.findData(self.fmt)))
+
+    def _on_format(self, index):
+        fmt = self.format_combo.itemData(index)
+        if fmt != self.fmt:
+            self.fmt = fmt
+            self._changed()
+
     def _on_param(self, ident, value, mode):
         by_id = {i["identifier"]: i for i in self.graph["inputs"]} if self.graph else {}
         if ident in by_id and by_id[ident]["type"] == "image":
@@ -1284,7 +2093,7 @@ class SubzeroWindow(QtWidgets.QWidget):
         self.outputs.blockSignals(False)
         linked = sum(1 for _, ch, _ in rows if ch)
         unlinked = len(rows) - linked
-        self.outputs_head.setText(" Outputs (%d linked%s)" % (linked, ", %d not linked" % unlinked if unlinked else ""))
+        self.outputs_head.setText("Channels (%d linked%s)" % (linked, ", %d not linked" % unlinked if unlinked else ""))
         self._update_buttons()
 
     def _on_channel(self, output, channel):
@@ -1314,6 +2123,8 @@ class SubzeroWindow(QtWidgets.QWidget):
         values, entries = render_values(graph, self.values), dict(self.entries)
         outs = self.linked()
         out_dir = self.preview_dir
+        color = self.color
+        spaces = {ch: self._source(ch) for _, ch in outs}  # aperçu tel que sbsrender l'écrit
         self._status("Rendering preview...")
 
         def job(track, step):
@@ -1321,7 +2132,8 @@ class SubzeroWindow(QtWidgets.QWidget):
                                         size=(PREVIEW_SIZE, PREVIEW_SIZE), outputs=[o for o, _ in outs],
                                         names={o: ch for o, ch in outs}, cancel=track)
             files = {ch: res["files"][o] for o, ch in outs}
-            return {"files": files, "thumbs": load_thumbs(files), "seconds": res["seconds"]}
+            return {"files": files, "spaces": spaces, "thumbs": load_thumbs(files, color, spaces),
+                    "seconds": res["seconds"]}
 
         self._submit(job, "preview")
 
@@ -1337,8 +2149,11 @@ class SubzeroWindow(QtWidgets.QWidget):
         outs = self.linked()
         prefix = os.path.basename(folder.rstrip("/"))
         names = {o: "%s_%s" % (prefix, CHANNEL_SUFFIX[ch]) for o, ch in outs}
-        exr = [o for o, ch in outs if ch in DATA_EXR] if int(self.state.get("bits", 8)) > 8 else []
+        fmt = self.fmt
         size = self._final_size()
+        color = self.color
+        self.final_seq += 1
+        seq = self.final_seq
         self._status("Rendering %d px..." % (1 << size[0]))
         self.dirty = False
         self._update_buttons()
@@ -1346,18 +2161,22 @@ class SubzeroWindow(QtWidgets.QWidget):
         def job(track, step):
             os.makedirs(folder, exist_ok=True)
             res = subzero_render.render(sbsar, graph, folder, tools, values=values, entries=entries, size=size,
-                                        outputs=[o for o, _ in outs], names=names, exr=exr, cancel=track)
+                                        outputs=[o for o, _ in outs], names=names, fmt=fmt, cancel=track)
             files = {ch: res["files"][o] for o, ch in outs}
-            if "base" in files:  # décalque : alpha de la couleur vers l'opacité, faute de sortie opacité
-                opacity = os.path.join(folder, "%s_%s.tga" % (prefix, CHANNEL_SUFFIX["opacity"]))
+            if "base" in files and subzero_render.FORMATS[fmt]["alpha"]:  # décalque : alpha de la couleur vers
+                # l'opacité, faute de sortie opacité
+                opacity = os.path.join(folder, "%s_%s%s" % (prefix, CHANNEL_SUFFIX["opacity"],
+                                                            subzero_render.FORMATS[fmt]["ext"]))
                 if split_alpha(files["base"], None if "opacity" in files else opacity) and "opacity" not in files:
                     files["opacity"] = opacity
                 elif "opacity" not in files and os.path.isfile(opacity):
                     os.remove(opacity)  # d'un rendu précédent
-            data = {"files": files, "seconds": res["seconds"], "size": size, "warnings": res["warnings"]}
+            spaces, notes, converted = convert_maps(color, files, fmt)
+            data = {"files": files, "seconds": res["seconds"], "size": size, "format": fmt, "warnings": res["warnings"],
+                    "spaces": spaces, "color_warnings": notes, "converted": converted, "seq": seq}
             step(data)
             data = dict(data)
-            data["thumbs"] = load_thumbs(files)
+            data["thumbs"] = load_thumbs(files, color, spaces)
             return data
 
         self._submit(job, "final", folder=folder, action=action, outs=outs)
@@ -1370,8 +2189,7 @@ class SubzeroWindow(QtWidgets.QWidget):
         except OSError as e:
             self._status("Could not write %s: %s" % (RECIPE, e), ERROR)
             return
-        args = {"dir": folder, "name": self.name.text().strip() or self.graph.get("label") or "Material",
-                "links": links(data["files"])}
+        args = {"dir": folder, "name": self.name.text().strip() or self.graph.get("label") or "Material"}
         request = (action, args, data)
         if self.request_busy:
             self.pending = request  # le plus récent seulement
@@ -1380,6 +2198,8 @@ class SubzeroWindow(QtWidgets.QWidget):
 
     def _request(self, request):
         action, args, data = request
+        # Espaces du rendu précédent au moment de l'envoi : une requête en attente suit celle qui la précède.
+        args["links"] = links(data["files"], data["spaces"], self.applied_spaces if action == "update" else None)
         self.request_busy = True
         t0 = time.time()
 
@@ -1395,9 +2215,16 @@ class SubzeroWindow(QtWidgets.QWidget):
                 if action == "create":
                     self.material_dir = args["dir"]
                     self.material_name = (reply or {}).get("material") or args.get("name")
+                self.applied_spaces = dict(data["spaces"])
+                if self.pending is None and data.get("seq") == self.final_seq:
+                    entry["deleted"] = self._delete_stale(args["dir"], data["files"], (reply or {}).get("kept") or [])
                 verb = {"create": "Sent", "update": "Updated"}.get(action, "Sent")
-                self._status("%s %s: %d px in %.2f s, ArmorPaint %.2f s" % (
-                    verb, self.material_name or "", 1 << data["size"][0], data["seconds"], took), SUCCESS)
+                notes = data.get("color_warnings") or []
+                self._status("%s %s: %d px in %.2f s, ArmorPaint %.2f s%s" % (
+                    verb, self.material_name or "", 1 << data["size"][0], data["seconds"], took,
+                    " \u00b7 " + notes[0] + (" (+%d)" % (len(notes) - 1) if len(notes) > 1 else "") if notes else ""),
+                    WARNING if notes else SUCCESS)
+                self.status.setToolTip("\n".join(notes))
             self._update_buttons()
             if self.pending is not None:
                 request, self.pending = self.pending, None
@@ -1406,6 +2233,20 @@ class SubzeroWindow(QtWidgets.QWidget):
                 self._test_next()
 
         self.channel.request(action, args, done)
+
+    def _delete_stale(self, folder, files, kept):
+        """Après la réponse au dernier rendu final : fichiers d'un rendu précédent (autre format, sortie retirée), dont
+        ArmorPaint a retiré les textures ; ceux qu'un autre nœud utilise encore (kept) restent."""
+        deleted = []
+        for path in stale_files(folder, list(files.values()) + list(kept)):
+            try:
+                os.remove(path)
+                deleted.append(os.path.basename(path))
+            except OSError as e:
+                log("could not delete %s: %s" % (path, e))
+        if deleted:
+            log("deleted %s" % ", ".join(deleted))
+        return deleted
 
     def _write_recipe(self, folder, outs, data):
         pkg_path = self.package["path"]
@@ -1420,9 +2261,12 @@ class SubzeroWindow(QtWidgets.QWidget):
                        if v != next((i["default"] for i in self.graph["inputs"] if i["identifier"] == k), None)},
             "entries": dict(self.entries),
             "size": self.size,
+            "format": data["format"],
             "outputs": {o: ch for o, ch in outs},
             "overrides": dict(self.overrides),
             "files": {ch: os.path.basename(p) for ch, p in data["files"].items()},
+            "color": {"config": self.color.config_source if self.color.ready else "", "name": self.color.name,
+                      "spaces": dict(data["spaces"])},
             "sbsrender": self.tools.get("version") if self.tools else None,
             "rendered": {"size": [1 << data["size"][0], 1 << data["size"][1]], "seconds": data["seconds"],
                          "date": datetime.datetime.now().isoformat(timespec="seconds")},
@@ -1439,7 +2283,6 @@ class SubzeroWindow(QtWidgets.QWidget):
                 image.setPixmap(pix)
             elif ch in linked:
                 image.setPixmap(QtGui.QPixmap())
-                image.setText("EXR" if ch in DATA_EXR and int(self.state.get("bits", 8)) > 8 else "")
 
     # -- envoi
 
@@ -1503,6 +2346,11 @@ class SubzeroWindow(QtWidgets.QWidget):
     def _run_test(self):
         """Réglages de l'essai, puis action ; la suite vient de _test_next, à la fin de chaque étape."""
         t = self.test
+        if "settings" in t and not t.get("_settings"):
+            t["_settings"] = True
+            desired = dict(t["settings"])
+            save = bool(desired.pop("save", False))
+            self.test_log["settings_error"] = self.apply_settings(desired, save=save)
         if self.graph is None:
             self._finish_test()
             return
@@ -1521,6 +2369,8 @@ class SubzeroWindow(QtWidgets.QWidget):
         self._remap()
         if "size" in t:
             self.size = t["size"]
+        if "format" in t:
+            self._set_format(t["format"])
         if "live" in t:
             self.live.setChecked(bool(t["live"]))
         self.soon.stop()
@@ -1561,12 +2411,21 @@ class SubzeroWindow(QtWidgets.QWidget):
             "material_name": self.material_name,
             "status": self.status.text(),
             "values": self.values,
-            "shown": sorted(k for k, r in self.params.rows.items() if not r.label.isHidden()),
+            "shown": sorted(k for k, r in self.params.rows.items() if not r.box.isHidden()),
             "banner": self.banner.text() if not self.banner.isHidden() else "",
             "tools": self.tools,
+            "color": self._color_log(),
         })
         if t.get("screenshot"):
+            QtWidgets.QApplication.processEvents()  # dispositions à jour (vignettes montrées juste avant)
             self.grab().save(t["screenshot"])
+        if t.get("settings_screenshot"):
+            self._show_settings()
+            QtWidgets.QApplication.processEvents()
+            self.settings.grab().save(t["settings_screenshot"])
+            self.test_log["settings_panel"] = {"banner": self.settings.banner.text() if not self.settings.banner.isHidden()
+                                               else "", "fields": sorted(self.settings.fields),
+                                               "editable": sorted(self.settings.desired())}
         if t.get("result"):
             with open(t["result"], "w") as f:
                 json.dump(self.test_log, f, indent=1, default=str)
@@ -1574,7 +2433,7 @@ class SubzeroWindow(QtWidgets.QWidget):
 
 
 def main():
-    app, mac, channel = studio_qt.start("subzero")
+    app, mac, channel = studio_qt.start("subzero", painter=True)
     test = None
     if os.environ.get("SUBZERO_TEST"):
         with open(os.environ["SUBZERO_TEST"]) as f:

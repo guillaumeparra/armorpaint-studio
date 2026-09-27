@@ -22,6 +22,7 @@ W=${1:-$(mktemp -d)}
 mkdir -p "$W"
 W=$(cd "$W" && pwd)
 [ -x "$APP" ] || { echo "ArmorPaint not found: $APP" >&2; exit 1; }
+export STUDIO_ENV= # lot E5 : aucun studio.env, pas même celui de l'utilisateur
 python3 -c "import PIL" 2>/dev/null || { echo "python3 with Pillow needed" >&2; exit 1; }
 FAIL=0
 ok() { echo "ok   $1"; }

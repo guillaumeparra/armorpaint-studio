@@ -32,6 +32,7 @@ W=${1:-$(mktemp -d)}
 mkdir -p "$W"
 W=$(cd "$W" && pwd)
 [ -x "$APP" ] || { echo "ArmorPaint not found: $APP" >&2; exit 1; }
+export STUDIO_ENV= # lot E5 : aucun studio.env, pas même celui de l'utilisateur
 "$PY" -c "import PySide6" 2>/dev/null || { echo "PySide6 not found for $PY (tools/setup_shotgrid.sh)" >&2; exit 1; }
 FAIL=0
 ok() { echo "ok   $1"; }

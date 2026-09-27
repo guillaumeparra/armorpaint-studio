@@ -17,6 +17,7 @@ W=${1:-$(mktemp -d)}
 mkdir -p "$W"
 W=$(cd "$W" && pwd)
 [ -x "$APP" ] || { echo "ArmorPaint not found: $APP" >&2; exit 1; }
+export STUDIO_ENV= # lot E5 : aucun studio.env, pas même celui de l'utilisateur
 "$PY" -c 'import PyOpenColorIO, numpy, OpenEXR, tifffile, PIL' 2> /dev/null ||
 	{ echo "venv incomplet : lancer .tests/ocio.sh puis $EXT/.ocio/venv/bin/pip install numpy OpenEXR tifffile pillow" >&2; exit 1; }
 FAIL=0

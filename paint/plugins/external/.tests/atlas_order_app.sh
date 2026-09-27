@@ -12,6 +12,7 @@ W=${1:-$(mktemp -d)}
 mkdir -p "$W"
 W=$(cd "$W" && pwd)
 [ -x "$APP" ] || { echo "ArmorPaint not found: $APP" >&2; exit 1; }
+export STUDIO_ENV= # lot E5 : aucun studio.env, pas même celui de l'utilisateur
 FAIL=0
 check() { if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1"; echo "     attendu : $3"; echo "     obtenu  : $2"; FAIL=1; fi; }
 rm -f "$W"/order.* "$W"/reload.*

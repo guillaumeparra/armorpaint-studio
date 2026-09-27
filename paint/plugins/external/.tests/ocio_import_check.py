@@ -4,6 +4,7 @@
 #
 #   python ocio_import_check.py make <dossier>
 #   python ocio_import_check.py convert <dump> <image> <espace source>   pixels = PyOpenColorIO, puis encodage d'ArmorPaint
+#       <image> : sa référence <image>.npy (make), sinon un EXR, lu tel quel (OpenEXR)
 #       --working=<espace> : vers cet espace de travail (défaut : Linear Rec.709 (sRGB), l'automatique)
 #   python ocio_import_check.py same <dump> <image>                       pixels intacts (donnée, espace de travail)
 #   python ocio_import_check.py differ <dump> <image>                     pixels changés (au moins un canal)
@@ -159,7 +160,16 @@ def dump(path):
 
 
 def reference(image):
-    return np.load(image + ".npy")
+    if os.path.exists(image + ".npy") or not image.lower().endswith(".exr"):
+        return np.load(image + ".npy")
+    # EXR sans référence (rendu de subzero, lot E11) : ses canaux R G B A, tels que le fichier les donne.
+    import OpenEXR
+
+    with OpenEXR.File(image, separate_channels=True) as f:
+        ch = f.channels()
+        rgb = [np.asarray(ch[c].pixels, np.float32) for c in "RGB"]
+        a = np.asarray(ch["A"].pixels, np.float32) if "A" in ch else np.ones_like(rgb[0])
+    return np.stack(rgb + [a], axis=-1)
 
 
 def encode_u8(x):

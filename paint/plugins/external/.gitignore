@@ -7,3 +7,5 @@ __pycache__/
 assets/libstudio_ocio.so
 # Démo ShotGrid : le venv PySide6 est propre à la machine, recréé par tools/setup_shotgrid.sh.
 .shotgrid/venv/
+# subzero (E11) : le Python de la fenêtre, propre à la machine, recréé par tools/setup_subzero.sh.
+.subzero/

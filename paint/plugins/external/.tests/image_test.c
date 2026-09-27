@@ -1,5 +1,7 @@
 // Banc du lot B2 (studio_image.c) : chaque image encodée est relue par libpng ou libtiff et comparée à la source.
+// Patch tiff-lzw : les TIFF 8 et 16 bits sont aussi relus par l'importeur d'ArmorPaint (plugins/io_tiff/io_tiff.c).
 #include "../studio_image.h"
+#include "stubs.h"
 #include "iron_image.h" // iron_encode_png, iron_encode_jpg (base/sources/iron_image.c, WITH_IMAGE_WRITE)
 #include <png.h>
 #include <pthread.h>
@@ -10,6 +12,7 @@
 #include <tiffio.h>
 
 unsigned char *iron_deflate_raw(unsigned char *data, int data_len, int *out_len, int quality);
+void          *io_tiff_parse(uint8_t *buf, size_t len);
 
 static int failures = 0;
 
@@ -156,6 +159,33 @@ static int test_png(int w, int h, int c, int bits, int mode, bool threads, const
 	return bad;
 }
 
+static uint32_t le32(const uint8_t *p) {
+	return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+static void put_le32(uint8_t *p, uint32_t v) {
+	for (int i = 0; i < 4; ++i) {
+		p[i] = (uint8_t)(v >> (8 * i));
+	}
+}
+
+// StripByteCounts (279) d'un TIFF de studio_tiff_encode divisés par deux : bandes déclarées plus courtes que leurs lignes.
+static void halve_strip_counts(uint8_t *tif) {
+	uint32_t ifd = le32(tif + 4);
+	int      n   = tif[ifd] | tif[ifd + 1] << 8;
+	for (int i = 0; i < n; ++i) {
+		uint8_t *e = tif + ifd + 2 + 12 * i;
+		if ((e[0] | e[1] << 8) != 279) {
+			continue;
+		}
+		uint32_t count = le32(e + 4);
+		uint8_t *v     = count == 1 ? e + 8 : tif + le32(e + 8);
+		for (uint32_t k = 0; k < count; ++k) {
+			put_le32(v + 4 * k, le32(v + 4 * k) / 2);
+		}
+	}
+}
+
 static int test_tiff(int w, int h, int c, int bits, int mode, studio_tiff_compression_t comp, bool threads, const char *dir) {
 	void          *pixels = make_pixels(w, h, c, bits, mode);
 	studio_image_t img    = {.pixels = pixels, .width = w, .height = h, .channels = c, .bits = bits, .level = 5,
@@ -174,9 +204,30 @@ static int test_tiff(int w, int h, int c, int bits, int mode, studio_tiff_compre
 	FILE *f = fopen(path, "wb");
 	fwrite(data, 1, size, f);
 	fclose(f);
+
+	int bad = 0;
+	// Importeur d'ArmorPaint : RGBA 8 bits (gris recopié, alpha 255 sans 4e canal, 16 bits divisés par 257). Pas de
+	// flottants : il ne connaît pas le prédicteur 3.
+	if (bits != 32) {
+		const uint8_t  *p8  = pixels;
+		const uint16_t *p16 = pixels;
+		stub_quiet          = 1;
+		bool ok             = io_tiff_parse(data, size) != NULL && stub_last_texture.width == w && stub_last_texture.height == h;
+		for (int i = 0; ok && i < w * h; ++i) {
+			uint8_t want[4] = {0, 0, 0, 255};
+			for (int k = 0; k < 4; ++k) {
+				int src = c == 1 ? (k < 3 ? 0 : -1) : k < c ? k : -1;
+				if (src >= 0) {
+					want[k] = bits == 8 ? p8[(size_t)i * c + src] : (uint8_t)(p16[(size_t)i * c + src] / 257);
+				}
+			}
+			ok = memcmp((uint8_t *)stub_last_texture.pixels + (size_t)i * 4, want, 4) == 0;
+		}
+		CHECK(ok, "io_tiff pixels differ (%s)", path);
+		bad |= !ok;
+	}
 	free(data);
 
-	int   bad = 0;
 	TIFF *t   = TIFFOpen(path, "r");
 	CHECK(t != NULL, "libtiff open %s", path);
 	if (t == NULL) {
@@ -292,6 +343,50 @@ int main(int argc, char **argv) {
 			free(px.buffer);
 			count += 2;
 		}
+	}
+
+	// Patch tiff-lzw : bandes LZW et non compressées abîmées (octets changés, ou taille déclarée trop courte : 1 cas sur 4).
+	// L'importeur d'ArmorPaint lisait first[-1] et débordait sa pile de décodage sur un code invalide, et au-delà de la
+	// bande quand elle était trop courte : ASan s'arrête ici sans le patch. Il doit s'arrêter proprement, image partielle.
+	// Les bandes suivent l'en-tête (8 octets) ; les tables et l'IFD, à la fin, ne sont pas touchés.
+	{
+		int                       mutations = 0;
+		studio_tiff_compression_t comps[]   = {STUDIO_TIFF_LZW, STUDIO_TIFF_NONE};
+		for (int z = 0; z < 2; ++z) {
+			for (int ci = 0; ci < 3; ++ci) {
+				int            ch     = ci == 0 ? 1 : ci == 1 ? 3 : 4;
+				void          *pixels = make_pixels(300, 70, ch, 8, 0);
+				studio_image_t img    = {.pixels = pixels, .width = 300, .height = 70, .channels = ch, .bits = 8, .level = 5,
+				                         .tiff_compression = comps[z], .software = "studio test"};
+				void          *data   = NULL;
+				size_t         size   = 0;
+				char           e[256];
+				if (!studio_tiff_encode(&img, &data, &size, e, sizeof(e))) {
+					CHECK(0, "tiff encode for mutations: %s", e);
+					free(pixels);
+					continue;
+				}
+				uint8_t *copy = malloc(size);
+				for (int m = 0; m < 400; ++m) {
+					memcpy(copy, data, size);
+					if (m % 4 == 3) {
+						halve_strip_counts(copy);
+					}
+					else {
+						for (int k = 0, n = 1 + rnd() % 8; k < n; ++k) {
+							copy[8 + rnd() % (size - 512)] = (uint8_t)rnd();
+						}
+					}
+					io_tiff_parse(copy, size);
+					mutations++;
+				}
+				free(copy);
+				free(data);
+				free(pixels);
+			}
+		}
+		stub_quiet = 0;
+		printf("  io_tiff : %d mutations sans erreur ASan\n", mutations);
 	}
 
 	// Erreurs.

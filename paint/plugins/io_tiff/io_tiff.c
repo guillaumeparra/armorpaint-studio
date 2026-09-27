@@ -121,13 +121,17 @@ static void lzw_decode(uint8_t *in, size_t in_len, uint8_t *out, size_t out_len)
 		int stack_top = 0;
 		int cur       = code;
 
-		if (code >= nxt) {
+		// STUDIO-PATCH(tiff-lzw): only code == nxt (KwKwK) may be past the table, and only after a first code;
+		// anything else (corrupt strip) read first[-1] and walked uninitialized entries until the stack overflowed.
+		if (code > nxt || (code >= 258 && old_code < 0))
+			return;
+		if (code == nxt) {
 			// Special case: new code equals next table entry
 			stack[stack_top++] = first[old_code];
 			cur                = old_code;
 		}
 
-		while (prefix[cur] != 0xFFFF && stack_top < 4096) {
+		while (prefix[cur] != 0xFFFF && stack_top < 4095) { // STUDIO-PATCH(tiff-lzw): room for the root below
 			stack[stack_top++] = suffix[cur];
 			cur                = prefix[cur];
 		}
@@ -138,7 +142,10 @@ static void lzw_decode(uint8_t *in, size_t in_len, uint8_t *out, size_t out_len)
 			suffix[nxt] = stack[stack_top - 1]; // first char of current string
 			first[nxt]  = first[old_code];
 			nxt++;
-			if (nxt == (1 << bit_len) && bit_len < 12)
+			// STUDIO-PATCH(tiff-lzw): TIFF LZW widens codes one entry early ("early change", as libtiff writes and
+			// reads it): at 511, 1023 and 2047, not at 512, 1024 and 2048 like GIF. Waiting one more entry read every
+			// code after the 510th with the wrong width.
+			if (nxt == (1 << bit_len) - 1 && bit_len < 12)
 				bit_len++;
 		}
 
@@ -190,7 +197,7 @@ void *io_tiff_parse(uint8_t *buf, size_t buf_size) {
 	uint16_t bps_arr[4]     = {8, 8, 8, 8};
 	uint16_t compression    = COMP_NONE;
 	uint16_t photometric    = 2;
-	uint16_t spp            = 3;
+	uint16_t spp            = 1; // STUDIO-PATCH(tiff-lzw): TIFF 6.0 default; Qt omits the tag for grayscale
 	uint16_t predictor      = 1;
 	uint32_t rows_per_strip = 0xFFFFFFFF;
 	uint32_t tile_w = 0, tile_h = 0;
@@ -289,6 +296,8 @@ void *io_tiff_parse(uint8_t *buf, size_t buf_size) {
 
 	if (width == 0 || height == 0)
 		return NULL;
+	if (photometric == 2 && spp < 3) // STUDIO-PATCH(tiff-lzw): RGB reads 3 samples a pixel, keep rows that wide
+		spp = 3;
 
 	uint8_t *rgba      = (uint8_t *)calloc((size_t)width * height * 4, 1);
 	uint32_t bps_bytes = (bps + 7) / 8;
@@ -326,6 +335,8 @@ void *io_tiff_parse(uint8_t *buf, size_t buf_size) {
 
 		if (compression == COMP_NONE) {
 			raw = buf + off;
+			if (blen < expected_sz) // STUDIO-PATCH(tiff-lzw): short strip, read only its whole rows
+				blk_h = row_stride > 0 ? (uint32_t)(blen / row_stride) : 0;
 		}
 		else if (compression == COMP_PACKBITS) {
 			raw      = (uint8_t *)malloc(expected_sz);

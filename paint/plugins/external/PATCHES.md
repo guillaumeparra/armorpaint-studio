@@ -2115,3 +2115,46 @@ textures des objets supprimés (`slot_layer_create`), puis `slot_layer_swap` les
 tuile sauvée (`util_udim_swap_layers`). `udim_tiles_app.sh`, section 11 : Merge Group d'un groupe à masque de groupe
 puis Undo, Redo et Undo ; pile, tuiles de chaque calque et du masque, flatten. `studio_atlas.c` : `merge_group` du
 `mn_studio_layer_op` de d2 passe par le menu, `studio_layer_tree` gardé.
+
+---
+
+## tiff-lzw
+
+| | |
+|---|---|
+| Fichier | `paint/plugins/io_tiff/io_tiff.c` (`lzw_decode`, `io_tiff_parse`) |
+| Commit studio | à venir, sur la branche `subzero-e5` (lot E6) |
+| Validé contre | upstream `85f6cf1c` (2026-09-27) |
+| Constaté | 2026-09-27, par `subzero_app.sh` (lot E6) ; présent en `85f6cf1c` |
+
+**Bug.** L'importeur TIFF d'ArmorPaint plante (SIGBUS) sur un TIFF LZW ordinaire : les TIFF de `sbsrender` (menu
+Format de subzero), ceux de Photoshop, de libtiff, et ceux de notre export studio en LZW. Trois défauts :
+1. **« early change » ignoré.** Le LZW du TIFF élargit ses codes une entrée plus tôt que celui du GIF : 10 bits dès
+   que la table atteint 511 entrées, puis 11 et 12 bits à 1023 et 2047 (libtiff écrit et lit ainsi, `tif_lzw.c`).
+   `lzw_decode` attendait 512, 1024 et 2048. Après le 510e code, tout est lu avec la mauvaise largeur : l'image est
+   fausse, et des codes invalides arrivent ;
+2. **code invalide non rejeté.** Un code au-delà de la table, ou ≥ 258 juste après un Clear, lisait `first[-1]` et
+   `prefix[-1]`, puis suivait des entrées non initialisées jusqu'à remplir sa pile de 4096 octets et écrire
+   `stack[4096]` (débordement de pile) ;
+3. **SamplesPerPixel absent pris pour 3** au lieu de 1, la valeur par défaut du TIFF 6.0. Qt omet ce tag pour un
+   TIFF gris (l'opacité d'un décalque subzero en TIFF) : l'importeur lisait trois fois trop, au-delà du fichier.
+
+**Correctif.** Largeur augmentée quand la table atteint `(1 << bits) - 1` entrées. Un code `> nxt`, ou `≥ 258` sans
+code précédent, arrête le décodage de la bande (image partielle au lieu d'une lecture hors bornes). La pile garde
+une place pour la racine. SamplesPerPixel vaut 1 par défaut ; en RGB (interprétation 2), il est porté à 3 au moins,
+la largeur que lit la conversion. Une bande non compressée plus courte que ses lignes n'est lue que sur ses lignes
+entières.
+
+**Test.** `.tests/export.sh` (`image_test.c`) : les 272 TIFF 8 et 16 bits de notre encodeur (1, 3 et 4 canaux ; sans
+compression, LZW et deflate ; tailles 1×1 à 1000×700, dont bruit et aplats) relus par `io_tiff_parse` et comparés
+aux pixels source, plus 2 400 bandes abîmées (octets changés, tailles déclarées divisées par deux) sous ASan/UBSan.
+Sans le patch, même base : pixels faux dès le 17×33 LZW, puis UBSan arrête le banc sur `first[-1]`. Dans l'app :
+`subzero_app.sh`, section 5, importe les TIFF de `sbsrender` (couleur et gris, LZW) et ceux de la fenêtre (Qt, gris
+sans SamplesPerPixel) ; décodés à l'identique de libtiff (lecture de Qt), vérifié à part.
+
+**Signes que l'upstream l'a corrigé.** `(1 << bit_len) - 1` (ou un `maxcode` à la libtiff) dans `lzw_decode`, un
+rejet de `code > nxt`, ou `spp = 1` par défaut. Rejouer `export.sh` sur `upstream` sans le patch.
+
+**Non couvert.** TIFF flottants à prédicteur 3 (non géré par l'importeur : pixels faux, sans lecture hors bornes),
+TIFF « old-style » LZW (bits inversés, antérieur à libtiff 5), IFD abîmé (l'analyse de l'IFD n'est pas bornée :
+offsets, nombre d'entrées, tables).

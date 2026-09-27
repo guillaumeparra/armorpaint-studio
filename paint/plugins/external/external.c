@@ -1,6 +1,7 @@
 #include "studio.h"
 #include "studio_atlas.h"
 #include "studio_audit.h"
+#include "studio_env.h"
 #include "studio_batch.h"
 #include "studio_exec.h"
 #include "studio_export.h"
@@ -24,6 +25,7 @@
 // des lots (exr, export, ocio, shotgrid).
 void external_init(void) {
 	iron_log("studio: external %s loaded", STUDIO_VERSION);
+	studio_env_init(); // en premier : studio.env donne des variables lues par les modules suivants (lot E5)
 	studio_prefs_init();
 	studio_project_init();
 	studio_audit_init(); // avant le sidecar ShotGrid, qui écrit dans le même journal

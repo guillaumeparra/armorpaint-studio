@@ -13,8 +13,12 @@
 #include "../../sources/types.h"
 #include "studio.h"
 #include "studio_exec.h"
+#include "studio_env.h"
 #include "studio_json.h"
+#include "studio_ocio.h"
 #include "studio_ocio_import.h"
+#include "studio_ocio_prefs.h"
+#include "studio_ocio_view.h"
 #include "studio_prefs.h"
 #include "studio_project.h"
 #include "studio_window.h"
@@ -47,6 +51,8 @@ void                      make_material_parse_brush(void);
 void                      util_render_make_material_preview(void);
 void                      layers_update_fill_layers(void);
 void                      history_new_material(void);
+bool                      tab_textures_nodes_use_texture(ui_node_t_array_t *nodes, i32 index);
+void                      tab_textures_delete_texture(asset_t *asset);
 i32                       box_preferences_add_tab(char *label, void (*draw)(void));
 void                      box_preferences_show(void);
 void                      ui_menubar_add_category(char *label, void (*draw_items)(void));
@@ -61,14 +67,26 @@ void                      console_toast(char *s);
 #define OP_ICON_FOLDER_OPEN 20
 #define OP_ICON_REPLAY      122
 #define TAB_AREA_MATERIALS  1 // ui_base_hwnds : panneau des matériaux, comme import_folder_run
+#define OP_TOOL_COLORID     8 // TOOL_TYPE_COLORID
 
 #define PREF_SBSRENDER "subzero.sbsrender"
+#define ENV_SBSRENDER  "SUBZERO_SBSRENDER" // passe devant la préférence (lot E5)
 #define RECIPE         "subzero.json"
 #define MAX_LINKS      16
 #define NODE_X         72 // placement des nœuds Image Texture, comme import_folder_run
 #define NODE_Y         100
 #define NODE_H         180
 #define TEXT_WIDTH     100
+#define OCIO_POLL      15
+#ifdef __APPLE__
+#define DESIGNER_WHERE "/Applications"
+#else
+#define DESIGNER_WHERE "/opt/Adobe"
+#endif
+
+#ifndef _WIN32
+extern char **environ;
+#endif
 
 static struct {
 	studio_window_t *win;
@@ -80,6 +98,8 @@ static struct {
 	char            *located;     // préférence de ce résultat
 	char            *status;      // « sbsrender 16.0.6 (build 11611): <chemin> » ou l'erreur
 	bool             status_error;
+	char            *ocio_sent;   // état OCIO que la fenêtre connaît (put_ocio), NULL avant son premier état
+	int              ocio_tick;   // on_update : l'état OCIO est comparé toutes les OCIO_POLL frames
 } sz = {.tab = -1};
 
 static char *dup(const char *s) {
@@ -129,15 +149,86 @@ static char *member_text(const char *json, const char *base, const char *name) {
 	return s != NULL ? s : strdup("");
 }
 
+// Chemin de sbsrender : $SUBZERO_SBSRENDER s'il est défini, sinon la préférence (vide : recherche de Designer).
+static const char *sbsrender_env(void) {
+	const char *env = getenv(ENV_SBSRENDER);
+	return env != NULL && env[0] != 0 ? env : NULL;
+}
+
+static const char *sbsrender_setting(void) {
+	const char *env = sbsrender_env();
+	return env != NULL ? env : studio_prefs_string(PREF_SBSRENDER, "");
+}
+
+// Gestion couleur d'ArmorPaint (lot E11) : la fenêtre convertit les cartes dans la configuration qui lira les
+// textures, et montre ses vignettes par la transformation d'affichage du viewport.
+static void put_ocio(text_t *b) {
+	bool import = studio_ocio_import_enabled();
+	put(b, "{\"enabled\":%s,\"status\":", studio_ocio_ready() && import ? "true" : "false");
+	put_quoted(b, import ? studio_ocio_status() : "texture color spaces are disabled (STUDIO_OCIO_IMPORT=0)");
+	const char *fields[][2] = {
+	    {"config", studio_ocio_config_source()},  {"name", studio_ocio_config_name()},
+	    {"origin", studio_ocio_config_origin()},  {"version", studio_ocio_version()},
+	    {"working_space", studio_ocio_working_space()}, {"display", studio_ocio_view_display()},
+	    {"view", studio_ocio_view_view()},       {"look", studio_ocio_view_look()},
+	};
+	for (int i = 0; i < (int)(sizeof(fields) / sizeof(fields[0])); i++) {
+		put(b, ",\"%s\":", fields[i][0]);
+		put_quoted(b, fields[i][1]);
+	}
+	put(b, ",\"viewport\":%s}", studio_ocio_view_active() ? "true" : "false");
+}
+
+// studio.env où écrire les réglages, et origine des variables de couleur : un fichier, ou "environment" (une vraie
+// variable d'environnement, que le fichier ne peut pas changer).
+static void put_env(text_t *b) {
+	put(b, "{\"file\":");
+	put_quoted(b, studio_env_file());
+	put(b, ",\"origins\":{");
+	bool first = true;
+#ifndef _WIN32
+	for (char **e = environ; e != NULL && *e != NULL; e++) {
+		const char *eq = strchr(*e, '=');
+		size_t      n  = eq != NULL ? (size_t)(eq - *e) : 0;
+		if (n == 0 || !((n == 4 && strncmp(*e, "OCIO", 4) == 0) || strncmp(*e, "STUDIO_OCIO_", 12) == 0 || strncmp(*e, "SUBZERO_OCIO_", 13) == 0)) {
+			continue;
+		}
+		char *name = strndup(*e, n);
+		if (name == NULL) {
+			continue;
+		}
+		put(b, first ? "" : ",");
+		put_quoted(b, name);
+		put(b, ":");
+		put_quoted(b, studio_env_origin(name));
+		first = false;
+		free(name);
+	}
+#endif
+	put(b, "}}");
+}
+
+static char *ocio_json(void) {
+	text_t b = {0};
+	put_ocio(&b);
+	return b.data;
+}
+
 static char *state_json(void) {
 	text_t      b    = {0};
 	const char *file = project_filepath_get();
 	put(&b, "{\"sbsrender\":");
-	put_quoted(&b, studio_prefs_string(PREF_SBSRENDER, ""));
+	put_quoted(&b, sbsrender_setting());
 	put(&b, ",\"project\":{\"file\":");
 	put_quoted(&b, file != NULL ? file : "");
-	put(&b, "},\"resolution\":[%d,%d],\"bits\":%d,\"open\":%s}", config_get_texture_res_x(), config_get_texture_res_y(),
+	put(&b, "},\"resolution\":[%d,%d],\"bits\":%d,\"open\":%s,\"ocio\":", config_get_texture_res_x(), config_get_texture_res_y(),
 	    base_bits == TEXTURE_BITS_BITS32 ? 32 : base_bits == TEXTURE_BITS_BITS16 ? 16 : 8, sz.pending != NULL ? sz.pending : "null");
+	put_ocio(&b);
+	put(&b, ",\"env\":");
+	put_env(&b);
+	put(&b, "}");
+	free(sz.ocio_sent);
+	sz.ocio_sent = ocio_json();
 	return b.data;
 }
 
@@ -145,13 +236,24 @@ static char *state_json(void) {
 
 typedef struct {
 	char *file;
-	int   output; // 0 couleur, 1 alpha
-	int   socket; // entrée de la sortie PBR : 0 base, 1 opacité, 2 occlusion, 3 rugosité, 4 métal, 5 normale, 7 hauteur
+	int   output;      // 0 couleur, 1 alpha
+	int   socket;      // entrée de la sortie PBR : 0 base, 1 opacité, 2 occlusion, 3 rugosité, 4 métal, 5 normale, 7 hauteur
+	char *color_space;     // espace OCIO de la texture (nom, alias ou rôle de la configuration, sinon espace intégré comme
+	                       // srgb_tx), "" : choix automatique
+	char *color_space_was; // celui que subzero lui a donné au rendu précédent, "" sans
 } link_t;
 
 static bool in_dir(const char *file, const char *dir) {
 	size_t n = strlen(dir);
 	return n > 0 && strncmp(file, dir, n) == 0 && (file[n] == '/' || file[n] == '\\') && strchr(file + n + 1, '/') == NULL;
+}
+
+static void free_links(link_t *links, int count) {
+	for (int i = 0; i < count; i++) {
+		free(links[i].file);
+		free(links[i].color_space);
+		free(links[i].color_space_was);
+	}
 }
 
 // Liens demandés ; faux (message dans err) si l'un d'eux est invalide.
@@ -171,21 +273,17 @@ static bool read_links(const char *req, const char *dir, link_t *links, int *cou
 		if (!in_dir(file, dir) || !iron_file_exists(file) || (output != 0 && output != 1) || socket < 0 || socket > 7 || socket == 6) {
 			snprintf(err, size, "link %d: bad file, output or socket (%s)", i, file);
 			free(file);
-			for (int k = 0; k < *count; k++) {
-				free(links[k].file);
-			}
+			free_links(links, *count);
 			*count = 0;
 			return false;
 		}
-		links[(*count)++] = (link_t){.file = file, .output = output, .socket = socket};
+		links[(*count)++] = (link_t){.file            = file,
+		                             .output          = output,
+		                             .socket          = socket,
+		                             .color_space     = member_text(req, base, "color_space"),
+		                             .color_space_was = member_text(req, base, "color_space_was")};
 	}
 	return true;
-}
-
-static void free_links(link_t *links, int count) {
-	for (int i = 0; i < count; i++) {
-		free(links[i].file);
-	}
 }
 
 static int asset_index(const char *file) {
@@ -199,17 +297,94 @@ static int asset_index(const char *file) {
 	return -1;
 }
 
-// Asset du fichier, importé s'il n'est pas dans le projet, rechargé sinon (fichier réécrit par le rendu).
-static int ensure_asset(const char *file, int *reloaded) {
-	int i = asset_index(file);
+// Espace d'un lien : nom, alias ou rôle de la configuration, sinon espace de la configuration intégrée ; NULL sans.
+static const char *link_space(const char *name) {
+	if (name == NULL || name[0] == 0) {
+		return NULL;
+	}
+	const char *cs = studio_ocio_resolve(name);
+	return cs != NULL ? cs : studio_ocio_identify_builtin(name);
+}
+
+// Asset du fichier, importé s'il n'est pas dans le projet, rechargé sinon (fichier réécrit par le rendu). Une texture
+// neuve prend l'espace du lien (lot E6 : la couleur de base de sbsrender est encodée sRGB, même en EXR, que l'import
+// OCIO lirait sinon comme de la lumière linéaire ; lot E11 : espace réglé dans subzero). Une texture déjà là garde le
+// sien, que l'artiste a pu changer, sauf s'il vaut encore celui que subzero lui avait donné : elle suit alors le réglage.
+static int ensure_asset(const link_t *link, int *reloaded) {
+	const char *file = link->file;
+	int         i    = asset_index(file);
+	bool        ocio = link->color_space[0] != 0 && studio_ocio_import_enabled();
+	const char *cs   = ocio ? link_space(link->color_space) : NULL;
 	if (i >= 0) {
-		if (studio_texture_reload(file)) {
+		const char *now = studio_texture_color_space(file);
+		const char *was = cs != NULL ? link_space(link->color_space_was) : NULL;
+		if (cs != NULL && now != NULL && was != NULL && strcmp(now, was) == 0 && strcmp(now, cs) != 0 && studio_texture_set_color_space(file, cs)) {
+			iron_log("subzero: %s now in %s (was %s)", file, cs, was);
+			(*reloaded)++;
+		}
+		else if (studio_texture_reload(file)) {
 			(*reloaded)++;
 		}
 		return i;
 	}
+	if (ocio) {
+		if (cs == NULL || !studio_texture_set_color_space(file, cs)) {
+			iron_log("subzero: color space %s not available for %s, automatic choice", link->color_space, file);
+		}
+	}
 	import_texture_run(string_copy((char *)file), false); // le chemin est gardé par l'asset
 	return asset_index(file);
+}
+
+// Comme tab_textures_is_texture_used, sauf la texture de l'outil ColorID quand il n'est pas choisi : son indice vaut 0
+// par défaut, ce qui garderait à tort la première texture du projet.
+static bool texture_used(int index) {
+	asset_t *a = g_project->_->assets->buffer[index];
+	if ((g_context->tool == OP_TOOL_COLORID && index == g_context->colorid) || (g_project->envmap != NULL && strcmp(g_project->envmap, a->file) == 0)) {
+		return true;
+	}
+	for (int i = 0; i < (int)g_project->_->materials->length; i++) {
+		if (tab_textures_nodes_use_texture((ui_node_t_array_t *)g_project->_->materials->buffer[i]->canvas->nodes, index)) {
+			return true;
+		}
+	}
+	for (int i = 0; i < (int)g_project->_->material_groups->length; i++) {
+		if (tab_textures_nodes_use_texture((ui_node_t_array_t *)g_project->_->material_groups->buffer[i]->canvas->nodes, index)) {
+			return true;
+		}
+	}
+	for (int i = 0; i < (int)g_project->_->brushes->length; i++) {
+		if (tab_textures_nodes_use_texture((ui_node_t_array_t *)g_project->_->brushes->buffer[i]->canvas->nodes, index)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// Textures du dossier que les liens n'ont plus (autre format, sortie retirée) : retirées du projet si plus rien ne
+// les utilise, sinon gardées et ajoutées à kept (tableau JSON) ; rend le nombre de retirées.
+static int remove_stale_assets(const char *dir, link_t *links, int count, text_t *kept) {
+	int              removed = 0;
+	asset_t_array_t *assets  = g_project->_->assets;
+	for (int i = (int)assets->length - 1; i >= 0; i--) {
+		asset_t *a      = assets->buffer[i];
+		bool     linked = false;
+		for (int k = 0; k < count && !linked; k++) {
+			linked = a != NULL && a->file != NULL && strcmp(a->file, links[k].file) == 0;
+		}
+		if (a == NULL || a->file == NULL || linked || !in_dir(a->file, dir)) {
+			continue;
+		}
+		if (texture_used(i)) {
+			put(kept, kept->len > 1 ? "," : "");
+			put_quoted(kept, a->file);
+			continue;
+		}
+		iron_log("subzero: texture %s removed from the project (no longer rendered)", a->file);
+		tab_textures_delete_texture(a);
+		removed++;
+	}
+	return removed;
 }
 
 static bool is_image_node(ui_node_t *n) {
@@ -323,7 +498,7 @@ const char *subzero_material_dir(void *slot_material) {
 static slot_material_t *create_material(const char *name, link_t *links, int count, int *reloaded) {
 	int assets[MAX_LINKS];
 	for (int i = 0; i < count; i++) {
-		assets[i] = ensure_asset(links[i].file, reloaded);
+		assets[i] = ensure_asset(&links[i], reloaded);
 		if (assets[i] < 0) {
 			return NULL;
 		}
@@ -362,7 +537,7 @@ static slot_material_t *create_material(const char *name, link_t *links, int cou
 static void update_material(slot_material_t *m, const char *dir, link_t *links, int count, int *reloaded) {
 	int assets[MAX_LINKS];
 	for (int i = 0; i < count; i++) {
-		assets[i] = ensure_asset(links[i].file, reloaded);
+		assets[i] = ensure_asset(&links[i], reloaded);
 	}
 	slot_material_t *current = g_context->material;
 	g_context->material      = m; // rappels de ui_remove_node (aperçus des nœuds)
@@ -472,12 +647,18 @@ static void material_request(int id, const char *op, const char *req) {
 		studio_window_reply_error(sz.win, id, "import_failed", "the textures could not be imported: see the console");
 	}
 	else {
-		text_t b = {0};
+		text_t kept = {0};
+		put(&kept, "[");
+		int    removed = remove_stale_assets(dir, links, count, &kept);
+		text_t b       = {0};
+		put(&kept, "]");
 		put(&b, "{\"material\":");
 		put_quoted(&b, m->canvas->name);
-		put(&b, ",\"reloaded\":%d,\"created\":%s}", reloaded, created ? "true" : "false");
+		put(&b, ",\"reloaded\":%d,\"created\":%s,\"removed\":%d,\"kept\":%s}", reloaded, created ? "true" : "false", removed,
+		    kept.data != NULL ? kept.data : "[]");
 		studio_window_reply(sz.win, id, b.data);
 		free(b.data);
+		free(kept.data);
 	}
 	free_links(links, count);
 	free(dir);
@@ -523,7 +704,10 @@ static char *materials_json(void) {
 
 // ---- Fenêtre ----------------------------------------------------------------------------------------------------------
 
-static void show_prefs(void) {
+static void show_prefs(const char *tab) {
+	if (tab != NULL && strcmp(tab, "color") == 0 && studio_ocio_prefs_show()) {
+		return;
+	}
 	if (sz.tab >= 0) {
 		box_preferences_tab = sz.tab;
 		box_preferences_show();
@@ -543,7 +727,9 @@ static void on_request(studio_window_t *w, int id, const char *op, const char *r
 		material_request(id, op, req);
 	}
 	else if (strcmp(op, "show_prefs") == 0) {
-		show_prefs();
+		char *tab = member_text(req, "/args", "tab");
+		show_prefs(tab);
+		free(tab);
 		studio_window_reply(sz.win, id, "{}");
 	}
 	else {
@@ -555,6 +741,8 @@ static void on_closed(studio_window_t *w) {
 	(void)w;
 	free(sz.pending);
 	sz.pending = NULL;
+	free(sz.ocio_sent);
+	sz.ocio_sent = NULL;
 }
 
 // {"file": path} ou {"dir": path} (dossier), malloc ; NULL sans chemin.
@@ -645,7 +833,7 @@ static void locate_start(void) {
 	if (sz.locate_job > 0) {
 		studio_exec_release(sz.locate_job);
 	}
-	const char *pref = studio_prefs_string(PREF_SBSRENDER, "");
+	const char *pref = sbsrender_setting();
 	free(sz.located);
 	sz.located         = dup(pref);
 	char       *script = string_tmp("%ssubzero_render.py", path_data());
@@ -668,9 +856,13 @@ static void locate_poll(void) {
 		char *version   = member_text(out, "/result", "version");
 		char *path      = member_text(out, "/result", "sbsrender");
 		bool  detected  = studio_json_truthy(studio_json_find(out, "/result/detected"));
-		message         = dup(string_tmp("sbsrender %s%s: %s", version, detected ? " (found in /Applications)" : "", path));
+		message         = dup(string_tmp("sbsrender %s%s: %s", version, detected ? " (found in " DESIGNER_WHERE ")" : "", path));
 		sz.status_error = false;
-		iron_log("subzero: sbsrender %s (%s)", version, path);
+		const char *env = sbsrender_env();
+		iron_log("subzero: sbsrender %s (%s), %s", version, path,
+		         env != NULL ? string_tmp("from $" ENV_SBSRENDER " (%s)", studio_env_origin(ENV_SBSRENDER))
+		         : detected  ? "found in " DESIGNER_WHERE
+		                     : "from the preference " PREF_SBSRENDER);
 		free(version);
 		free(path);
 	}
@@ -689,9 +881,24 @@ static void locate_poll(void) {
 	sz.locate_job = 0;
 }
 
+// La configuration, la transformation du viewport ou l'import OCIO ont changé (menu Color, préférences) : la fenêtre
+// reçoit le nouvel état (évènement ocio).
+static void ocio_poll(void) {
+	if (sz.ocio_sent == NULL || ++sz.ocio_tick < OCIO_POLL || !studio_window_is_open(sz.win)) {
+		return;
+	}
+	sz.ocio_tick = 0;
+	char *now    = ocio_json();
+	if (now != NULL && strcmp(now, sz.ocio_sent) != 0) {
+		send_state_event("ocio"); // remplace sz.ocio_sent
+	}
+	free(now);
+}
+
 static void on_update(void *data) {
 	(void)data;
 	locate_poll();
+	ocio_poll();
 }
 
 static void set_sbsrender(void *data) {
@@ -699,7 +906,7 @@ static void set_sbsrender(void *data) {
 	studio_prefs_set_string(PREF_SBSRENDER, path);
 	locate_start();
 	if (studio_window_is_open(sz.win)) {
-		char *q = studio_json_quote(path);
+		char *q = studio_json_quote(sbsrender_setting());
 		studio_window_send(sz.win, string_tmp("{\"event\":\"prefs\",\"sbsrender\":%s}", q != NULL ? q : "\"\""));
 		free(q);
 	}
@@ -755,23 +962,31 @@ static void tab_draw(void) {
 		sz.path_synced = dup(pref);
 		sz.path_text   = dup(pref);
 	}
+	const char *env    = sbsrender_env();
+	bool        locked = env != NULL;
 	section("sbsrender");
 	ui_row(f32_array_create_from_raw_tmp((f32[]){0.6f, 0.2f, 0.2f}, 3));
-	ui_text_input(&sz.path_text, "sbsrender", UI_ALIGN_LEFT, true, false);
-	if (ui_item_changed()) {
+	g_ui->enabled = !locked;
+	ui_text_input(&sz.path_text, "sbsrender", UI_ALIGN_LEFT, !locked, false);
+	if (!locked && ui_item_changed()) {
 		schedule_sbsrender(sz.path_text);
 	}
-	if (ui_icon_button("Browse", OP_ICON_FOLDER_OPEN, UI_ALIGN_CENTER)) {
+	if (ui_icon_button("Browse", OP_ICON_FOLDER_OPEN, UI_ALIGN_CENTER) && !locked) {
 		ui_files_show("", false, false, sbsrender_picked);
 	}
-	if (ui_icon_button("Detect", OP_ICON_REPLAY, UI_ALIGN_CENTER)) {
+	if (ui_icon_button("Detect", OP_ICON_REPLAY, UI_ALIGN_CENTER) && !locked) {
 		schedule_sbsrender("");
 	}
-	if (sz.located == NULL || strcmp(sz.located, pref) != 0) {
+	g_ui->enabled = true;
+	if (sz.located == NULL || strcmp(sz.located, sbsrender_setting()) != 0) {
 		locate_start();
 	}
+	if (locked) {
+		text_lines(string_tmp("$" ENV_SBSRENDER " is set (%s, from %s): the preference above is used in sessions without it.", env,
+		                      studio_env_origin(ENV_SBSRENDER)));
+	}
 	text_lines(sz.status);
-	text_lines("The sbsrender tool of Adobe Substance 3D Designer renders the textures. Empty: found in /Applications. The "
+	text_lines("The sbsrender tool of Adobe Substance 3D Designer renders the textures. Empty: found in " DESIGNER_WHERE ". The "
 	           "Designer app or the folder of sbsrender are accepted too.");
 
 	section("Window");
@@ -798,7 +1013,7 @@ static void menu_draw(void) {
 	}
 	ui_separator(4, true);
 	if (ui_menu_button("Preferences...", "", OP_ICON_NONE)) {
-		show_prefs();
+		show_prefs(NULL);
 	}
 }
 
