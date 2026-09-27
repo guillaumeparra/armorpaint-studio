@@ -27,10 +27,20 @@ extern char      *ui_box_title;
 extern char      *console_message;
 extern float      console_message_timer;
 extern i32        base_bits;
+extern i32        base_res;
+extern f32        base_res_x;
+extern f32        base_res_y;
+void              layers_on_resized(void);
+void              base_init_undo_layers(void);
 void              layers_set_object_mask(void);
 slot_layer_t     *layers_new_layer(bool clear, i32 position, slot_layer_t *parent);
 void              slot_layer_clear(slot_layer_t *raw, i32 base_color, gpu_texture_t *base_image, f32 occlusion, f32 roughness, f32 metallic);
 void              history_new_layer(void);
+slot_layer_t     *layers_new_mask(bool clear, slot_layer_t *parent, i32 position);
+void              history_new_white_mask(void);
+void              history_new_black_mask(void);
+void              context_set_layer(slot_layer_t *l);
+bool              slot_layer_is_mask(slot_layer_t *raw);
 slot_layer_t     *layers_new_group(void);
 void              history_new_group(void);
 extern f32        layers_default_rough;
@@ -45,6 +55,21 @@ void              console_log(char *s);
 char             *tab_meshes_rename_object(i32 i, char *typed);
 void              tab_meshes_sort_by_name(void);
 void              tab_meshes_sort_hierarchy(void);
+buffer_t         *gpu_get_texture_pixels(gpu_texture_t *image);
+void              history_undo(void);
+void              history_redo(void);
+i32               color_from_floats(f32 r, f32 g, f32 b, f32 a);
+void              _gpu_begin(gpu_texture_t *render_target, any_array_t *additional, gpu_texture_t *depth_buffer, gpu_clear_t flags, unsigned color, float depth);
+void              history_merge_layers(void);
+void              history_apply_mask(void);
+void              history_layer_opacity(void);
+void              layers_merge_down(void);
+slot_layer_t     *layers_merge_group(slot_layer_t *l);
+slot_layer_t     *layers_flatten(bool height_to_normal, slot_layer_t_array_t *layers);
+void              slot_layer_apply_mask(slot_layer_t *raw);
+void              slot_layer_to_paint_layer(slot_layer_t *raw);
+bool              slot_layer_is_group(slot_layer_t *raw);
+void              make_material_parse_mesh_material(void);
 
 #define DEFAULT_NAME "Atlas 1"
 #define MAX_NAME     64
@@ -522,6 +547,39 @@ static minic_val_t mn_studio_layer_new(minic_val_t *a, int n) {
 	return minic_val_int(1);
 }
 
+// Nouveau masque du calque courant (du parent si c'est un masque), blanc (white 1) ou noir (0), comme les menus New >
+// White Mask / Black Mask, vidé tout de suite ; il devient le calque courant. 1 si fait.
+static minic_val_t mn_studio_layer_new_mask(minic_val_t *a, int n) {
+	int           white = (int)minic_arg_i(a, n, 0);
+	slot_layer_t *l     = g_context->layer;
+	if (l == NULL) {
+		return minic_val_int(0);
+	}
+	if (slot_layer_is_mask(l)) {
+		l = l->parent;
+	}
+	slot_layer_t *m = layers_new_mask(false, l, -1);
+	if (m == NULL) {
+		return minic_val_int(0);
+	}
+	gpu_texture_t *current = _draw_current;
+	bool           in_use  = gpu_in_use;
+	if (in_use) {
+		draw_end();
+	}
+	slot_layer_clear(m, white ? 0xffffffff : 0x00000000, NULL, 1.0, layers_default_rough, 0.0);
+	if (in_use) {
+		draw_begin(current, false, 0);
+	}
+	if (white) {
+		history_new_white_mask();
+	}
+	else {
+		history_new_black_mask();
+	}
+	return minic_val_int(1);
+}
+
 // Nouveau groupe de calques (vide), devenu le calque courant, comme le bouton New Group. 1 si fait.
 static minic_val_t mn_studio_layer_new_group(minic_val_t *a, int n) {
 	(void)a, (void)n;
@@ -611,6 +669,221 @@ static minic_val_t mn_studio_layer_masks(minic_val_t *a, int n) {
 	return minic_val_ptr(s);
 }
 
+// Résolution du projet : Custom, px × px, calques redimensionnés tout de suite (le menu Resolution de l'onglet Layers
+// attend l'image suivante). Pour les bancs : des projets UDIM légers. 1 si fait.
+static minic_val_t mn_studio_project_res(minic_val_t *a, int n) {
+	int px = (int)minic_arg_i(a, n, 0);
+	if (px < 64 || px > 16384) {
+		return minic_val_int(0);
+	}
+	gpu_texture_t *current = _draw_current;
+	bool           in_use  = gpu_in_use;
+	if (in_use) {
+		draw_end();
+	}
+	base_res   = TEXTURE_RES_CUSTOM;
+	base_res_x = (f32)px;
+	base_res_y = (f32)px;
+	// layers_resize parcourt history_undo_layers, créé à la première frame (base_update) : un script lancé avant
+	base_init_undo_layers();
+	i32 before = (i32)_sys_on_next_frames->length;
+	layers_on_resized();
+	studio_run_next_frames(before);
+	if (in_use) {
+		draw_begin(current, false, 0);
+	}
+	g_context->ddirty = 2;
+	return minic_val_int(1);
+}
+
+static float half_to_float(uint16_t h) {
+	uint32_t sign = (uint32_t)(h & 0x8000) << 16, exp = (h >> 10) & 0x1f, mant = h & 0x3ff, bits;
+	if (exp == 0) {
+		float f = mant / 1024.0f / 16384.0f;
+		return sign ? -f : f;
+	}
+	bits = exp == 31 ? sign | 0x7f800000 | (mant << 13) : sign | ((exp + 112) << 23) | (mant << 13);
+	float f;
+	memcpy(&f, &bits, 4);
+	return f;
+}
+
+static char *pixel_text(gpu_texture_t *t, float *c) {
+#ifdef __APPLE__
+	if (t->format == GPU_TEXTURE_FORMAT_RGBA32) { // Cibles de rendu 8 bits en BGRA sous Metal
+		float r = c[0];
+		c[0]    = c[2];
+		c[2]    = r;
+	}
+#endif
+	return string("%.3f %.3f %.3f %.3f", c[0], c[1], c[2], c[3]);
+}
+
+// Pixel (x, y) de la texture channel (0 base, 1 nor, 2 pack) du calque i, « r g b a » de 0 à 1 ; « - » hors bornes.
+// Channel 9, 10, 11 : base, nor et pack de la pile aplatie (layers_flatten, i ignoré). tile : -1 (tuile du contexte ;
+// les textures par tuile et les autres canaux viennent avec le lot D2, même signature).
+static minic_val_t mn_studio_udim_pixel(minic_val_t *a, int n) {
+	int                   i       = (int)minic_arg_i(a, n, 0);
+	int                   channel = (int)minic_arg_i(a, n, 1);
+	int                   tile    = (int)minic_arg_i(a, n, 2);
+	int                   x       = (int)minic_arg_i(a, n, 3);
+	int                   y       = (int)minic_arg_i(a, n, 4);
+	slot_layer_t_array_t *layers  = g_project->_->layers;
+	if (tile != -1 || (channel <= 2 && (i < 0 || i >= (int)layers->length)) || channel < 0 || (channel > 2 && channel < 9) || channel > 11) {
+		return minic_val_ptr(string_copy("-"));
+	}
+	gpu_texture_t *current = _draw_current;
+	bool           in_use  = gpu_in_use;
+	if (in_use) {
+		draw_end();
+	}
+	gpu_texture_t *t = NULL;
+	if (channel <= 2) {
+		slot_layer_t *l = layers->buffer[i];
+		t               = channel == 0 ? l->texpaint : channel == 1 ? l->texpaint_nor : l->texpaint_pack;
+	}
+	else {
+		slot_layer_t *f = layers_flatten(false, NULL);
+		t               = channel == 9 ? f->texpaint : channel == 10 ? f->texpaint_nor : f->texpaint_pack;
+		free(f);
+	}
+	char *out = string_copy("-");
+	if (t != NULL && x >= 0 && y >= 0 && x < (int)t->width && y < (int)t->height) {
+		buffer_t *b = gpu_get_texture_pixels(t);
+		float     c[4];
+		int       at = y * (int)t->width + x;
+		for (int k = 0; k < 4; ++k) {
+			c[k] = t->format == GPU_TEXTURE_FORMAT_RGBA128  ? ((float *)b->buffer)[at * 4 + k]
+			       : t->format == GPU_TEXTURE_FORMAT_RGBA64 ? half_to_float(((uint16_t *)b->buffer)[at * 4 + k])
+			       : t->format == GPU_TEXTURE_FORMAT_R8     ? (k == 0 ? b->buffer[at] / 255.0f : k == 3 ? 1.0f : 0.0f)
+			                                                : b->buffer[at * 4 + k] / 255.0f;
+		}
+		out = pixel_text(t, c);
+	}
+	if (in_use) {
+		draw_begin(current, false, 0);
+	}
+	return minic_val_ptr(out);
+}
+
+// Vide la texture channel (0 base, 1 nor, 2 pack) du calque i à la couleur (r, g, b, a). Pour les bancs : une couleur
+// sans peindre. tile : -1 (tuile du contexte, voir studio_udim_pixel). 1 si fait.
+static minic_val_t mn_studio_udim_fill(minic_val_t *a, int n) {
+	int                   i       = (int)minic_arg_i(a, n, 0);
+	int                   channel = (int)minic_arg_i(a, n, 1);
+	int                   tile    = (int)minic_arg_i(a, n, 2);
+	slot_layer_t_array_t *layers  = g_project->_->layers;
+	if (tile != -1 || i < 0 || i >= (int)layers->length || channel < 0 || channel > 2) {
+		return minic_val_int(0);
+	}
+	slot_layer_t  *l = layers->buffer[i];
+	gpu_texture_t *t = channel == 0 ? l->texpaint : channel == 1 ? l->texpaint_nor : l->texpaint_pack;
+	if (t == NULL) {
+		return minic_val_int(0);
+	}
+	gpu_texture_t *current = _draw_current;
+	bool           in_use  = gpu_in_use;
+	if (in_use) {
+		draw_end();
+	}
+	i32 color = color_from_floats((f32)minic_arg_f(a, n, 3), (f32)minic_arg_f(a, n, 4), (f32)minic_arg_f(a, n, 5), (f32)minic_arg_f(a, n, 6));
+	_gpu_begin(t, NULL, NULL, GPU_CLEAR_COLOR, color, 0.0);
+	gpu_end();
+	if (in_use) {
+		draw_begin(current, false, 0);
+	}
+	g_context->ddirty               = 2;
+	g_context->layers_preview_dirty = true;
+	return minic_val_int(1);
+}
+
+// Calque courant = calque i. 1 si fait.
+static minic_val_t mn_studio_layer_select(minic_val_t *a, int n) {
+	int                   i      = (int)minic_arg_i(a, n, 0);
+	slot_layer_t_array_t *layers = g_project->_->layers;
+	if (i < 0 || i >= (int)layers->length) {
+		return minic_val_int(0);
+	}
+	context_set_layer(layers->buffer[i]);
+	return minic_val_int(1);
+}
+
+// Met le calque i dans le groupe g (-1 : hors groupe), comme un glisser-déposer sur le groupe de l'onglet Layers ; les
+// enfants d'un groupe sont juste en dessous de lui dans la pile. 1 si fait.
+static minic_val_t mn_studio_layer_set_parent(minic_val_t *a, int n) {
+	int                   i      = (int)minic_arg_i(a, n, 0);
+	int                   g      = (int)minic_arg_i(a, n, 1);
+	slot_layer_t_array_t *layers = g_project->_->layers;
+	if (i < 0 || i >= (int)layers->length || g >= (int)layers->length || (g >= 0 && !slot_layer_is_group(layers->buffer[g]))) {
+		return minic_val_int(0);
+	}
+	layers->buffer[i]->parent       = g >= 0 ? layers->buffer[g] : NULL;
+	g_context->layers_preview_dirty = true;
+	return minic_val_int(1);
+}
+
+// Opacité du calque courant (0 à 1), comme le curseur Opacity de son menu, avec son pas d'historique. 1 si fait.
+static minic_val_t mn_studio_layer_set_opacity(minic_val_t *a, int n) {
+	f32 opacity = (f32)minic_arg_f(a, n, 0);
+	if (g_context->layer == NULL || opacity < 0.0f || opacity > 1.0f) {
+		return minic_val_int(0);
+	}
+	history_layer_opacity();
+	g_context->layer->mask_opacity = opacity;
+	make_material_parse_mesh_material();
+	return minic_val_int(1);
+}
+
+// Opération sur le calque courant, comme les menus, avec son pas d'historique, finie tout de suite : "merge_down" (Merge
+// Down), "merge_group" (Merge Group d'un groupe), "apply_mask" (Apply Mask d'un masque), "undo", "redo". Le lot D2 en
+// ajoute d'autres (même fonction). 1 si fait.
+static minic_val_t mn_studio_layer_op(minic_val_t *a, int n) {
+	char         *op = minic_arg_p(a, n, 0);
+	slot_layer_t *l  = g_context->layer;
+	if (op == NULL || l == NULL) {
+		return minic_val_int(0);
+	}
+	gpu_texture_t *current = _draw_current;
+	bool           in_use  = gpu_in_use;
+	if (in_use) {
+		draw_end();
+	}
+	i32 before = (i32)_sys_on_next_frames->length;
+	int done   = 1;
+	if (strcmp(op, "merge_down") == 0 && array_index_of((any_array_t *)g_project->_->layers, l) > 0) { // tab_layers.c, menu du calque
+		history_merge_layers();
+		layers_merge_down();
+		if (g_context->layer->fill_material != NULL) {
+			slot_layer_to_paint_layer(g_context->layer);
+		}
+	}
+	else if (strcmp(op, "merge_group") == 0 && slot_layer_is_group(l)) {
+		layers_merge_group(l);
+	}
+	else if (strcmp(op, "apply_mask") == 0 && slot_layer_is_mask(l)) {
+		history_apply_mask();
+		slot_layer_apply_mask(l);
+		context_set_layer(l->parent);
+		make_material_parse_mesh_material();
+		g_context->layers_preview_dirty = true;
+	}
+	else if (strcmp(op, "undo") == 0) {
+		history_undo();
+	}
+	else if (strcmp(op, "redo") == 0) {
+		history_redo();
+	}
+	else {
+		done = 0;
+	}
+	studio_run_next_frames(before);
+	if (in_use) {
+		draw_begin(current, false, 0);
+	}
+	g_context->ddirty = 2;
+	return minic_val_int(done);
+}
+
 #endif
 
 void studio_atlas_init(void) {
@@ -624,11 +897,19 @@ void studio_atlas_init(void) {
 	minic_register("studio_layer_set_object", "i(i)", mn_studio_layer_set_object);
 	minic_register("studio_layer_new", "i()", mn_studio_layer_new);
 	minic_register("studio_layer_new_group", "i()", mn_studio_layer_new_group);
+	minic_register("studio_layer_new_mask", "i(i)", mn_studio_layer_new_mask);
 	minic_register("studio_layer_rename", "i(p)", mn_studio_layer_rename);
 	minic_register("studio_layer_set_visible", "i(i)", mn_studio_layer_set_visible);
 	minic_register("studio_object_rename", "p(i,p)", mn_studio_object_rename);
 	minic_register("studio_meshes_sort", "i()", mn_studio_meshes_sort);
 	minic_register("studio_mesh_set_parent", "i(p,p)", mn_studio_mesh_set_parent);
 	minic_register("studio_layer_masks", "p()", mn_studio_layer_masks);
+	minic_register("studio_project_res", "i(i)", mn_studio_project_res);
+	minic_register("studio_udim_pixel", "p(i,i,i,i,i)", mn_studio_udim_pixel);
+	minic_register("studio_layer_select", "i(i)", mn_studio_layer_select);
+	minic_register("studio_layer_set_parent", "i(i,i)", mn_studio_layer_set_parent);
+	minic_register("studio_layer_set_opacity", "i(f)", mn_studio_layer_set_opacity);
+	minic_register("studio_udim_fill", "i(i,i,i,f,f,f,f)", mn_studio_udim_fill);
+	minic_register("studio_layer_op", "i(p)", mn_studio_layer_op);
 #endif
 }
