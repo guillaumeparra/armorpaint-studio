@@ -240,6 +240,17 @@ STUDIO_OCIO_EXPORT const char *studio_ocio_lib_colorspace_from_path(studio_ocio_
 	});
 }
 
+STUDIO_OCIO_EXPORT const char *studio_ocio_lib_file_rule(studio_ocio_lib_config_t *cfg, const char *path) {
+	return guarded<const char *>(nullptr, [&]() -> const char * {
+		if (!check(cfg != nullptr && path != nullptr, "null config or path")) {
+			return nullptr;
+		}
+		size_t rule = 0;
+		cfg->config->getColorSpaceFromFilepath(path, rule);
+		return cfg->config->getFileRules()->getName(rule);
+	});
+}
+
 STUDIO_OCIO_EXPORT const char *studio_ocio_lib_default_display(studio_ocio_lib_config_t *cfg) {
 	return guarded<const char *>(nullptr, [&]() -> const char * {
 		return check(cfg != nullptr, "null config") ? cfg->config->getDefaultDisplay() : nullptr;

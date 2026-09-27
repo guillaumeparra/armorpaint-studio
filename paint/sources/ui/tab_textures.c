@@ -8,6 +8,11 @@ i32            _tab_textures_draw_i;
 bool           _tab_textures_draw_is_packed;
 i32            tab_textures_drag_pos = -1;
 
+#ifdef WITH_EXTERNAL // STUDIO-PATCH(ocio-import): OCIO color space of the textures, see external/PATCHES.md
+char *studio_texture_tooltip(char *file, char *tooltip);
+void  studio_texture_color_space_box(asset_t *asset);
+#endif
+
 void tab_textures_draw_set_as_envmap(void *_) {
 	import_envmap_run(_tab_textures_draw_asset->file, _tab_textures_draw_img);
 }
@@ -125,6 +130,11 @@ void tab_textures_draw_context_menu() {
 	if (ui_menu_button(tr("Reimport"), "", ICON_SYNC)) {
 		project_reimport_texture(_tab_textures_draw_asset);
 	}
+#ifdef WITH_EXTERNAL // STUDIO-PATCH(ocio-import)
+	if (ui_menu_button(tr("Color Space..."), "", ICON_PALETTE)) {
+		studio_texture_color_space_box(_tab_textures_draw_asset);
+	}
+#endif
 	if (ui_menu_button(tr("To Layer"), "", ICON_LAYER)) {
 		sys_notify_on_next_frame(&tab_textures_draw_to_layer, NULL);
 	}
@@ -440,6 +450,9 @@ void tab_textures_draw(i32 *htab) {
 						if (img->format == GPU_TEXTURE_FORMAT_RGBA32_BC7) {
 							tooltip = string_tmp("%s %s", tooltip, tr("(compressed)"));
 						}
+#endif
+#ifdef WITH_EXTERNAL // STUDIO-PATCH(ocio-import)
+						tooltip = studio_texture_tooltip(asset->file, tooltip);
 #endif
 						ui_tooltip(tooltip);
 					}

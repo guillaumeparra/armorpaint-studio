@@ -62,6 +62,9 @@ int         studio_ocio_is_data(const char *colorspace);     // 1 donnée, 0 cou
 const char *studio_ocio_encoding(const char *colorspace);    // "scene-linear", "sdr-video"… ; NULL si inconnu
 const char *studio_ocio_family(const char *colorspace);      // NULL si inconnu
 const char *studio_ocio_colorspace_from_path(const char *p); // file_rules de la configuration
+const char *studio_ocio_file_rule(const char *p);            // nom de la file_rule qui s'applique ("Default" : aucune autre)
+// Espace de la configuration équivalent à un espace intégré d'OCIO ("srgb_tx", "lin_rec709_srgb"…) ; NULL sinon.
+const char *studio_ocio_identify_builtin(const char *builtin);
 
 // Transforme sur place des pixels float32 entrelacés (3 ou 4 canaux, alpha intact), lignes contiguës. Les processeurs
 // sont gardés en cache par couple (src, dst). Rend false si OCIO est indisponible ou un nom inconnu (message dans le

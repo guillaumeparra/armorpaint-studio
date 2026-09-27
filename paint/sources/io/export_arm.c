@@ -403,6 +403,11 @@ void export_arm_run_project(char *path) {
 		export_arm_pack_sounds(g_project, g_project->_->sounds);
 	}
 
+#ifdef WITH_EXTERNAL // STUDIO-PATCH(ocio-import): the OCIO color space of each texture travels in the file, see external/PATCHES.md
+	void studio_texture_color_spaces_save(string_array_t *texture_files);
+	studio_texture_color_spaces_save(texture_files);
+#endif
+
 	buffer_t *buffer = util_encode_project(g_project);
 	iron_file_save_bytes(path, buffer, buffer->length + 1);
 	g_project->mesh_assets = mesh_assets_abs; // STUDIO-PATCH(arm-relative-paths)

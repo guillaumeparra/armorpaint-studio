@@ -10,6 +10,10 @@ gpu_texture_t *import_texture_default_importer(char *path) {
 	return data_get_texture(path);
 }
 
+#ifdef WITH_EXTERNAL // STUDIO-PATCH(ocio-import): fn(path), pixels decoded during the call converted to the working space
+gpu_texture_t *studio_texture_import(char *path, gpu_texture_t *(*fn)(char *path));
+#endif
+
 void import_texture_run_on_next_frame(import_texture_data_t *itd) {
 	import_envmap_run(itd->path, itd->image);
 	free(itd);
@@ -44,14 +48,22 @@ void import_texture_run(char *path, bool hdr_as_envmap) {
 	bool           cached = any_map_get(data_cached_textures, path) != NULL; // Already loaded or pink texture for missing file
 	gpu_texture_t *image;
 	if (importer == NULL || cached) {
+#ifdef WITH_EXTERNAL // STUDIO-PATCH(ocio-import): the pixels decoded for the texture go through OCIO, see external/PATCHES.md
+		image = studio_texture_import(path, import_texture_default_importer);
+#else
 		image = import_texture_default_importer(path);
+#endif
 	}
 	else if (!iron_file_exists(data_resolve_path(path))) { // STUDIO-PATCH(import-null-guards): the plugin importers dereference the blob
 		console_error(string("Could not open file %s.", path));
 		return;
 	}
 	else {
+#ifdef WITH_EXTERNAL // STUDIO-PATCH(ocio-import)
+		image = studio_texture_import(path, importer);
+#else
 		image = importer(path);
+#endif
 	}
 
 	if (image == NULL) {

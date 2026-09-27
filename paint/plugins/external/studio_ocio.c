@@ -35,6 +35,7 @@ char *path_data(void);
 	X(const char *, family, (studio_ocio_lib_config_t *, const char *))                                                \
 	X(const char *, identify_builtin, (studio_ocio_lib_config_t *, const char *))                                      \
 	X(const char *, colorspace_from_path, (studio_ocio_lib_config_t *, const char *))                                  \
+	X(const char *, file_rule, (studio_ocio_lib_config_t *, const char *))                                             \
 	X(const char *, default_display, (studio_ocio_lib_config_t *))                                                     \
 	X(const char *, default_view, (studio_ocio_lib_config_t *, const char *))                                          \
 	X(int, view_count, (studio_ocio_lib_config_t *, const char *))                                                     \
@@ -356,6 +357,14 @@ const char *studio_ocio_family(const char *cs) {
 
 const char *studio_ocio_colorspace_from_path(const char *p) {
 	return config != NULL ? lib.colorspace_from_path(config, p) : NULL;
+}
+
+const char *studio_ocio_file_rule(const char *p) {
+	return config != NULL ? lib.file_rule(config, p) : NULL;
+}
+
+const char *studio_ocio_identify_builtin(const char *builtin) {
+	return config != NULL ? lib.identify_builtin(config, builtin) : NULL;
 }
 
 // display NULL : processeur d'espace à espace src → dst ; sinon processeur d'affichage, dst étant sa clé.

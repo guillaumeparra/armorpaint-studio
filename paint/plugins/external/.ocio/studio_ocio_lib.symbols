@@ -14,6 +14,7 @@ _studio_ocio_lib_default_view
 _studio_ocio_lib_encoding
 _studio_ocio_lib_error
 _studio_ocio_lib_family
+_studio_ocio_lib_file_rule
 _studio_ocio_lib_identify_builtin
 _studio_ocio_lib_is_data
 _studio_ocio_lib_name

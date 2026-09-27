@@ -15,7 +15,7 @@
 // appeler studio_ocio_lib_apply() en même temps sur le même processeur (sur des pixels disjoints).
 
 // Incrémenté à chaque changement incompatible : studio_ocio.c refuse une bibliothèque d'une autre version.
-#define STUDIO_OCIO_LIB_ABI 3 // 2 : studio_ocio_lib_identify_builtin ; 3 : studio_ocio_lib_view_colorspace
+#define STUDIO_OCIO_LIB_ABI 4 // 2 : identify_builtin ; 3 : view_colorspace ; 4 : file_rule
 
 #ifdef __cplusplus
 extern "C" {
@@ -63,6 +63,8 @@ const char *studio_ocio_lib_encoding(studio_ocio_lib_config_t *cfg, const char *
 const char *studio_ocio_lib_family(studio_ocio_lib_config_t *cfg, const char *colorspace);
 // Espace d'un fichier selon les file_rules de la configuration (règle par défaut si aucune ne s'applique).
 const char *studio_ocio_lib_colorspace_from_path(studio_ocio_lib_config_t *cfg, const char *path);
+// Nom de la file_rule qui s'applique au fichier : "Default" (la règle par défaut, toujours la dernière) si aucune autre.
+const char *studio_ocio_lib_file_rule(studio_ocio_lib_config_t *cfg, const char *path);
 
 const char *studio_ocio_lib_default_display(studio_ocio_lib_config_t *cfg);
 const char *studio_ocio_lib_default_view(studio_ocio_lib_config_t *cfg, const char *display);

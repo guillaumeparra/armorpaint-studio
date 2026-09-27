@@ -756,9 +756,16 @@ gpu_texture_t *gpu_create_render_target(i32 width, i32 height, i32 format) {
 	return render_target;
 }
 
+// STUDIO-PATCH(ocio-import): pixels of a texture just decoded, before the upload; source is the file or extension
+// given to gpu_create_texture_from_encoded_bytes, NULL for raw bytes (see paint/plugins/external/PATCHES.md)
+void (*iron_texture_decoded)(void *pixels, i32 width, i32 height, i32 format, char *source) = NULL;
+
 gpu_texture_t *gpu_create_texture_from_bytes(buffer_t *data, i32 width, i32 height, i32 format) {
 	gpu_texture_t *texture = (gpu_texture_t *)malloc(sizeof(gpu_texture_t));
 	texture->buffer        = NULL;
+	if (iron_texture_decoded != NULL) { // STUDIO-PATCH(ocio-import)
+		iron_texture_decoded(data->buffer, width, height, format, NULL);
+	}
 	gpu_texture_init_from_bytes(texture, data->buffer, width, height, (gpu_texture_format_t)format, true);
 	return texture;
 }
@@ -821,6 +828,9 @@ gpu_texture_t *gpu_create_texture_from_encoded_bytes(buffer_t *data, char *forma
 		texture_format = GPU_TEXTURE_FORMAT_RGBA32;
 	}
 
+	if (iron_texture_decoded != NULL && texture_data != NULL) { // STUDIO-PATCH(ocio-import)
+		iron_texture_decoded(texture_data, width, height, texture_format, format);
+	}
 	// double t = iron_time(); ////
 	gpu_texture_init_from_bytes(texture, texture_data, width, height, texture_format, true);
 	// iron_log("gpu_texture_init_from_bytes in %fs\n", iron_time() - t); ////

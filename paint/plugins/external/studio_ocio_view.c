@@ -11,6 +11,7 @@
 #include "../../sources/types.h"
 #include "studio.h"
 #include "studio_ocio.h"
+#include "studio_ocio_import.h"
 #include "studio_ocio_lut.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -374,6 +375,7 @@ static void color_menu_draw(void) {
 		}
 		ui_menu_sub_end();
 	}
+	studio_ocio_import_menu_draw();
 	ui_menu_separator();
 	ui_menu_label(studio_ocio_view_active() ? string_tmp("%s / %s", ov.display, ov.view) : "Filmic (ArmorPaint)", NULL);
 }
