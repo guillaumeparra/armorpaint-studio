@@ -144,12 +144,14 @@ cubes("center1063.obj", 1063)
 EOF
 
 # Lance un script dans ArmorPaint sans interface ; ses lignes « t: » dans $W/$1.out.
-# script <nom> [projet .arm ouvert avant le script] : le script lu sur l'entrée standard.
+# script <nom> [projet .arm ouvert avant le script] : le script lu sur l'entrée standard. Code de retour attendu :
+# $RC_WANT (0 ; 1 quand le run signale des erreurs, import refusé ou tuiles écartées, lot B7).
+RC_WANT=0
 script() {
 	cat > "$W/$1.c"
 	rc=0
 	perl -e 'alarm 180; exec @ARGV' "$APP" ${2:+"$2"} --background --script "$W/$1.c" -ApplePersistenceIgnoreState YES > "$W/$1.log" 2>&1 || rc=$?
-	[ $rc -eq 0 ] || ko "script $1 : ArmorPaint rc $rc (voir $W/$1.log)"
+	[ $rc -eq $RC_WANT ] || ko "script $1 : ArmorPaint rc $rc au lieu de $RC_WANT (voir $W/$1.log)"
 	grep '^t: ' "$W/$1.log" | sed 's/^t: //' > "$W/$1.out" || true
 }
 line() { sed -n "s/^$2 //p" "$W/$1.out"; }
@@ -257,6 +259,8 @@ int main() {
 EOF
 check "témoin : maillage sans uv, dépliage proposé" '[ "$(line plain box)" = "[Unwrap Mesh]" ]'
 
+# obj à tiles1063 : imports refusés, tuiles hors de l'atlas, erreurs voulues.
+RC_WANT=1
 script obj <<EOF
 $DUMP
 
@@ -352,6 +356,7 @@ check "témoin : peindre p.1063 peint la 1063, elle seule" '[ "$(line red 1063)"
 check "preset studio : bloqué par le préflight, rien d'écrit" '[ "$(line tiles1065 studio)" = 0 ] && [ ! -e "$W/out_studio" ] && grep -q "6 UDIM tiles past the 64 of the layers, from 1065 on: they are not painted" "$W/tiles1065.log"'
 
 echo "== conseil de résolution après l'import"
+RC_WANT=0
 script hint <<EOF
 int main() {
 	studio_import_mesh("$W/tiles4.obj", 2);

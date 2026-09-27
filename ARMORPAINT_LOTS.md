@@ -439,14 +439,17 @@ Ce qui distingue un exporter studio d'un bouton « Export ».
 - ✅ **Maps et sidecar du projet** (2026-09-26) : profondeur et résolution par map dans la fenêtre (avec « pour toutes »), maps désactivables, sans toucher au preset ; clé `resolution` des presets (mise à l'échelle à l'export, la résolution du projet ne change pas ; résolutions du show vérifiées par texture). Les presets studio sont **seulement lus** (plus aucun fichier écrit dans `data/`, le dossier de l'app n'étant pas inscriptible au studio). Presets du projet et choix de la fenêtre dans un sidecar à côté du `.arm` (`<nom sans version>.export_settings.json`), écrit par la fenêtre seule.
 - ✅ **Nom des fichiers et jeux de textures** (2026-09-26) : modèle de nom modifiable dans la fenêtre (menu de variables : `<name>`, `<version>`, `<atlas>`, `<object>`, `<UDIM>`, `<resolution>`, `<bits>`, `<preset>`…, variables inconnues refusées), gardé par preset dans le sidecar et dans « Save as preset » ; le template ShotGrid (B3) reste prioritaire. Les atlas d'ArmorPaint (onglet Atlases devenu inaccessible) s'éditent dans la section « Texture sets » (`external/studio_atlas.c`, enregistrés avec le `.arm`) : un jeu de maps par jeu en export Visible. Maillages de test `.tests/udim_gen.py` (cube à 6 tuiles UDIM, props), banc `.tests/sets_app.sh`. Tri, changement de parent et suppression d'objets dans l'onglet Meshes : les jeux et les calques limités à un jeu suivent les objets (patch `atlas-objects-order`, banc `.tests/atlas_order_app.sh`).
 
-### B7 — Mode batch & headless · **4 j** *(révisé après test sur binaire — voir §15.6 de l'analyse)*
+### B7 — Mode batch & headless · **4 j** *(révisé après test sur binaire — voir §15.6 de l'analyse)* — ✅ **fait le 2026-09-27** (macOS)
 
 - ✅ **Le batch fonctionne déjà** via `--background --script` (mesuré : 5 maps exportées en 0,42 s). Pas besoin de l'implémenter.
 - 🔴 **Corriger le bug `--background --export-textures`** : `iron_stop()` ([args.c:215](paint/sources/args.c:215)) s'exécute avant l'export programmé ([args.c:190](paint/sources/args.c:190)) → aucun fichier produit. ~1 j. ✅ **Fait le 2026-09-26** : corrigé localement (patch `background-export`, branche `studio`), sans PR upstream.
 - Étendre la CLI : preset studio, template, mode UDIM (aujourd'hui `--export-textures` force `EXPORT_MODE_VISIBLE`, [args.c:161](paint/sources/args.c:161))
+  ✅ **Fait le 2026-09-27** (`external/studio_batch.c`, sans toucher à `args.c`) : `--export-mode visible|selected|per-object|per-tile` (alias `udim`), `--export-naming <modèle>` et `--export-color-space <espace>` (presets studio) à la suite de `--export-textures` ; un preset studio y marchait déjà (préflight, écriture atomique, manifeste), le template ShotGrid s'applique si le projet est dans un contexte (B3). La ligne est vérifiée avant de lancer quoi que ce soit : type, preset, dossier (un preset studio crée celui qui manque), options sans valeur, script introuvable.
 - **Vrai mode headless** — le gros morceau : `sys_start()` crée la fenêtre à [main.c:389](paint/sources/main.c:389) *avant* `args_parse()` ([base.c:520](paint/sources/base.c:520)). Il faut une fenêtre offscreen et une boucle sans présentation.
-- ⚠️ Nécessite quand même un GPU. Sur ferme : nœuds équipés, ou `llvmpipe`/`lavapipe` sur Linux (lent mais fonctionnel).
+  ✅ **Fait le 2026-09-27**, bien plus petit que prévu : iron sait déjà garder la fenêtre cachée (`enable_window`, honoré sous Linux et Windows) ; seul le backend macOS l'ignorait. Patch `headless` : `main.c` lit `--background`/`--api` avant `sys_start()`, `macos_system.m` ne montre pas la fenêtre, ne prend pas le focus et n'a pas d'icône dans le Dock (app « UIElement »). La boucle tourne pareil (Metal dessine hors écran), même sortie et même durée (~0,5 s pour 5 maps).
+- ⚠️ Nécessite quand même un GPU. Sur ferme : nœuds équipés, ou `llvmpipe`/`lavapipe` sur Linux (lent mais fonctionnel). Sous Linux, iron crée sa fenêtre X11/Wayland même cachée : il faut un display (`Xvfb`) — non testé.
 - Code de retour et log machine-lisible
+  ✅ **Fait le 2026-09-27** (patch `batch-report`, 4 points d'injection) : en `--background`, code 0 si tout a abouti, 1 si une erreur a été signalée (`console_error`, erreur de script minic, export bloqué, en échec ou sans fichier écrit), 2 si la ligne de commande est fausse (rien n'est lancé). `--report <fichier.json>` : état (`running` au démarrage, puis `ok`/`failed`), code, ligne de commande, chaque export (preset, mode, dossier, fichiers écrits, manifeste, erreurs), sorties de script (`studio_batch_output`), erreurs, journal. Banc `.tests/batch_app.sh` (projets UDIM et par objet, 32 vérifications) ; les bancs qui provoquent des erreurs attendent désormais le code 1.
 
 **Gain** : débit ×N par parallélisme de processus — le levier de débit le plus rentable (§14.3).
 
@@ -755,14 +758,14 @@ En C dans `external/`, sur le modèle de `studio_export_window.c` et de `studio_
 → *Export colorimétriquement juste d'abord ; le viewport ensuite.*
 
 **Phase 4 — industrialisation · 3 semaines**
-`B7` (headless réel) → ✅ `C4` (publish) → ✅ `C5` (contexte, mode dégradé) → `B6` → 🟡 `C6` (kit prêt, recette sur le vrai site)
+✅ `B7` (headless réel, rapport, codes de retour) → ✅ `C4` (publish) → ✅ `C5` (contexte, mode dégradé) → `B6` → 🟡 `C6` (kit prêt, recette sur le vrai site)
 
 ### Risques principaux
 
 | Risque | Impact | Parade |
 |---|---|---|
 | Link OCIO C++ sur 3 OS | 🔴 bloque A | POC en A0 avant d'engager ; voie B en repli |
-| Headless nécessite un GPU | 🟠 limite B7 | Nœuds de ferme équipés, ou lavapipe |
+| Headless nécessite un GPU | 🟠 limite B7 | Nœuds de ferme équipés, ou lavapipe ; sous Linux, un display (Xvfb) aussi |
 | ~~Upstream refuse la PR C1~~ | — | Sans objet : C1 fait dans `external/`, sans patch |
 | Postes Windows | 🟠 bloque C2 sur Windows | `studio_proc` Windows à écrire et tester sur une machine Windows (le sidecar Python, lui, est portable) |
 | Toolkit du studio | 🟠 C2 à C4 validés sur site simulé seulement | Recette C6 sur le vrai site : session Desktop, amorçage de la config de prod, templates ArmorPaint ajoutés, publish (vignettes, types, chargeurs UDIM) |

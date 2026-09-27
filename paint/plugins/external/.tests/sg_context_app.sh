@@ -44,13 +44,16 @@ export STUDIO_SG_BRIDGE="$T/sg_fixture.py" STUDIO_SG_PYTHON="$PY" STUDIO_TEST_WO
 	STUDIO_SG_CHECK_INTERVAL=1 STUDIO_SG_HOOK="$W/find_hook.py"
 
 # run <nom> [projet] [ui] : ArmorPaint sur le projet s'il est donné, sans interface sauf avec ui ; script <nom>.c (entrée
-# standard), journal <nom>.log.
+# standard), journal <nom>.log. Code de retour attendu : $RC_WANT (0 ; 1 quand le run signale des erreurs, lot B7).
+RC_WANT=0
 run() {
 	cat > "$W/$1.c"
 	background=--background
 	if [ "${3:-}" = ui ]; then background=; fi
+	rc=0
 	perl -e 'alarm 300; exec @ARGV' "$APP" ${2:+"$2"} $background --script "$W/$1.c" -ApplePersistenceIgnoreState YES \
-		> "$W/$1.log" 2>&1 || ko "$1 : ArmorPaint rc $? (voir $W/$1.log)"
+		> "$W/$1.log" 2>&1 || rc=$?
+	[ $rc -eq $RC_WANT ] || ko "$1 : ArmorPaint rc $rc au lieu de $RC_WANT (voir $W/$1.log)"
 }
 line() { sed -n "s/^t: $2 //p" "$W/$1.log"; }
 audit_lines() { if [ -f "$W/audit.jsonl" ]; then wc -l < "$W/audit.jsonl" | tr -d ' '; else echo 0; fi; }
@@ -189,6 +192,8 @@ EOF
 echo "== 2. ShotGrid injoignable : mode fichier, puis retour du site"
 FROM=$(audit_lines)
 : > "$W/offline.flag"
+# Site injoignable et noms ShotGrid indisponibles sont des erreurs (console_error) : le run --background finit en code 1.
+RC_WANT=1
 run offline "$V1" <<EOF
 int frame = 0;
 int phase = 0;
@@ -257,6 +262,7 @@ EOF
 
 echo "== 3. ShotGrid perdu en plein publish : file d'attente, rejouée au retour du site"
 FROM=$(audit_lines)
+RC_WANT=0
 cat > "$WORK/robot.export_settings.json" <<EOF
 {"export": {"preset": "basic", "dir": "$W/unused", "mode": 3, "padding": false,
  "presets": {"basic": {"disabled": ["opacity", "occlusion", "roughness", "metallic", "height", "emission", "subsurface"]}}}}

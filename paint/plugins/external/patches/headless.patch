@@ -1,0 +1,55 @@
+diff --git a/base/sources/backends/macos_system.m b/base/sources/backends/macos_system.m
+index afa8e682..40ff9783 100644
+--- a/base/sources/backends/macos_system.m
++++ b/base/sources/backends/macos_system.m
+@@ -608,9 +608,13 @@ static void create_window(iron_window_options_t *options) {
+ 	windows[0].handle = window;
+ 	windows[0].view   = view;
+ 
+-	[window makeKeyAndOrderFront:nil];
++	// STUDIO-PATCH(headless): window left hidden when options->visible is false (--background), see
++	// paint/plugins/external/PATCHES.md
++	if (options->visible) {
++		[window makeKeyAndOrderFront:nil];
++	}
+ 
+-	if (options->mode == IRON_WINDOW_MODE_FULLSCREEN) {
++	if (options->visible && options->mode == IRON_WINDOW_MODE_FULLSCREEN) {
+ 		[window toggleFullScreen:nil];
+ 		windows[0].fullscreen = true;
+ 	}
+@@ -659,8 +663,14 @@ void iron_init(iron_window_options_t *win) {
+ 	@autoreleasepool {
+ 		myapp = [IronApplication sharedApplication];
+ 		[myapp finishLaunching];
+-		[[NSRunningApplication currentApplication] activateWithOptions:(NSApplicationActivateAllWindows | NSApplicationActivateIgnoringOtherApps)];
+-		NSApp.activationPolicy = NSApplicationActivationPolicyRegular;
++		// STUDIO-PATCH(headless): without a visible window (--background), no focus taken and no Dock icon
++		if (win->visible) {
++			[[NSRunningApplication currentApplication] activateWithOptions:(NSApplicationActivateAllWindows | NSApplicationActivateIgnoringOtherApps)];
++			NSApp.activationPolicy = NSApplicationActivationPolicyRegular;
++		}
++		else {
++			NSApp.activationPolicy = NSApplicationActivationPolicyAccessory;
++		}
+ 		add_menubar();
+ 
+ #ifdef WITH_GAMEPAD
+diff --git a/paint/sources/main.c b/paint/sources/main.c
+index 8fa5e83f..308f22f6 100644
+--- a/paint/sources/main.c
++++ b/paint/sources/main.c
+@@ -387,6 +387,13 @@ void _kickstart() {
+ 	config_load();
+ 	config_init();
+ 	context_init();
++	// STUDIO-PATCH(headless): --background (and --api, which implies it) runs without showing the window, as its help
++	// says (args.c); read here because args_parse() comes after sys_start(), see plugins/external/PATCHES.md
++	for (i32 i = 1; i < iron_get_arg_count(); ++i) {
++		if (string_equals(iron_get_arg(i), "--background") || string_equals(iron_get_arg(i), "--api")) {
++			enable_window = false;
++		}
++	}
+ 	sys_start(config_get_options());
+ 
+ #ifdef is_debug

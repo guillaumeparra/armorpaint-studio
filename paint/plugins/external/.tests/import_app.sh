@@ -15,13 +15,15 @@ W=$(cd "$W" && pwd)
 [ -x "$APP" ] || { echo "ArmorPaint not found: $APP" >&2; exit 1; }
 FAIL=0
 
-# run <attendu> <args...> : lance ArmorPaint depuis le dossier courant, exige rc 0 et <attendu> dans la sortie
+# run <attendu> <args...> : lance ArmorPaint depuis le dossier courant, exige le code $RC_WANT (0 ; 1 pour un fichier
+# refusé : une erreur fait échouer un run --background, lot B7) et <attendu> dans la sortie
+RC_WANT=0
 run() {
 	want=$1
 	shift
 	# -ApplePersistenceIgnoreState : sans lui, un plantage précédent laisse une fenêtre modale qui bloque le lancement
 	out=$(perl -e 'alarm 60; exec @ARGV' "$APP" "$@" --background -ApplePersistenceIgnoreState YES 2>&1) && rc=0 || rc=$?
-	if [ $rc -eq 0 ] && printf '%s' "$out" | grep -qF -- "$want"; then
+	if [ $rc -eq $RC_WANT ] && printf '%s' "$out" | grep -qF -- "$want"; then
 		echo "ok   $* -> $want" | sed "s#$W#<w>#g"
 	else
 		echo "FAIL $* (rc $rc, attendu : $want)" | sed "s#$W#<w>#g"
@@ -82,6 +84,7 @@ run "root=grid idx=6" ../grid.obj --script ../names.c
 cd ..
 
 echo "== import-null-guards : fichier absent ou illisible"
+RC_WANT=1
 for e in obj fbx gltf glb psd tiff svg; do
 	run "Could not open file $W/missing/x.$e." "$W/missing/x.$e"
 done
@@ -93,6 +96,7 @@ for e in gltf glb fbx; do
 done
 
 echo "== non-régression : fichiers valides"
+RC_WANT=0
 run "root=grid idx=6" "$W/grid.obj" --script "$W/names.c"
 run "root=tri idx=3" "$W/tri.gltf" --script "$W/names.c"
 run "root=tri idx=3" "$W/tri.glb" --script "$W/names.c"

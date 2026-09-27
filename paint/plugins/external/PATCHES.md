@@ -1603,3 +1603,89 @@ le pipeline à la cible. Rejouer l'étape 4 du banc sans le patch.
 **Non couvert.** Windows (Direct3D 12) et Linux (Vulkan) : leurs pipelines ont aussi un format de cible fixe, et le
 même code de paint/ y dessine en RGBA32 dans des cibles 16/32 bits. À vérifier au portage : le banc A6 le montre. Les
 pipelines à plusieurs cibles (MRT) ne sont pas adaptés : ceux de paint/ déclarent déjà leurs formats.
+
+---
+
+## headless
+
+| | |
+|---|---|
+| Fichiers | `base/sources/backends/macos_system.m` (`create_window`, `iron_init`), `paint/sources/main.c` (`_kickstart`, avant `sys_start`) |
+| Commit studio | `de00e5ba` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-27) |
+| Constaté | 2026-09-27, lot B7 ; présent en `85f6cf1c` |
+
+**Bug.** `--background` se décrit comme « Run without displaying the window » (`args.c`), mais sous macOS la fenêtre
+s'affiche, prend le focus et l'app a une icône dans le Dock pendant tout le run (export, script, `--api`). Deux causes :
+`args_parse()` lit `--background` après `sys_start()`, qui a déjà créé la fenêtre ; et le backend macOS ignore
+`options->visible`, que les backends Linux (`XMapWindow`) et Windows respectent (iron le règle depuis `enable_window`,
+que `--nowindow` met à faux).
+
+**Correctif.** `_kickstart` (`main.c`) parcourt la ligne de commande juste avant `sys_start()` : `--background` ou
+`--api` (qui l'implique) mettent `enable_window` à faux. Dans `macos_system.m`, une fenêtre non visible n'est ni
+montrée (`makeKeyAndOrderFront`) ni passée en plein écran, et `iron_init` n'active pas l'app et la déclare
+`NSApplicationActivationPolicyAccessory` (pas d'icône dans le Dock, pas de menu) au lieu de `Regular`. La fenêtre et sa
+vue Metal existent toujours : le rendu et la boucle sont inchangés.
+Pour régénérer : `git diff de00e5ba^ de00e5ba -- base/sources/backends/macos_system.m paint/sources/main.c` ; `main.c`
+porte aussi [batch-report](#batch-report) et [udim-core](#udim-core), `git diff upstream studio` les mêle.
+
+**Test.** `.tests/batch_app.sh`, section « sans fenêtre » : pendant un `--background --script` qui attend 3 s,
+`CGWindowListCopyWindowInfo` ne trouve aucune fenêtre au pid d'ArmorPaint et `lsappinfo` le donne `UIElement`. Vérifié
+à la main le 2026-09-27 : un export upstream sort les mêmes fichiers qu'en fenêtré, dans le même temps (~0,5 s). Sans
+le patch, la fenêtre s'affiche et prend le focus. Au 2026-09-27, les 16 bancs dans l'app (`.tests/*_app.sh`) passent
+avec le patch.
+
+**Signes que l'upstream l'a corrigé.** `options->visible` (ou `win->visible`) lu dans `macos_system.m`, ou
+`args_background` connu avant `sys_start()`. Rejouer la section du banc sans le patch.
+
+**Non couvert.** Linux et Windows ne sont pas testés : leurs backends gardent déjà la fenêtre cachée, mais sous Linux
+iron ouvre quand même un display X11/Wayland (il en faut un sur les nœuds de ferme, `Xvfb` par exemple) et le GPU reste
+nécessaire partout.
+
+---
+
+## batch-report
+
+| | |
+|---|---|
+| Fichiers | `paint/sources/console.c` (`console_error`, `console_log`), `paint/sources/main.c` (`_kickstart`, après `iron_start`), `paint/sources/io/export_texture.c` (`export_texture_write_texture`) |
+| Commit studio | `710a6277` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-27) |
+| Motif | lot B7 : code de retour et rapport machine-lisible d'un run `--background` |
+
+**Motif.** Upstream, un run `--background` quitte toujours avec le code 0 : fichier introuvable, erreur de script,
+preset ou dossier d'export faux (l'upstream retombe sur le premier preset, ou n'écrit rien avec un simple
+`iron_log`) passent inaperçus d'une ferme ou d'un script de pipeline. Aucun moyen non plus de savoir quels fichiers ont
+été écrits.
+
+**Correctif.** Quatre points d'injection vers `external/studio_batch.c`, sous `WITH_EXTERNAL` :
+- `console_error` → `studio_batch_on_error` : une erreur fait échouer le run ;
+- `console_log` → `studio_batch_on_log` : le journal du rapport (les erreurs de script minic, `<fichier>:<ligne>:
+  error:`, passent par là et comptent comme erreurs) ;
+- `export_texture_write_texture` → `studio_batch_on_file` : chaque fichier que l'export upstream écrit ;
+- après `iron_start()` → `studio_batch_finish` : rapport final, puis `exit(code)` si le code n'est pas 0.
+
+Le module lit la ligne de commande à la fin d'`external_init` : en `--background`, une ligne fausse (type, preset,
+dossier de `--export-textures`, `--export-mode`/`--export-naming`/`--export-color-space` invalides ou sans preset
+studio, `--script` introuvable) écrit le rapport et quitte avec le code 2 avant tout chargement. Codes : 0 si tout a
+abouti, 1 si une erreur a été signalée (y compris un export studio bloqué par le préflight, un fichier annoncé mais
+absent, ou un export sans aucun fichier écrit), 2 sur ligne fausse. `--report <fichier.json>` : écrit `running` au
+démarrage puis l'état final (écriture atomique). Hors `--background`, rien ne change (ni rapport, ni code). Les options
+d'export sont documentées dans le README (« Mode batch (B7) »). Pour régénérer : `git diff 710a6277^ 710a6277 --
+paint/sources/console.c paint/sources/main.c paint/sources/io/export_texture.c` ; ces fichiers portent d'autres
+patches ([headless](#headless), [studio-export](#studio-export), [udim-export-sets](#udim-export-sets)…),
+`git diff upstream studio` les mêle.
+
+**Test.** `.tests/batch_app.sh` : exports upstream, par tuile UDIM, par objet et avec espace OCIO imposé (fichiers du
+rapport = fichiers sur le disque, manifeste compris) ; code 1 pour un maillage absent, un préflight bloqué, une erreur de
+script, un `console_error` ; sorties de script et rapport `running` lu pendant le run ; code 2 pour 12 lignes fausses,
+sans rien écrire ; un preset studio vers un dossier absent le crée (code 0). Au 2026-09-27 : 32 vérifications passent. Les bancs qui provoquent des erreurs exprès
+(`import_app.sh`, `udim_app.sh`, `sg_context_app.sh`) attendent désormais le code 1 sur ces cas.
+
+**Signes que l'upstream l'a corrigé.** Un `exit` avec un code non nul dans `args.c` ou `main.c` en `--background`, ou
+un compteur d'erreurs dans `console.c`. Garder quand même le rapport : il n'a pas d'équivalent upstream.
+
+**Non couvert.** Linux et Windows non testés (mutex `pthread`/`CRITICAL_SECTION` écrits pour les deux). Les erreurs que
+l'upstream ne signale que par `iron_log` (sans `console_error`) ne comptent pas, sauf celles de `--export-textures`
+vérifiées d'avance. Les fichiers de `--export-mesh` et `--export-material` ne sont pas listés dans le rapport. Un crash
+ou un `alarm` laisse le rapport à `running` : c'est le signe qu'il faut lire.

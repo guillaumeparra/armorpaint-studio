@@ -1088,7 +1088,7 @@ ArmorPaint --background cube.obj --script export.c
 
 | Lot | Révision |
 |---|---|
-| **B7 — batch & headless** | **Revu à la baisse.** Le batch via `--script` fonctionne déjà. Reste : corriger le bug §15.3 (~1 j, upstreamable) + valider le headless sans display. Estimation **8 j → 4 j**. |
+| **B7 — batch & headless** | **Revu à la baisse.** Le batch via `--script` fonctionne déjà. Reste : corriger le bug §15.3 (~1 j, upstreamable) + valider le headless sans display. Estimation **8 j → 4 j**. ✅ Fait le 2026-09-27 : sous macOS, seul le backend ignorait la fenêtre cachée d'iron (`enable_window`) — patch `headless` ; codes de retour 0/1/2 et rapport JSON (patch `batch-report`, `external/studio_batch.c`). |
 | **C1 — pont d'exécution** | Confirmé faisable : l'API de scripting est riche et opérationnelle. |
 | **B3 — nomenclature** | Confirmé indispensable (`untitled_base.png`). |
 | Correctifs upstream | ~~Ajouter le bug §15.3 à la liste des PR à proposer~~ → **corrigé localement le 2026-09-26** (patch `background-export`, §16). Décision : aucune PR upstream. |

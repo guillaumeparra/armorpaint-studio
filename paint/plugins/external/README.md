@@ -53,6 +53,7 @@ Modules, un par lot (voir `ARMORPAINT_LOTS.md` à la racine d'armorpaint) :
 | `studio_sg_context`, `studio_sg_offline`, `studio_audit`, `assets/studio_sg_queue.py`, `assets/studio_audit.py` | C5 | ✅ contexte ShotGrid gardé dans le `.arm`, mode dégradé hors ligne, file d'attente des publishes rejouée au retour du site, journal d'audit (macOS ; validé sur site simulé) |
 | `tools/recette_c6.py`, `docs/` | C6 | 🟡 kit de recette prêt (outil de vérification, fiche, guide de l'artiste, runbook) ; recette sur le vrai site à faire |
 | `studio_export_window`, `assets/studio_export_window.py`, `studio_atlas` | B6 | ✅ fenêtre d'export Qt (PySide6) à la place de la boîte d'export : presets studio, espace OCIO, préflight en direct, nom des fichiers, jeux de textures (macOS) |
+| `studio_batch` | B7 | ✅ mode batch : `--background` sans fenêtre, options `--export-mode`, `--export-naming`, `--export-color-space`, rapport JSON (`--report`), code de retour 0/1/2 (macOS) |
 
 Build : `../base/make --compile` depuis `paint/`. Le log de démarrage affiche `studio: external <version>
 loaded`, puis une ligne par module.
@@ -881,7 +882,79 @@ studio. Chaque texture garde son propre format. Le type fixe seulement la profon
 aplatis (`png`/`jpg` : 8 bits, `exr16` : half, `exr32` : float), comme dans l'upstream. Pour une sortie 16 ou
 32 bits utile, prendre `exr16` ou `exr32` ; le préflight avertit sinon.
 
-Point d'injection upstream : `STUDIO-PATCH(studio-export)` (PATCHES.md).
+Point d'injection upstream : `STUDIO-PATCH(studio-export)` (PATCHES.md). Mode, nom des fichiers et espace OCIO en
+ligne de commande, rapport et code de retour : voir « Mode batch (B7) ».
+
+## Mode batch (B7)
+
+`ArmorPaint --background` tourne sans fenêtre (patch `headless`) : aucune fenêtre à l'écran, pas d'icône dans le Dock,
+le focus n'est pas pris. Sous macOS ; les backends Linux et Windows savaient déjà garder la fenêtre d'iron cachée,
+`--background` la leur demande désormais aussi (non testé). Un GPU reste nécessaire (Metal). Plusieurs processus peuvent tourner en parallèle.
+
+Options du studio (l'upstream ignore les arguments qu'il ne connaît pas) :
+
+| Option | Effet |
+|---|---|
+| `--report <fichier.json>` | rapport du run, voir plus bas ; écrit dès le démarrage (`"status": "running"`) puis à la fin |
+| `--export-mode <mode>` | mode de `--export-textures` : `visible` (défaut, celui de l'upstream), `selected`, `per-object`, `per-tile` (alias `udim`) |
+| `--export-naming <modèle>` | nom des fichiers (variables de `naming`, voir « Format »), à la place de celui du preset ; preset studio seulement |
+| `--export-color-space <espace>` | espace OCIO des textures de couleur, comme `STUDIO_EXPORT_COLOR_SPACE` ; preset studio seulement |
+
+```sh
+ArmorPaint robot_v003.arm --background --export-textures exr16 arnold /shows/demo/robot/textures \
+    --export-mode per-tile --export-naming "<name>_v<version>_<channel>.<UDIM>.<ext>" --report /tmp/robot.json
+echo $?   # 0, 1 ou 2
+```
+
+**Code de retour** d'un run `--background` :
+- `0` : tout a abouti ;
+- `1` : une erreur pendant le run : message d'erreur d'ArmorPaint (`console_error` : fichier introuvable, texture
+  manquante d'un `.arm`…), erreur de script minic (`<script>:<ligne>: error: …`), export bloqué par le préflight ou en
+  échec, export sans fichier écrit, fichier annoncé mais absent ;
+- `2` : ligne de commande fausse, rien n'est lancé (sortie dès le démarrage) : type, dossier ou preset de
+  `--export-textures` (l'upstream prenait en silence le premier preset, ou n'écrivait rien ; un preset studio crée le
+  dossier qui manque, seul un chemin qui n'est pas un dossier est refusé), `--export-textures`
+  incomplet, option du studio sans valeur, mode inconnu, modèle de nom ou espace refusé, options `--export-*` sans
+  `--export-textures`, `--export-naming` ou `--export-color-space` avec un preset d'ArmorPaint, script ou dossier du
+  rapport introuvable ;
+- après un plantage, le code du signal ; le rapport reste `"running"`.
+
+**Rapport** (écrit à côté puis renommé : jamais lu à moitié) :
+
+```json
+{
+  "version": 1, "status": "ok", "exit_code": 0, "studio_version": "0.8.0", "pid": 4242,
+  "started": "2026-09-27T10:09:51Z", "duration_s": 0.51, "argv": ["…"],
+  "exports": [
+    {"dir": "…/textures", "preset": "arnold", "studio_preset": true, "mode": "per-tile", "destination": "disk",
+     "preflight_only": false, "ok": true, "errors": 0, "manifest": "…/robot_v003.export.json",
+     "files": ["…/robot_v003_baseColor.1001.exr", "…"]}
+  ],
+  "outputs": {"version": "13"},
+  "errors": [],
+  "log_dropped": 0,
+  "log": [{"level": "info", "message": "Textures exported with arnold: 54 files, 1.2 GB, manifest …"}]
+}
+```
+
+`exports` : chaque export du run (`--export-textures` et ceux des scripts) et ses fichiers : relevés au moment de
+l'écriture pour un preset d'ArmorPaint (patch `batch-report`), liste exacte de l'écriture atomique pour un preset
+studio (manifeste à part). `ok` vaut `null` pour un export pas fini. `errors` : messages d'erreur (200 au plus) ;
+`log` : messages de la console d'ArmorPaint (2000 au plus, `log_dropped` compte les suivants).
+
+Dans un script (`--background --script`), `console_error("…")` fait échouer le run, et :
+
+```c
+void studio_batch_output(char *key, char *value); // "outputs" du rapport : ce que le script rend à l'appelant
+int  studio_batch_exit_code(void);                // code de retour si le run s'arrêtait maintenant (0 ou 1)
+```
+
+Hors `--background`, les options `--export-*` valent pour l'export de `--export-textures` (une ligne fausse est
+signalée au journal et les options ignorées) ; ni rapport ni code de retour.
+
+**Limites.** Un GPU reste nécessaire (sur ferme : nœuds équipés ; Linux sans écran : X virtuel, non testé). Les
+fichiers de `--export-mesh` et `--export-material` ne sont pas dans le rapport. Une erreur signalée par `iron_log`
+seul, hors console, ne compte pas : celles de `--export-textures` et `--script` sont vérifiées au démarrage.
 
 ## Gestion couleur OCIO (A0 à A6)
 
@@ -1270,6 +1343,7 @@ int   studio_ocio_import_reconvert(void);        // recharge et reconvertit les 
 python3 .tests/arm_paths.py <projet.arm> [fichier...]   # chemins des fichiers d'un .arm ; avec des fichiers, vérifie qu'il les désigne, relatifs et normalisés
 .tests/export.sh [dossier de travail]  # export studio (B2, B4, B5) hors app : encodeurs relus par libpng/libtiff (patches sdefl-bound, encode-image-overflow), expressions, presets, préflight, conseil de résolution UDIM ; FUZZ=<n>
 .tests/export_app.sh [dossier]         # export studio dans l'app : scripts, --export-textures, pixels = upstream, manifeste, atomicité
+.tests/batch_app.sh [dossier]          # mode batch (B7) : sans fenêtre ni Dock, --export-mode/-naming/-color-space, rapport JSON, codes de retour 0/1/2
 .tests/ocio.sh [dossier de travail]    # OCIO (A1) hors app : ABI, module, références PyOpenColorIO, threads, erreurs ; OCIO_TEST_CONFIGS=<configs>
 .tests/ocio_app.sh [dossier]           # OCIO dans l'app : configuration par défaut, $OCIO, $OCIO invalide, API de scripting
 .tests/ocio_export_app.sh [dossier]    # export OCIO (A3) dans l'app : pixels = PyOpenColorIO, préflight, manifeste, cas bloquants

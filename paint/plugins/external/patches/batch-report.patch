@@ -1,0 +1,54 @@
+diff --git a/paint/sources/console.c b/paint/sources/console.c
+index 1ef943d4..76eade11 100644
+--- a/paint/sources/console.c
++++ b/paint/sources/console.c
+@@ -63,6 +63,10 @@ void console_info(char *s) {
+ }
+ 
+ void console_error(char *s) {
++#ifdef WITH_EXTERNAL // STUDIO-PATCH(batch-report): errors fail a --background run (exit code, report), see plugins/external/PATCHES.md
++	void studio_batch_on_error(const char *message);
++	studio_batch_on_error(s);
++#endif
+ 	console_message_timer = 8.0;
+ 	console_message       = string_copy(s);
+ 	console_message_color = 0xffaa0000;
+@@ -71,6 +75,10 @@ void console_error(char *s) {
+ }
+ 
+ void console_log(char *s) {
++#ifdef WITH_EXTERNAL // STUDIO-PATCH(batch-report): log of the --background report
++	void studio_batch_on_log(const char *message);
++	studio_batch_on_log(s);
++#endif
+ 	iron_log(s);
+ 	base_redraw_console();
+ 	string_array_push(console_last_traces, string_copy(s));
+diff --git a/paint/sources/io/export_texture.c b/paint/sources/io/export_texture.c
+index bc787310..8c153330 100644
+--- a/paint/sources/io/export_texture.c
++++ b/paint/sources/io/export_texture.c
+@@ -62,6 +62,10 @@ static void export_texture_write_texture(char *file, buffer_t *pixels, i32 type,
+ 		return;
+ 	}
+ 
++#ifdef WITH_EXTERNAL // STUDIO-PATCH(batch-report): files listed in the --background report, see plugins/external/PATCHES.md
++	void studio_batch_on_file(const char *path);
++	studio_batch_on_file(file);
++#endif
+ 	if (bits == 8 && g_context->format_type == TEXTURE_LDR_FORMAT_PNG) {
+ 		iron_write_png(file, pixels, res_x, res_y, format);
+ 	}
+diff --git a/paint/sources/main.c b/paint/sources/main.c
+index 308f22f6..08e5aa27 100644
+--- a/paint/sources/main.c
++++ b/paint/sources/main.c
+@@ -436,4 +436,8 @@ void _kickstart() {
+ #endif
+ 
+ 	iron_start();
++#ifdef WITH_EXTERNAL // STUDIO-PATCH(batch-report): report and exit code of a --background run, see plugins/external/PATCHES.md
++	void studio_batch_finish(void);
++	studio_batch_finish();
++#endif
+ }
