@@ -531,11 +531,22 @@ Sans nouveau patch upstream : le contexte va dans une entrée du `.arm` par `pro
 - `sg_context_app.sh`, dans ArmorPaint sur le site simulé : 13 contrôles (contexte gardé et relu ; mode fichier, puis retour du site trouvé au repos ; coupure en plein publish, file rejouée ; audit des deux processus).
 - `export.sh` : journal en ajout et comptage de la file.
 
-### C6 — Intégration & recette · **5 j**
+### C6 — Intégration & recette · **5 j** — 🟡 **préparé le 2026-09-27** ; la recette elle-même attend le vrai site
 
 - Test sur un projet SG de test avec de vrais assets
 - Aller-retour complet : open → paint → save → publish → réouverture depuis SG
 - Documentation utilisateur (1 page) et runbook d'exploitation
+
+Le kit de recette est prêt, dans `external/` :
+
+- ✅ `tools/recette_c6.py` (et `recette_c6_hook.py`) : vérifie le poste et la configuration Toolkit sur le vrai site, par le sidecar d'ArmorPaint lui-même. Il couvre Python et PySide6, tk-core, session Desktop, site, tâches de l'artiste, configurations de pipeline, puis, dans le contexte d'une tâche, le moteur, les apps, les templates, les réglages de tk-multi-publish2, les types de publish et le nom des textures. Pour chaque point : ce qui va, et quoi corriger. Rapport Markdown. Lecture seule sans `--task`. Validé sur le site simulé, nominal et en panne (pas de session, site coupé, template absent, erreur d'authentification).
+- ✅ `docs/RECETTE_C6.md` : la fiche (préparation, vérification, aller-retour en 10 étapes, mode dégradé réel en 6, retour).
+- ✅ `docs/GUIDE_ARTISTE.md` : le guide de l'artiste, une page.
+- ✅ `docs/EXPLOITATION.md` : le runbook (composants, lanceur, fichiers d'un poste, surveillance par le journal d'audit, incidents, écarter un publish, mise à jour, format `.arm`).
+- ✅ **Défauts trouvés en route** :
+  - sur macOS, préférences studio, journal d'audit et **file des publishes** allaient dans l'app (comme `config.json` d'ArmorPaint), même en lecture seule, ce qui est le cas au studio (B6) : la file de C5 n'aurait pas pu s'écrire. Ils vont maintenant dans le dossier de sauvegarde d'ArmorPaint (`~/Library/Application Support/ArmorPaint/`) quand l'app n'est pas inscriptible, et le journal le dit au démarrage (contrôle ajouté à `ocio_prefs_app.sh`, en échec sans le correctif). Une app inscriptible qu'on remplace les efface encore : parade au déploiement dans le runbook et le README ;
+  - un enregistrement de la file pouvait désigner une vignette hors de la file (supprimée ou déplacée au rejeu ou à l'écart) : nom de fichier seul exigé, test ajouté.
+- ⏳ **Reste** : dérouler `docs/RECETTE_C6.md` sur le vrai site du studio (une demi-journée, un TD et un artiste). **Préalable à D2.**
 
 | Chantier C — total | **37 j** |
 |---|---|
@@ -585,7 +596,7 @@ Décidé le 2026-09-26. Analyse, architecture et détail des phases : **`ARMORPA
 → *Export colorimétriquement juste d'abord ; le viewport ensuite.*
 
 **Phase 4 — industrialisation · 3 semaines**
-`B7` (headless réel) → ✅ `C4` (publish) → ✅ `C5` (contexte, mode dégradé) → `B6` → `C6`
+`B7` (headless réel) → ✅ `C4` (publish) → ✅ `C5` (contexte, mode dégradé) → `B6` → 🟡 `C6` (kit prêt, recette sur le vrai site)
 
 ### Risques principaux
 

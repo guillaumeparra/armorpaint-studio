@@ -27,6 +27,11 @@ Ce dossier est compilé dans ArmorPaint par le hook upstream `paint/plugins/exte
   tests ; le venv PySide6 y est créé par `tools/setup_shotgrid.sh`, hors de git.
 - `tools/armorpaint.sh` : lance la version studio (build compris) ; `--shotgrid-demo` pour le site simulé. Sans
   `STUDIO_PYTHON`, il prend le venv PySide6 de `.shotgrid/` (créé au besoin) pour la fenêtre d'export.
+- `tools/recette_c6.py` : vérifie un poste et la configuration Toolkit d'un projet sur le vrai site ShotGrid, par le
+  sidecar d'ArmorPaint (recette C6, diagnostic d'un poste).
+- `docs/` : documentation d'exploitation, en français : `GUIDE_ARTISTE.md` (une page pour l'artiste),
+  `EXPLOITATION.md` (déploiement, fichiers d'un poste, surveillance, incidents, mises à jour) et `RECETTE_C6.md`
+  (recette sur le vrai site ShotGrid).
 
 Modules, un par lot (voir `ARMORPAINT_LOTS.md` à la racine d'armorpaint) :
 
@@ -46,6 +51,7 @@ Modules, un par lot (voir `ARMORPAINT_LOTS.md` à la racine d'armorpaint) :
 | `studio_workfiles`, `tk-armorpaint/` | C3 | ✅ Workfiles (tk-multi-workfiles2) et menu ShotGrid, par le moteur Toolkit tk-armorpaint (macOS ; validé sur site simulé) |
 | `studio_publish`, `tk-armorpaint/hooks/tk-multi-publish2/` | C4 | ✅ publish ShotGrid par tk-multi-publish2 : projet copié par ArmorPaint, textures exportées puis publiées, séquences `<UDIM>`, vignette du viewport (macOS ; validé sur site simulé) |
 | `studio_sg_context`, `studio_sg_offline`, `studio_audit`, `assets/studio_sg_queue.py`, `assets/studio_audit.py` | C5 | ✅ contexte ShotGrid gardé dans le `.arm`, mode dégradé hors ligne, file d'attente des publishes rejouée au retour du site, journal d'audit (macOS ; validé sur site simulé) |
+| `tools/recette_c6.py`, `docs/` | C6 | 🟡 kit de recette prêt (outil de vérification, fiche, guide de l'artiste, runbook) ; recette sur le vrai site à faire |
 | `studio_export_window`, `assets/studio_export_window.py`, `studio_atlas` | B6 | ✅ fenêtre d'export Qt (PySide6) à la place de la boîte d'export : presets studio, espace OCIO, préflight en direct, nom des fichiers, jeux de textures (macOS) |
 
 Build : `../base/make --compile` depuis `paint/`. Le log de démarrage affiche `studio: external <version>
@@ -507,6 +513,10 @@ perdue) n'est pas recréé, il est complété (vignette, dépendances). Le menu 
 (`2 publishes waiting for ShotGrid`, **Replay Pending Publishes**). Seuls ceux du site de la session sont rejoués ;
 ceux d'un autre site attendent une session sur ce site. L'op `discard_publishes` en écarte (fichiers déplacés dans
 `discarded/` du dossier de la file).
+
+⚠️ Sur macOS, les préférences studio sont dans l'app quand elle est inscriptible (`data/`, à côté de `config.json`) :
+remplacer l'app efface alors la file. Le lanceur règle `STUDIO_SG_QUEUE` (et `STUDIO_PREFS`, `STUDIO_AUDIT_LOG`) vers
+un dossier de l'utilisateur ; voir `docs/EXPLOITATION.md`, qui dit aussi comment écarter un publish ArmorPaint fermé.
 
 ### Journal d'audit
 
@@ -1057,7 +1067,8 @@ réécrite (celle d'un projet ouvert est gardée telle quelle).
 
 **Préférences studio.** Les réglages couleur sont gardés d'une session à l'autre dans `studio_prefs.json`, à côté du
 `config.json` d'ArmorPaint (dossier `data/` de l'app, ou dossier de sauvegarde du système quand l'app est dans un
-dossier protégé), ou dans le fichier `$STUDIO_PREFS`. Un fichier à part : `config_save()` d'ArmorPaint réécrit
+dossier protégé ou en lecture seule : `~/Library/Application Support/ArmorPaint/` sur macOS), ou dans le fichier
+`$STUDIO_PREFS`. Un fichier à part : `config_save()` d'ArmorPaint réécrit
 `config.json` champ par champ et y perdrait les clés du studio. Objet JSON plat, clés inconnues gardées (celles d'une
 autre version du studio), écrit à chaque changement par un fichier temporaire renommé. Illisible, il est journalisé,
 ignoré, et mis de côté en `.bak` à la première écriture. En `--background`, il n'est ni lu ni écrit sans
