@@ -501,6 +501,9 @@ typedef struct history_step {
 	vec4_t                       object_loc;
 	quat_t                       object_rot;
 	vec4_t                       object_scale;
+	// STUDIO-PATCH(merge-group-undo): Merge Group, the group with its layers and masks (bottom to top) and their saved fields
+	struct slot_layer_t_array    *merge_layers;
+	struct slot_layer            *merge_saved;
 } history_step_t;
 
 typedef struct logic_node {

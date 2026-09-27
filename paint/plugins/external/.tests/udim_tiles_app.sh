@@ -24,9 +24,10 @@
 #   9. bakes par tuile : Texcoord, Position, Object ID ; high poly (hauteur, dérivée, normales) avec le high confondu
 #      ou incliné ; Curvature : un aperçu par tuile ;
 #  10. 70 tuiles : le pinceau au-delà des 64 tenues ne peint rien ;
-#  11. opérations de calques (lot D2c) : flatten par tuile ; Merge Down, undo, redo ; masques (et leur empilement
-#      upstream), Apply Mask, undo ; groupe à masque de groupe, Merge Group ; surcharge de matériau d'un maillage dans
-#      le flatten de sa tuile ; ColorID → masque sur toutes les tuiles ;
+#  11. opérations de calques (lot D2c) : flatten par tuile ; Merge Down, undo, redo ; masques empilés, qui se
+#      multiplient (patch mask-multiply), Apply Mask, undo ; Merge Down d'un masque sur un masque d'opacité 0.5, cuite
+#      dans chaque tuile ; groupe à masque de groupe, Merge Group, undo, redo, undo (patch merge-group-undo) ;
+#      surcharge de matériau d'un maillage dans le flatten de sa tuile ; ColorID → masque sur toutes les tuiles ;
 #  12. export (lot D2d) : par tuile, chaque fichier à la résolution des tuiles, identique au bit près à celui d'un
 #      projet d'une seule tuile ; Visible, le composite en grille (une case par tuile, masques fusionnés par tuile, le
 #      calque limité à un objet dans sa case seule) ; Selected et par objet, la tuile de l'objet ; Export d'un masque :
@@ -150,6 +151,8 @@ script() {
 	grep '^t: ' "$W/$1.log" | sed 's/^t: //' > "$W/$1.out" || true
 }
 line() { sed -n "s/^$2 //p" "$W/$1.out"; }
+# Rouge de chaque texel d'une ligne « r g b a | r g b a | ... », à 2 décimales
+reds() { line "$1" "$2" | awk -F' [|] ' '{ for (i = 1; i <= NF; i++) { split($i, c, " "); printf "%s%.2f", (i > 1 ? " " : ""), c[1] } }'; }
 # Couleur dominante d'un pixel « r g b a » de la vue : red, green, blue ou grey
 hue() {
 	line "$1" "$2" | awk '{ if ($1 > 0.3 && $2 < 0.15 && $3 < 0.15) print "red"; else if ($2 > 0.3 && $1 < 0.15 && $3 < 0.15) print "green";
@@ -739,6 +742,40 @@ int main() {
 	names();
 	c5("merged", 1, 0, 10);
 	c5("flatm", 0, 9, 10);
+	studio_layer_op("undo");
+	console_log(string("t: tree %s", studio_layer_tree()));
+	c5("undo1", 1, 0, 10);
+	c5("undo2", 2, 0, 10);
+	c5("undom", 3, 0, 10);
+	c5("flatu", 0, 9, 10);
+	studio_layer_op("redo");
+	console_log(string("t: tree %s", studio_layer_tree()));
+	c5("redo", 1, 0, 10);
+	c5("flatr", 0, 9, 10);
+	studio_layer_op("undo");
+	console_log(string("t: tree %s", studio_layer_tree()));
+	c5("undo1b", 1, 0, 10);
+	c5("undo2b", 2, 0, 10);
+	c5("undomb", 3, 0, 10);
+	return 0;
+}
+EOF
+# Merge Down d'un masque (noir sur la 1011) sur un masque d'opacité 0.5 (noir sur la 1002) : l'opacité cuite dans chaque
+# tuile du masque du dessous (layers_bake_mask_opacity), puis le produit
+script maskop <<EOF
+$LAYERS
+int main() {
+	two_layers();
+	studio_layer_select(1);
+	studio_layer_new_mask(1);
+	studio_udim_fill(1, 0, 1002, 0.0, 0.0, 0.0, 1.0);
+	console_log(string("t: opacity %d", studio_layer_set_opacity(0.5)));
+	studio_layer_new_mask(1);
+	studio_udim_fill(2, 0, 1011, 0.0, 0.0, 0.0, 1.0);
+	console_log(string("t: tree %s", studio_layer_tree()));
+	console_log(string("t: merge %d", studio_layer_op("merge_down")));
+	console_log(string("t: tree %s", studio_layer_tree()));
+	c5("mask", 1, 0, 10);
 	return 0;
 }
 EOF
@@ -778,10 +815,14 @@ check "flatten par tuile : le composite de chaque tuile (le gris du calque de ba
 check "Merge Down : un calque de moins, chaque tuile fusionnée, flatten inchangé" '[ "$(line merge merge)" = 1 ] && [ "$(line merge merged)" = "$MERGED" ] && [ "$(line merge flat1)" = "$FLAT" ] && [ "$(line merge names | sed -n 1p)" = "Layer 1=0 Layer 2=0 filter=0" ]'
 check "Merge Down, Undo : les deux calques et chacune de leurs tuiles rendus ; Redo : fusionnés" '[ "$(line merge names | sed -n 2p)" = "Layer 1=0 Layer 2=0 Layer 3=0 filter=0" ] && [ "$(line merge undo1)" = "$R | $G | $Z | $Z | $B" ] && [ "$(line merge undo2)" = "$B | $Z | $M | $Z | $Z" ] && [ "$(line merge redo)" = "$MERGED" ]'
 check "masque noir sur la 1002 : le flatten n y montre que la base, les autres tuiles intactes" '[ "$(line merge mask)" = 1 ] && [ "$(line merge flatmask)" = "$B | $Y | $M | $Y | $B" ]'
-check "deux masques : upstream, le dernier remplace les autres (fusion des masques en MIX)" '[ "$(line merge names | sed -n 3p)" = "Layer 1=0 Mask 3=0 Mask 4=0 Layer 2=0 filter=0" ] && [ "$(line merge flatmask2)" = "$FLAT" ]'
+check "deux masques (noir sur 1002 et 1011 ; blanc) : ils se multiplient sur chaque tuile, comme la vue (patch mask-multiply)" '[ "$(line merge names | sed -n 3p)" = "Layer 1=0 Mask 3=0 Mask 4=0 Layer 2=0 filter=0" ] && [ "$(line merge flatmask2)" = "$B | $Y | $M | $Y | $Y" ]'
 check "Apply Mask : le masque (noir sur 1002 et 1011) appliqué à chaque tuile du calque (alpha 0), puis retiré ; Undo le rend" '[ "$(line merge apply)" = 1 ] && [ "$(line merge names | sed -n 4p)" = "Layer 1=0 Mask 4=0 Layer 2=0 filter=0" ] && [ "$(line merge flatapply)" = "$B | $Y | $M | $Y | $Y" ] && [ "$(line merge applied)" = "$B | 0.000 1.000 0.000 0.000 | $M | $Z | 0.000 0.000 1.000 0.000" ] && [ "$(line merge names | sed -n 5p)" = "Layer 1=0 Mask 5=0 Mask 4=0 Layer 2=0 filter=0" ] && [ "$(line merge unapplied)" = "$MERGED" ]'
 check "groupe à masque de groupe (noir sur la 1011) : flatten par tuile" '[ "$(line group group)" = "1 1 1" ] && [ "$(line group names | sed -n 1p)" = "Layer 1=0 Layer 2=0 Layer 3=0 Mask 5=0 Group 4=0 filter=0" ] && [ "$(line group flatg)" = "$B | $G | $M | $Y | $Y" ]'
 check "Merge Group : un calque, chaque tuile fusionnée, le masque de groupe appliqué (1011 transparente), flatten inchangé" '[ "$(line group mergeg)" = 1 ] && [ "$(line group names | sed -n 2p)" = "Layer 1=0 Group 4=0 filter=0" ] && [ "$(line group merged)" = "$B | $G | $M | $Z | 0.000 0.000 1.000 0.000" ] && [ "$(line group flatm)" = "$(line group flatg)" ]'
+check "Merge Down d'un masque sur un masque d'opacité 0.5 : l'opacité cuite dans chaque tuile (1002 à 0.5), puis le produit (1011 à 0)" '[ "$(line maskop opacity)" = 1 ] && [ "$(line maskop tree | sed -n 1p)" = "Layer 1 | Mask 4<Layer 2 | Mask 5<Layer 2 | Layer 2 | Layer 3" ] && [ "$(line maskop merge)" = 1 ] && [ "$(line maskop tree | sed -n 2p)" = "Layer 1 | Mask 4<Layer 2 | Layer 2 | Layer 3" ] && [ "$(reds maskop mask)" = "1.00 0.50 1.00 1.00 0.00" ]'
+GROUPED="Layer 1 | Layer 2<Group 4 | Layer 3<Group 4 | Mask 5<Group 4 | Group 4"
+check "Merge Group, Undo : un seul pas, le groupe, ses calques et son masque rendus, chacun avec ses tuiles (patch merge-group-undo)" '[ "$(line group tree | sed -n 1p)" = "$GROUPED" ] && [ "$(line group undo1)" = "$R | $G | $Z | $Z | $B" ] && [ "$(line group undo2)" = "$B | $Z | $M | $Z | $Z" ] && [ "$(line group undom)" = "$H | $H | $H | $H | $K" ] && [ "$(line group flatu)" = "$(line group flatg)" ]'
+check "Merge Group, Redo : fusionné de nouveau, tuile par tuile ; Undo : rendu de nouveau" '[ "$(line group tree | sed -n 2p)" = "Layer 1 | Group 4" ] && [ "$(line group redo)" = "$(line group merged)" ] && [ "$(line group flatr)" = "$(line group flatg)" ] && [ "$(line group tree | sed -n 3p)" = "$GROUPED" ] && [ "$(line group undo1b)" = "$R | $G | $Z | $Z | $B" ] && [ "$(line group undo2b)" = "$B | $Z | $M | $Z | $Z" ] && [ "$(line group undomb)" = "$H | $H | $H | $H | $K" ]'
 check "surcharge de matériau du maillage de la 1002 : son flatten prend le matériau, les autres tuiles non ; retirée, le calque revient" '[ "$(line override override)" = 1 ] && [ "$(line override flatov)" = "$R | 0.800 0.800 0.800 1.000 | $Y | $Y | $B" ] && [ "$(line override flatnoov)" = "$(line override flat0)" ] && [ "$(line override flat0)" = "$R | $G | $Y | $Y | $B" ]'
 check "ColorID → masque : la carte lue dans les uv de chaque tuile, blanc à gauche (rouge piqué), rien à droite, sur les 5 tuiles" '[ "$(line override cid)" = 1 ] && [ "$(line override cidleft)" = "$H | $H | $H | $H | $H" ] && [ "$(line override cidright)" = "$Z | $Z | $Z | $Z | $Z" ]'
 

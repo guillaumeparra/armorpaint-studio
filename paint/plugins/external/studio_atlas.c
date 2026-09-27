@@ -91,6 +91,7 @@ void              _gpu_begin(gpu_texture_t *render_target, any_array_t *addition
 void              bake_texture_node_bake(ui_node_t *node, i32 bake_type);
 void              history_merge_layers(void);
 void              history_apply_mask(void);
+void              history_layer_opacity(void);
 void              layers_merge_down(void);
 slot_layer_t     *layers_merge_group(slot_layer_t *l);
 slot_layer_t     *layers_flatten(bool height_to_normal, slot_layer_t_array_t *layers);
@@ -107,6 +108,7 @@ void              ui_header_draw_tool_properties_to_mask(slot_layer_t *m);
 extern slot_layer_t *tab_layers_l;
 extern char        *ui_files_filename;
 void                tab_layers_draw_layer_context_menu_export_on_file_picked(char *path);
+void                tab_layers_draw_layer_context_menu_merge_group(void *_);
 
 #define DEFAULT_NAME "Atlas 1"
 #define MAX_NAME     64
@@ -1174,9 +1176,36 @@ static minic_val_t mn_studio_layer_select(minic_val_t *a, int n) {
 	return minic_val_int(1);
 }
 
+// Pile de calques, de bas en haut : « nom<parent » séparés par « | » (bancs).
+static minic_val_t mn_studio_layer_tree(minic_val_t *a, int n) {
+	(void)a, (void)n;
+	text_t                b      = {0};
+	slot_layer_t_array_t *layers = g_project->_->layers;
+	for (int i = 0; layers != NULL && i < (int)layers->length; ++i) {
+		slot_layer_t *l = layers->buffer[i];
+		put(&b, "%s%s%s%s", i > 0 ? " | " : "", l->name, l->parent != NULL ? "<" : "", l->parent != NULL ? l->parent->name : "");
+	}
+	char *s = string_copy(b.data != NULL ? b.data : "");
+	free(b.data);
+	return minic_val_ptr(s);
+}
+
+// Opacité du calque courant (0 à 1), comme le curseur Opacity de son menu, avec son pas d'historique. 1 si fait.
+static minic_val_t mn_studio_layer_set_opacity(minic_val_t *a, int n) {
+	f32 opacity = (f32)minic_arg_f(a, n, 0);
+	if (g_context->layer == NULL || opacity < 0.0f || opacity > 1.0f) {
+		return minic_val_int(0);
+	}
+	history_layer_opacity();
+	g_context->layer->mask_opacity = opacity;
+	make_material_parse_mesh_material();
+	return minic_val_int(1);
+}
+
 // Opération sur le calque courant, comme les menus, avec son pas d'historique, finie tout de suite : "duplicate",
-// "delete", "clear", "invert" (masque), "merge_down" (Merge Down), "merge_group" (Merge Group d'un groupe), "apply_mask"
-// (Apply Mask d'un masque), "undo", "redo", "sync" (util_udim_sync, fait par le viewport à chaque image). 1 si fait.
+// "delete", "clear", "invert" (masque), "merge_down" (Merge Down), "merge_group" (Merge Group d'un groupe, par son menu),
+// "apply_mask" (Apply Mask d'un masque), "undo", "redo", "sync" (util_udim_sync, fait par le viewport à chaque image). 1 si
+// fait.
 static minic_val_t mn_studio_layer_op(minic_val_t *a, int n) {
 	char         *op = minic_arg_p(a, n, 0);
 	slot_layer_t *l  = g_context->layer;
@@ -1212,8 +1241,9 @@ static minic_val_t mn_studio_layer_op(minic_val_t *a, int n) {
 			slot_layer_to_paint_layer(g_context->layer);
 		}
 	}
-	else if (strcmp(op, "merge_group") == 0 && slot_layer_is_group(l)) {
-		layers_merge_group(l);
+	else if (strcmp(op, "merge_group") == 0 && slot_layer_is_group(l)) { // Par le menu : son pas d'historique (patch merge-group-undo)
+		tab_layers_l = l;
+		tab_layers_draw_layer_context_menu_merge_group(NULL);
 	}
 	else if (strcmp(op, "apply_mask") == 0 && slot_layer_is_mask(l)) {
 		history_apply_mask();
@@ -1278,6 +1308,8 @@ void studio_atlas_init(void) {
 	minic_register("studio_udim_fill", "i(i,i,i,f,f,f,f)", mn_studio_udim_fill);
 	minic_register("studio_rt_pixel", "p(p,f,f,f)", mn_studio_rt_pixel);
 	minic_register("studio_layer_op", "i(p)", mn_studio_layer_op);
+	minic_register("studio_layer_tree", "p()", mn_studio_layer_tree);
+	minic_register("studio_layer_set_opacity", "i(f)", mn_studio_layer_set_opacity);
 	minic_register("studio_mesh_override", "i(i,i)", mn_studio_mesh_override);
 	minic_register("studio_colorid_mask", "i(p,i)", mn_studio_colorid_mask);
 	minic_register("studio_mask_export", "i(i,p,p)", mn_studio_mask_export);

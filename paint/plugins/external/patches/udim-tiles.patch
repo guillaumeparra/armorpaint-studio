@@ -49,10 +49,10 @@ index 35362ac9d..c358f5a04 100644
  extern gpu_texture_t  *current_textures[GPU_MAX_TEXTURES];
  extern gpu_texture_t  *current_render_targets[8];
 diff --git a/paint/sources/history.c b/paint/sources/history.c
-index 6c094c1f6..103464fd3 100644
+index c28c0a38e..2c5aea94f 100644
 --- a/paint/sources/history.c
 +++ b/paint/sources/history.c
-@@ -559,6 +559,9 @@ slot_layer_t *history_undo_slot(i32 i) {
+@@ -606,6 +606,9 @@ slot_layer_t *history_undo_slot(i32 i) {
  }
  
  void history_copy_to_undo(i32 from_id, i32 to_id, bool is_mask) {
@@ -62,7 +62,7 @@ index 6c094c1f6..103464fd3 100644
  	char *to_id_s   = i32_to_string(to_id);
  	char *from_id_s = i32_to_string(from_id);
  	if (history_undo_layers != NULL && to_id < history_undo_layers->length) {
-@@ -932,7 +935,9 @@ void history_edit_nodes(ui_node_canvas_t *canvas, i32 canvas_type, i32 canvas_gr
+@@ -1027,7 +1030,9 @@ void history_edit_nodes(ui_node_canvas_t *canvas, i32 canvas_type, i32 canvas_gr
  
  void history_paint() {
  	bool is_mask = slot_layer_is_mask(g_context->layer);
@@ -623,7 +623,7 @@ index 8c1533303..c33f44fd6 100644
  	bool studio_export_end(void);
  	if (!studio_export_end()) {
 diff --git a/paint/sources/ui/tab_layers.c b/paint/sources/ui/tab_layers.c
-index 1a7734a6a..2b2f62cdb 100644
+index 356cdc448..785e80b45 100644
 --- a/paint/sources/ui/tab_layers.c
 +++ b/paint/sources/ui/tab_layers.c
 @@ -526,6 +526,10 @@ void tab_layers_draw_layer_context_menu_export_on_file_picked(char *path) {
@@ -714,10 +714,10 @@ index 000b47330..0981ab3e8 100644
  		return util_mesh_udim_active() ? util_mesh_atlas_stride() : 1.0;
  	}
 diff --git a/paint/sources/util/util_layer.c b/paint/sources/util/util_layer.c
-index 215a18b9c..b05a61eff 100644
+index c56ad89..716a445 100644
 --- a/paint/sources/util/util_layer.c
 +++ b/paint/sources/util/util_layer.c
-@@ -926,6 +926,9 @@ void layers_merge_layer(slot_layer_t *l0, slot_layer_t *l1, bool use_mask) {
+@@ -967,6 +967,9 @@ void layers_merge_layer(slot_layer_t *l0, slot_layer_t *l1, bool use_mask) {
  	if (!l1->visible || slot_layer_is_group(l1)) {
  		return;
  	}
@@ -727,7 +727,7 @@ index 215a18b9c..b05a61eff 100644
  
  	layers_make_temp_img();
  
-@@ -1061,7 +1064,9 @@ void layers_draw_mesh_materials() {
+@@ -1104,7 +1107,9 @@ void layers_draw_mesh_materials() {
  	render_path_set_target("expa", additional, NULL, GPU_CLEAR_NONE, 0, 0.0);
  	render_path_bind_target("main", "gbufferD");
  	render_path_bind_target("texpaint_blend1", "paintmask");
@@ -738,7 +738,7 @@ index 215a18b9c..b05a61eff 100644
  }
  
  static gpu_texture_t *layers_udim_a    = NULL;
-@@ -1166,13 +1171,15 @@ slot_layer_t *layers_flatten(bool height_to_normal, slot_layer_t_array_t *layers
+@@ -1209,13 +1214,15 @@ slot_layer_t *layers_flatten(bool height_to_normal, slot_layer_t_array_t *layers
  		}
  
  		// Flattened layers are in shared atlas space
@@ -858,10 +858,10 @@ index 1813b387a..983d0316d 100644
  
  	base_update_workflow();
 diff --git a/paint/sources/types.h b/paint/sources/types.h
-index cdff68fe6..0ab23fb74 100644
+index 2728f06e9..ccf29b87b 100644
 --- a/paint/sources/types.h
 +++ b/paint/sources/types.h
-@@ -621,6 +621,14 @@ typedef struct swatch_color {
+@@ -624,6 +624,14 @@ typedef struct swatch_color {
  	f32 subsurface;
  } swatch_color_t;
  
@@ -876,7 +876,7 @@ index cdff68fe6..0ab23fb74 100644
  typedef struct layer_data {
  	char             *name;
  	i32               res; // Width pixels
-@@ -659,6 +667,8 @@ typedef struct layer_data {
+@@ -662,6 +670,8 @@ typedef struct layer_data {
  	bool              path_curved;
  	i32               path_material;
  	bool              path_text;
@@ -885,7 +885,7 @@ index cdff68fe6..0ab23fb74 100644
  } layer_data_t;
  
  typedef struct timeline_layer_keyframe_data {
-@@ -919,6 +929,13 @@ typedef struct layer_data_t_array {
+@@ -922,6 +932,13 @@ typedef struct layer_data_t_array {
  	int            capacity;
  } layer_data_t_array_t;
  

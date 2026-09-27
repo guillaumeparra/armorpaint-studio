@@ -1890,12 +1890,15 @@ le proxy des tuiles, chacune à la résolution de sa case.
 Un emplacement d'undo ne tient que les tuiles qu'il a sauvées ; s'il avait sauvé tout le calque, il reçoit à
 l'échange les tuiles apparues depuis. UDIM coupé : chaque calque revient à une texture.
 
-Pour régénérer : `git diff 06655d76 -- <les vingt-sept fichiers>` (`06655d76` : `studio` avant le lot D2), sauf le hunk
-[bake-derivative](#bake-derivative) de `render_path_paint.c` (diff contre une copie du fichier où il est défait) ;
-`iron.h` porte aussi ocio-import, `util_mesh.c` udim-material-uv et udim-tile-limit, `render_path_paint.c`,
+Pour régénérer : `git diff d996016a -- <les vingt-sept fichiers>` (`d996016a` : `studio` juste avant la fusion du lot
+D2, correctifs mask-multiply et merge-group-undo compris), sauf deux fichiers, chacun contre une copie : le hunk
+[bake-derivative](#bake-derivative) de `render_path_paint.c` (copie où il est défait) et la boucle de tuiles de
+`layers_bake_mask_opacity` dans `util_layer.c`, lignes de [mask-multiply](#mask-multiply) (copie de `d996016a` qui a
+déjà la fonction à boucle). `iron.h` porte aussi ocio-import, `util_mesh.c` udim-material-uv et udim-tile-limit, `render_path_paint.c`,
 `make_texcoord.c` et `uniforms.c` udim-material-uv, `uniforms.c` aussi ocio-viewport et udim-tile-limit, `util_layer.c`
-udim-tile-limit, `export_texture.c` udim-export-sets, udim-tile-limit, studio-export et export-naming, `export_arm.c`
-arm-relative-paths, project-entries et project-copy.
+udim-tile-limit et mask-multiply, `history.c`, `types.h` et `tab_layers.c` merge-group-undo, `export_texture.c`
+udim-export-sets, udim-tile-limit, studio-export et export-naming, `export_arm.c` arm-relative-paths, project-entries
+et project-copy.
 
 **Test.** `.tests/udim_tiles_app.sh` : passage aux tuiles, Clear / Undo / Redo, Duplicate, Delete et Undo (sans
 fuite), résolution du projet, masque et Invert, vue 3D (gbuffer au centre de chaque tuile), maillage ajouté dans une
@@ -1903,8 +1906,11 @@ nouvelle tuile (L17 : les tuiles gardent leur peinture), UDIM coupé (D2a) ; pei
 tuiles, undo et redo pas à pas (chaque pas ne tient que ses tuiles), pinceau aligné sur la caméra, caméra ortho, xray,
 symétrie ; cartes UV, de triangles et de dilatation par tuile ; pipette ; remplissages de face et d'îlot UV ; clone ;
 bakes Texcoord, Position, Object ID, high poly (hauteur, dérivée, normales) et Curvature par tuile ; 70 tuiles, le
-pinceau au-delà des 64 ne peint rien (D2b) ; flatten par tuile, Merge Down, undo et redo, masques, Apply Mask et
-undo, groupe à masque de groupe et Merge Group, surcharge de matériau d'un maillage, ColorID → masque (D2c) ; export
+pinceau au-delà des 64 ne peint rien (D2b) ; flatten par tuile, Merge Down, undo et redo, masques empilés multipliés
+sur chaque tuile ([mask-multiply](#mask-multiply)), Apply Mask et undo, Merge Down d'un masque sur un masque
+d'opacité 0.5 (opacité cuite dans chaque tuile), groupe à masque de groupe, Merge Group puis undo, redo et undo, chaque
+calque et masque rendu avec ses tuiles ([merge-group-undo](#merge-group-undo)), surcharge de matériau d'un maillage,
+ColorID → masque (D2c) ; export
 par tuile identique au bit près (cinq maps) à celui d'un projet d'une seule tuile, Visible en grille (masques par
 tuile, calque limité dans sa case, cases vides noires, aussi juste après l'import), par objet et Selected à la
 résolution des tuiles, Export d'un masque par tuile (D2d) ; `.arm` : clé `tiles` la dernière, chaque tuile de chaque
@@ -1914,7 +1920,7 @@ tuiles, exports par tuile et Visible identiques au bit près avant et après, re
 raytrace en grille (l'upstream garde la tuile du contexte), vue path trace avec la couleur de chaque tuile, bakes
 Lightmap et Occlusion du nœud Bake Texture rendus à chaque tuile (D2f). `.tests/udim_app.sh` : les exports par tuile,
 par jeu de textures et les presets studio (`layer()`) passent sur les calques à tuiles ; conseil de résolution par
-tuile. Au 2026-09-27 : 75 contrôles passent.
+tuile. Au 2026-09-27 : 78 contrôles passent.
 
 **Signes que l'upstream l'a changé.** `gpu_delete_texture`, `gpu_begin`, `history_copy_to_undo`, `history_paint` ou
 `slot_layer_swap` réécrits ; le bloc `tex_coord_atlas` de `make_mesh_run` ou le bloc `atlas_uv` de
@@ -1939,8 +1945,173 @@ n'est pas à tuiles. Export des calques de sculpt
 limité au premier objet) non traités. Voulu, décrit dans `ARMORPAINT_UDIM.md` (lot D2b) : pas d'aperçu de pinceau live sur un
 calque à tuiles ; pas de clone d'une tuile à l'autre ; ColorID, flou et smudge ne lisent que la tuile peinte. Non
 testés : sculpt, particules, décalques et texte sur un calque à tuiles (même chemin que le pinceau). Une fusion d'un
-calque à tuiles dans un calque qui n'en a pas (limité à un objet sans tuile) ne lit que la tuile du contexte. Upstream,
-non corrigés : des masques empilés sont fusionnés en MIX dans le flatten (le dernier remplace les autres, la vue 3D les
-multiplie) ; l'Undo d'un Merge Group
-perd le calque de base (même sans UDIM). Un `.arm` à tuiles rouvert par un build d'avant D2e n'en lit que le blob
-upstream (la grille).
+calque à tuiles dans un calque qui n'en a pas (limité à un objet sans tuile) ne lit que la tuile du contexte. Deux
+bugs upstream relevés au lot D2c, masques empilés fusionnés en MIX et Undo de Merge Group qui perd le calque de base,
+sont corrigés par [mask-multiply](#mask-multiply) et [merge-group-undo](#merge-group-undo), vérifiés sur les tuiles
+(section 11). Un `.arm` à tuiles rouvert par un build d'avant D2e n'en lit que le blob upstream (la grille).
+
+---
+
+## mask-multiply
+
+| | |
+|---|---|
+| Fichier | `paint/sources/util/util_layer.c` (`layers_merge_layer`, `layers_apply_masks`, `layers_merge_down`, `layers_merge_group` ; `layers_apply_mask_stack` et `layers_bake_mask_opacity` ajoutées) |
+| Commit studio | `37a7b094` sur la branche `studio` ; boucle de tuiles de `layers_bake_mask_opacity` à la fusion du lot D2 |
+| Validé contre | upstream `85f6cf1c` (2026-09-27) |
+| Constaté | 2026-09-27 ; présent en `85f6cf1c` |
+
+**Bug.** La vue multiplie les masques d'un calque, masques de son groupe compris, chacun pondéré par son opacité :
+`texpaint_mask *= lerp(1, masque, opacité)` (`make_mesh.c`). Les autres chemins fusionnaient les masques en MIX. Un
+masque opaque y remplaçait donc ceux du dessous. Exemple : un masque A noir sur une zone, puis un masque B blanc partout
+créé après lui. La vue cache la zone, mais le flatten et l'export la montrent. Chemins touchés :
+- `layers_flatten`, l'export upstream et studio (`export_texture.c`, même boucle), et tout ce qui aplatit la pile. Le
+  masque temporaire blanc reçoit chaque masque par `layers_merge_layer`, dont la branche masque imposait
+  `BLEND_TYPE_MIX` : seul le masque le plus haut comptait.
+- `layers_apply_masks` (Merge Down d'un calque à masques, masques des enfants au Merge Group) et `layers_merge_group`
+  (masques du groupe). Les masques étaient fusionnés les uns dans les autres par cette même branche, puis le dernier
+  était appliqué. En plus, le masque propre d'un enfant fusionnait dans le masque du groupe, appliqué ensuite à tous
+  les enfants (`slot_layer_apply_mask`) : il masquait aussi ses frères.
+- Merge Down d'un masque sur un autre : MIX aussi.
+
+Les masques n'ont pas de réglage de fusion dans l'interface (`tab_layers.c` ne montre Blending que pour les calques) et
+la vue n'en lit pas : ils se multiplient toujours.
+
+**Correctif.**
+- `layers_merge_layer`, branche masque : `BLEND_TYPE_MULTIPLY` au lieu de `BLEND_TYPE_MIX`. `mask_merge.shader` fait
+  alors `l0 × lerp(1, l1, opacité)`, la formule de la vue. Cela corrige `layers_flatten`, donc l'export, sans toucher
+  `export_texture.c`, ainsi que le Merge Down d'un masque.
+- Nouvelle fonction `layers_apply_mask_stack`, appelée par `layers_apply_masks` et `layers_merge_group`. Elle applique
+  les masques un à un avec `slot_layer_apply_mask`, chacun avec son opacité et en pleine précision du calque, sans
+  masque intermédiaire 8 bits. Un masque de calque va dans son calque, un masque de groupe dans chaque enfant. Un
+  masque caché est retiré sans effet, comme dans la vue.
+- Merge Down d'un masque sur un masque d'opacité < 1 : `layers_bake_mask_opacity` écrit d'abord cette opacité dans les
+  pixels du masque du dessous (`lerp(1, masque, opacité)`) et la remet à 1. Le produit garde ainsi le poids de chacun.
+
+Pour régénérer : diff de `util_layer.c` contre une copie où ce patch est défait. La construire en remettant dans le
+fichier courant la `layers_bake_mask_opacity` de `37a7b094` (sans boucle), puis en y défaisant `37a7b094^..37a7b094`
+(`patch -R`). Ce fichier porte aussi [udim-tile-limit](#udim-tile-limit) et [udim-tiles](#udim-tiles), donc
+`git diff upstream studio` mêle les patches.
+
+**Test.** `.tests/masks_app.sh`, 18 vérifications. Calque rouge sur la base grise, masques gris unis, texel du flatten
+comparé au produit attendu (k) :
+1. flatten : A noir puis B blanc (l'exemple), B noir, opacités (0.25 à 80 % × 0.5 à 50 % = 0.3 ; upstream 0.45), masque
+   caché, masque de groupe multiplié avec ceux du calque ;
+2. Apply Mask de B puis de A : flatten inchangé, alpha du calque 0.3 ; Undo ;
+3. Merge Down d'un calque à deux masques : flatten inchangé ;
+4. Merge Down d'un masque sur un masque d'opacité 0.8 : un masque de 0.3 ;
+5. Merge Group : deux masques de groupe sur un enfant ; masque propre d'un enfant sous un masque de groupe, sans effet
+   sur l'autre enfant ;
+6. export `--export-textures png generic` des `.arm` enregistrés : couleur de base = le flatten.
+
+Contre un build sans le patch, 14 des 18 vérifications échouent. Les 4 qui passent ne dépendent pas de la fusion :
+calque sans masque, masque noir au-dessus, Undo, nombre de calques. Au 2026-09-27, les 17 bancs dans l'app
+(`.tests/*_app.sh`, build avec OCIO) passent tous avec le patch, `udim_app.sh` compris (46/46).
+Helpers de script ajoutés à `studio_atlas.c` : `studio_layer_new_mask`, `studio_layer_select`, `studio_layer_set_parent`,
+`studio_layer_set_opacity`, `studio_layer_op`, `studio_project_res`, `studio_udim_pixel`, `studio_udim_fill`. Ce sont
+les fonctions de la branche `d2`, en sous-ensemble (tuile -1 seulement ; opérations `merge_down`, `merge_group`,
+`apply_mask`, `undo`, `redo`), avec le même code.
+
+**Signes que l'upstream l'a corrigé.** `BLEND_TYPE_MIX` remplacé dans la branche masque de `layers_merge_layer`, ou
+`layers_apply_masks`/`layers_merge_group` qui n'enchaînent plus `layers_merge_layer` entre masques. Rejouer
+`masks_app.sh` sans le patch.
+
+**Non couvert.**
+- L'undo d'Apply Mask recrée le masque à l'opacité 1 (`layers_new_mask`, `history.c`). L'undo d'un Merge Down rend
+  aussi le calque du dessous à l'opacité par défaut. Ce sont des limites upstream, hors de ce patch.
+- Fusionner deux calques semi-transparents en MIX n'est pas associatif : un Merge Group de tels enfants change le
+  flatten, avec ou sans masques (upstream).
+- Masques 8 bits : chaque passe arrondit (écart ≤ 1/255 par masque).
+
+**UDIM (lot D2, fusionné le 2026-09-27).** [udim-tiles](#udim-tiles) enveloppe `layers_merge_layer` et
+`layers_apply_mask` par tuile : le produit des masques vaut sur chaque tuile. `layers_bake_mask_opacity` écrit
+`m->texpaint` directement : sa boucle sur les tuiles (`util_udim_loop_begin`/`tile`/`end`, masque passé aux tuiles
+s'il doit l'être, comme `slot_layer_invert_mask`) fait partie de ce patch, pour qu'il se retire seul. Sans elle, seule
+la tuile du contexte recevait l'opacité, remise ensuite à 1 pour toutes. `udim_tiles_app.sh`, section 11 : deux
+masques empilés multipliés sur chaque tuile ; Merge Down d'un masque sur un masque d'opacité 0.5, 0.5 cuit dans la
+1002 (0 sans la boucle). `studio_atlas.c` : les helpers de d2 gardés, `studio_layer_set_opacity` ajouté.
+
+---
+
+## merge-group-undo
+
+| | |
+|---|---|
+| Fichiers | `paint/sources/history.c` (`history_merge_group`, `history_undo_merge_group`, `history_redo_merge_group`, `history_copy_merge_group`, `history_step_slots` et `history_fit_undo_slots` ajoutées ; `history_undo`, `history_redo`, `history_push`, `history_merge_layers`, `history_action_to_string`), `paint/sources/ui/tab_layers.c` (`tab_layers_draw_layer_context_menu_merge_group`), `paint/sources/types.h` (`history_step_t`), `paint/sources/enums.h` (`HISTORY_ACTION_MERGE_GROUP`), `paint/sources/functions.h` |
+| Commit studio | `abe46077` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-27) |
+| Constaté | 2026-09-27 ; présent en `85f6cf1c` |
+
+**Bug.** Onglet Layers, menu d'un groupe > Merge Group, puis Undo : la pile n'est pas rendue. Cas signalé : « Layer 1 » ;
+« Layer 2 » et « Layer 3 » dans « Group 4 », à masque de groupe. Merge Group donne « Layer 1 | Group 4 », juste. Undo
+donne « Layer 3 | Layer 4 | Group 4 » : Layer 1 a disparu avec ses pixels (l'aplati n'a plus de rouge), les calques
+rendus ont des noms par défaut. Redo puis Undo redonnent le même état faux. L'Undo suivant, celui du masque de groupe,
+plante (`slot_layer_delete(NULL)`). Causes, dans `layers_merge_group` (`util_layer.c`) :
+- chaque fusion d'enfant enregistre un pas Merge Layers (`history_merge_layers`). Son indice de calque retranche aussi
+  les masques du groupe (`slot_layer_has_masks(l, true)`). Avec deux enfants et un masque de groupe, le pas vise
+  l'indice 0, le calque de base : l'Undo le supprime et recrée deux calques aux noms par défaut ;
+- rien n'enregistre le reste de la fusion : masques de groupe fusionnés puis appliqués, enfant restant sorti du groupe
+  et renommé comme lui, passage en calque de peinture d'un calque de remplissage, suppression du groupe.
+
+**Correctif.** Un seul pas d'historique, « Merge Group », pour toute la fusion :
+- `history_merge_group(group)` garde la liste des objets du groupe, de bas en haut (enfants, leurs masques, masques du
+  groupe, le groupe), et une copie de leurs champs. Elle copie les textures de chaque calque et masque dans un
+  emplacement d'undo (`history_copy_to_undo`), pousse le pas, puis appelle `layers_merge_group` avec
+  `history_merging_group` levé : `history_merge_layers` ne fait alors rien, les fusions internes n'enregistrent plus de
+  pas. Le menu du groupe (`tab_layers.c`) appelle `history_merge_group` au lieu de `layers_merge_group`.
+- Undo (`history_undo_merge_group`) : le calque fusionné sort de la pile ; les objets supprimés par la fusion
+  retrouvent des textures sous leur `ext` (`slot_layer_create`, textures transplantées) ; chaque objet reprend ses
+  champs (nom, parent, opacité, matériau de remplissage...) en gardant ses textures du moment et revient à sa place ;
+  les pixels reviennent des emplacements d'undo (`slot_layer_swap`, comme les autres pas). Ce sont les mêmes objets
+  `slot_layer_t` : les pas plus anciens, qui visent les calques par indice, restent justes.
+- Redo (`history_redo_merge_group`) : à l'image suivante, comme le Redo de Merge Down ; recopie dans les mêmes
+  emplacements et refait la fusion.
+- Emplacements d'undo : le pas en tient k, un par calque et masque du groupe ; les autres pas en comptent un.
+  `history_fit_undo_slots`, appelée en fin de `history_push` et après le pas Merge Group, retire les pas les plus
+  anciens tant que les pas annulables demandent plus de `undo_steps` emplacements. Un Merge Group n'est donc jamais
+  annulé depuis des emplacements réécrits depuis. Sans pas Merge Group dans l'historique, rien ne change (un par pas,
+  comme l'upstream).
+- Groupe de plus de `undo_steps` calques et masques : la fusion ne peut pas être annulée, et les pas d'avant visent
+  des calques qu'elle supprime. L'historique est vidé (`history_reset`, message dans la console), puis la fusion se
+  fait sans pas.
+
+Pour régénérer : `git diff abe46077^ abe46077 -- paint/sources/enums.h paint/sources/functions.h paint/sources/history.c
+paint/sources/types.h paint/sources/ui/tab_layers.c`. `enums.h` porte aussi [udim-import](#udim-import), donc
+`git diff upstream studio` mêle les deux patches.
+
+**Test.** `.tests/layers_undo_app.sh`, 22 vérifications, projet par défaut (cube, sans UDIM) à 256 px. Chaque état
+relevé : la pile (« nom<parent »), les texels base, nor et pack de chaque calque et masque, l'aplati (base, nor, pack).
+1. le cas signalé : Undo rend l'état d'avant, Redo celui d'après, un 2e Undo celui d'avant ; l'Undo suivant (le masque
+   de groupe) reste juste ;
+2. masques de calque dans le groupe, plus un masque de groupe (k = 5) : de même ;
+3. emplacements (N = `undo_steps`, 6 par défaut ; k = 3) : après N − k Clear, la fusion s'annule encore ; après
+   N − k + 1, elle n'est plus annulable et l'Undo de trop ne touche rien ;
+4. groupe de N calques et un masque : fusion faite, historique vidé, Undo sans effet ;
+5. Merge Down, Undo, Redo (non-régression).
+
+Sans le patch, même base : 13 vérifications sur 22 échouent. Le cas signalé plante (segfault à l'Undo du masque de
+groupe). Avec des masques de calque, Undo donne « Layer 1 | Layer 2 | Layer 3 », sans groupe ni masques, et Redo
+« Layer 1 | Layer 2 ». Les cas des emplacements et du grand groupe sont faux. Merge Down passe.
+
+Helpers de script : `studio_layer_tree` (pile « nom<parent ») ajouté à `studio_atlas.c`, opération `clear` ajoutée à
+`studio_layer_op`, dont `merge_group` passe maintenant par le menu du groupe, donc par ce pas.
+
+**Signes que l'upstream l'a corrigé.** Un pas Merge Group dans `history.c`, ou `history_merge_layers` sorti de la
+boucle de `layers_merge_group`. Rejouer `layers_undo_app.sh` sans le patch.
+
+**Non couvert.**
+- Merge Down d'un groupe ou sur un groupe : `layers_merge_down` appelle `layers_merge_group`, avec les pas upstream,
+  faux de la même façon. Seul le menu Merge Group passe par le nouveau pas.
+- Menu Edit > History, saut de plusieurs pas en avant d'un coup : le Redo de Merge Group, comme celui de Merge Down, se
+  fait à l'image suivante, donc après les pas qui le suivent dans le même saut (limite upstream).
+- Calques de sculpture (`texpaint_sculpt`) et enfants calques de remplissage : rendus par construction (champs et
+  pixels), pas testés.
+- Mémoire : la liste des objets et la copie de leurs champs (quelques centaines d'octets par objet) ne sont pas
+  libérées quand le pas sort de l'historique (`free(step)` upstream, comme le canevas d'un pas Edit Nodes).
+
+**UDIM (lot D2, fusionné le 2026-09-27).** Sur des calques à tuiles, `history_copy_merge_group` sauve chaque tuile
+(`history_copy_to_undo`, [udim-tiles](#udim-tiles)). À l'Undo, `history_undo_merge_group` recrée sans tuiles les
+textures des objets supprimés (`slot_layer_create`), puis `slot_layer_swap` les passe aux tuiles et y remet chaque
+tuile sauvée (`util_udim_swap_layers`). `udim_tiles_app.sh`, section 11 : Merge Group d'un groupe à masque de groupe
+puis Undo, Redo et Undo ; pile, tuiles de chaque calque et du masque, flatten. `studio_atlas.c` : `merge_group` du
+`mn_studio_layer_op` de d2 passe par le menu, `studio_layer_tree` gardé.

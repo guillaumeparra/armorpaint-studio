@@ -1,0 +1,101 @@
+diff --git a/paint/sources/util/util_layer.c b/paint/sources/util/util_layer.c
+index b05a61e..716a445 100644
+--- a/paint/sources/util/util_layer.c
++++ b/paint/sources/util/util_layer.c
+@@ -846,15 +846,55 @@ void layers_duplicate_layer(slot_layer_t *l) {
+ 	}
+ }
+ 
++// STUDIO-PATCH(mask-multiply): the masks applied one after the other, each with its opacity, so that they multiply as in
++// the viewport (make_mesh.c); a hidden mask is removed without effect. A layer mask goes into its layer, a group mask into
++// every child of the group (slot_layer_apply_mask). Upstream merged the masks into the last one with the mix blending:
++// an opaque mask replaced the others.
++static void layers_apply_mask_stack(slot_layer_t_array_t *masks) {
++	for (i32 i = 0; i < masks->length; ++i) {
++		if (masks->buffer[i]->visible) {
++			slot_layer_apply_mask(masks->buffer[i]);
++		}
++		else {
++			slot_layer_delete(masks->buffer[i]);
++		}
++	}
++}
++
++// STUDIO-PATCH(mask-multiply): the opacity of a mask put in its pixels, lerp(1, mask, opacity), then set to 1; on every
++// tile of a tiled mask (util_udim.c)
++static void layers_bake_mask_opacity(slot_layer_t *m) {
++	layers_make_temp_img();
++	i32 udim_n = util_udim_loop_begin(util_udim_tile_layer(m, true));
++	for (i32 udim_k = 0; udim_k < udim_n; ++udim_k) {
++		util_udim_loop_tile(udim_k);
++		draw_begin(layers_temp_image, false, 0);
++		draw_set_pipeline(pipes_copy);
++		draw_image(m->texpaint, 0, 0);
++		draw_set_pipeline(NULL);
++		draw_end();
++
++		render_target_t *empty_rt = any_map_get(render_path_render_targets, "empty_white");
++		_gpu_begin(m->texpaint, NULL, NULL, GPU_CLEAR_NONE, 0, 0.0);
++		gpu_set_pipeline(pipes_merge_mask);
++		gpu_set_texture(pipes_tex0_merge_mask, layers_temp_image);
++		gpu_set_texture(pipes_texa_merge_mask, empty_rt->_image);
++		gpu_set_float(pipes_opac_merge_mask, m->mask_opacity);
++		gpu_set_int(pipes_blending_merge_mask, BLEND_TYPE_MIX);
++		gpu_set_vertex_buffer(const_data_screen_aligned_vb);
++		gpu_set_index_buffer(const_data_screen_aligned_ib);
++		gpu_draw();
++		gpu_end();
++	}
++	util_udim_loop_end();
++	m->mask_opacity = 1.0;
++}
++
+ void layers_apply_masks(slot_layer_t *l) {
+ 	slot_layer_t_array_t *masks = slot_layer_get_masks(l, true);
+ 
+ 	if (masks != NULL) {
+-		for (i32 i = 0; i < masks->length - 1; ++i) {
+-			layers_merge_layer(masks->buffer[i + 1], masks->buffer[i], false);
+-			slot_layer_delete(masks->buffer[i]);
+-		}
+-		slot_layer_apply_mask(masks->buffer[masks->length - 1]);
++		layers_apply_mask_stack(masks); // STUDIO-PATCH(mask-multiply)
+ 		g_context->layer_preview_dirty = true;
+ 	}
+ }
+@@ -880,6 +920,11 @@ void layers_merge_down() {
+ 		context_set_layer(l0);
+ 	}
+ 
++	// STUDIO-PATCH(mask-multiply): a mask merged down multiplies the mask below (layers_merge_layer), whose opacity goes
++	// into its pixels first, as the viewport weighs each mask by its own opacity
++	if (slot_layer_is_mask(l1) && slot_layer_is_mask(l0) && l1->visible && l0->mask_opacity < 1.0) {
++		layers_bake_mask_opacity(l0);
++	}
+ 	layers_merge_layer(l0, l1, false);
+ 	slot_layer_delete(l1);
+ 	context_set_layer(l0);
+@@ -906,11 +951,7 @@ slot_layer_t *layers_merge_group(slot_layer_t *l) {
+ 	// Now apply the group masks
+ 	slot_layer_t_array_t *masks = slot_layer_get_masks(l, true);
+ 	if (masks != NULL) {
+-		for (i32 i = 0; i < masks->length - 1; ++i) {
+-			layers_merge_layer(masks->buffer[i + 1], masks->buffer[i], false);
+-			slot_layer_delete(masks->buffer[i]);
+-		}
+-		layers_apply_mask(children->buffer[0], masks->buffer[masks->length - 1]);
++		layers_apply_mask_stack(masks); // STUDIO-PATCH(mask-multiply): into the one child left
+ 	}
+ 
+ 	children->buffer[0]->parent = NULL;
+@@ -966,7 +1007,9 @@ void layers_merge_layer(slot_layer_t *l0, slot_layer_t *l1, bool use_mask) {
+ 		gpu_set_texture(pipes_tex0_merge_mask, l1->texpaint);
+ 		gpu_set_texture(pipes_texa_merge_mask, layers_temp_image);
+ 		gpu_set_float(pipes_opac_merge_mask, slot_layer_get_opacity(l1));
+-		gpu_set_int(pipes_blending_merge_mask, BLEND_TYPE_MIX);
++		// STUDIO-PATCH(mask-multiply): masks multiply, l0 * lerp(1, l1, opacity), as in the viewport (make_mesh.c): flatten,
++		// export and Merge Down of a mask. Upstream mixed them, an opaque mask replaced the ones below.
++		gpu_set_int(pipes_blending_merge_mask, BLEND_TYPE_MULTIPLY);
+ 		gpu_set_vertex_buffer(const_data_screen_aligned_vb);
+ 		gpu_set_index_buffer(const_data_screen_aligned_ib);
+ 		gpu_draw();

@@ -674,10 +674,11 @@ section 11 : 59 contrôles en tout.
 - **Limites** :
   - une fusion d'un calque à tuiles dans un calque qui n'en a pas (limité à un objet sans tuile) ne lit que la tuile
     du contexte ;
-  - upstream, non corrigé : des masques empilés sur un calque sont fusionnés en MIX dans le flatten (donc l'export) :
-    le dernier créé, le plus haut, remplace les autres, alors que la vue 3D les multiplie. Le banc le vérifie, pour
-    voir si l'upstream le change ;
-  - upstream, non corrigé : l'Undo d'un Merge Group ne rend pas le calque de base (même sans UDIM).
+  - upstream, relevé ici : des masques empilés sur un calque étaient fusionnés en MIX dans le flatten (donc l'export) :
+    le dernier créé, le plus haut, remplaçait les autres, alors que la vue 3D les multiplie. *Corrigé, patch
+    `mask-multiply`, vérifié sur chaque tuile (voir « Fusion avec studio » plus bas).* ;
+  - upstream, relevé ici : l'Undo d'un Merge Group ne rendait pas le calque de base (même sans UDIM). *Corrigé, patch
+    `merge-group-undo`, vérifié sur des calques à tuiles.*
 
 ### Lot D2d (2026-09-27) : fait
 
@@ -762,6 +763,22 @@ Patch `udim-tiles` (points d'appel D2f, dans `util_layer.c`, `render_path_raytra
   synchronisation suivante.
 - **Non traité** : quand le path tracer trace les objets un par un (surcharges de matériau des maillages visibles,
   objets qui bougent, timeline en lecture), leurs uv locales lisent toute la grille, faux sur un projet UDIM.
+
+### Fusion avec studio (2026-09-27)
+
+Pendant le lot, `studio` a reçu deux correctifs qui touchent les mêmes fonctions : `mask-multiply` (les masques
+empilés se multiplient partout, comme dans la vue) et `merge-group-undo` (Merge Group est un seul pas d'historique,
+Undo et Redo rendent le groupe). `studio` est fusionnée dans `d2` avant la fusion de `d2` dans `studio`.
+- **Merge Down d'un masque sur un masque d'opacité < 1.** `layers_bake_mask_opacity` (mask-multiply) écrit l'opacité
+  dans les pixels du masque du dessous, puis la remet à 1 : elle passe dans la boucle de tuiles, sinon seule la tuile
+  du contexte la recevait. La boucle fait partie du patch `mask-multiply`, pour que chaque patch se retire seul.
+- **Le reste passe par D2 sans changement.** Le produit des masques vient de `layers_merge_layer` et
+  `layers_apply_mask`, déjà enveloppés par tuile. Le pas Merge Group sauve chaque tuile par `history_copy_to_undo` ;
+  l'Undo recrée les calques supprimés sans tuiles, puis `slot_layer_swap` les passe aux tuiles et rend chacune.
+- **Banc** `.tests/udim_tiles_app.sh`, section 11 : deux masques multipliés sur chaque tuile ; Merge Down d'un masque
+  sur un masque d'opacité 0.5 (0.5 cuit dans la 1002, 0 sans la boucle) ; Merge Group puis Undo, Redo et Undo (pile,
+  tuiles de chaque calque et du masque de groupe, flatten). 78 contrôles en tout. `masks_app.sh` (18) et
+  `layers_undo_app.sh` (22) passent sur la fusion.
 
 ---
 
