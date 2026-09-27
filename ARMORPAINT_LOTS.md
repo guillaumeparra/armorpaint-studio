@@ -570,6 +570,131 @@ Décidé le 2026-09-26. Analyse, architecture et détail des phases : **`ARMORPA
 
 ---
 
+# Chantier E — Matériaux procéduraux .sbs/.sbsar (voie sbsrender)
+
+Décidé le 2026-09-27. L'étude complète (voies comparées, mesures, droit, frictions) est dans `~/Desktop/code/sbsar/recherche-live/ARCHITECTURE.md`, privée, hors dépôt. **Décision de Guillaume : une première version sur `sbsrender` seul, simple et sans temps réel, « mieux que rien ».** Ni SDK Adobe, ni pilotage de Painter, ni moteur maison. Ce chantier remplace la feuille de route E0-E11 de l'étude pour la v1.
+
+**Objectif (v0)** : un outil qui ouvre un .sbs ou un .sbsar, liste ses paramètres exposés comme Painter les montre, les rend par `sbsrender` et crée ou met à jour le matériau correspondant dans ArmorPaint.
+
+**Choix d'architecture.**
+- **Moteur** : `sbsrender` et `sbscooker` du Designer installé, moteur `mtl` (par défaut ; c'est celui qu'affichent Designer et Painter). Un processus par rendu, toutes les sorties utiles dans le même appel. Mesuré sur le M4 : 1,40 s en 2048 pour colorful_planks, 0,6 à 0,9 s en 512.
+- **Fenêtre séparée en Python + PySide6, sur le modèle de la fenêtre d'export (B6)** : lancée par ArmorPaint via `studio_proc`, protocole JSON ligne à ligne. Aucune dépendance de poste nouvelle (PySide6 est déjà requis par B6). L'étude écartait cette forme pour un réglage *vivant*, à cause de l'aller-retour à chaque curseur ; sans temps réel, l'objection tombe.
+- **Lecteur de description en Python** : `sbsar_meta.py` et `sevenz.py` de l'étude (bibliothèque standard seule), déjà validés sur les 977 .sbsar de l'étagère de Painter et contre `sbsrender info`. Un .sbs est d'abord cuit en .sbsar par `sbscooker` (≈ 1 s), puis lu par le même lecteur : un seul chemin, et l'interface est exactement celle que Painter montrerait pour le .sbsar publié.
+- **Résultat dans ArmorPaint : un matériau ordinaire.** Des nœuds Image Texture branchés sur la sortie PBR, comme `import_folder_run` ([import_folder.c:14](paint/sources/io/import_folder.c:14)), avec des textures rendues sur disque. Pas de nœud spécial, rien de nouveau dans le `.arm`. Conséquences :
+  - le projet s'ouvre sans le plugin et sans Designer ; les pixels ne se perdent jamais ;
+  - les quatre frictions critiques relevées par l'étude (pixels perdus au re-remplissage, réglages partagés à la duplication, Ctrl+Z incohérent, aspect changé sans accord) disparaissent par construction : rien ne bouge sans un clic de l'artiste ;
+  - historique, duplication, export et pack sont ceux d'ArmorPaint.
+- **Recette** : `studio_sbs.json` dans le dossier des textures. Elle contient le paquet (chemin absolu, chemin relatif, hash), le graphe, les valeurs touchées, le preset, la résolution, l'association sorties → canaux et la version de `sbsrender`. Un matériau est reconnu comme procédural quand ses textures sont dans un dossier qui contient une recette : rien à stocker dans le `.arm`.
+- **Dossier des textures** : `<dossier du .arm>/<projet>_sbs/<matériau>/`, fichiers nommés par usage (`basecolor.tga`, `normal.tga`…) pour que `path_is_*` et les règles d'import OCIO (A4) les reconnaissent. Pour un projet jamais enregistré, la fenêtre demande un dossier.
+- **Droit** : chaque rendu part d'un geste de l'artiste (relâchement d'un réglage, clic). Aucun batch, aucun précalcul : compatible avec une licence individuelle comme Entreprise, d'après l'étude. Il faut un siège Designer par poste qui utilise l'outil ; le projet, lui, s'ouvre partout.
+
+### E0 — Préalables · **0,5 j**
+
+- Localisation des outils : réglage studio (variable `STUDIO_SBS_DESIGNER`), sinon `/Applications/Adobe Substance 3D Designer/*.app/Contents/MacOS/`. Version lue et affichée dans la fenêtre.
+- Désactiver les mises à jour automatiques de Designer, pour que la référence ne change pas sous nos pieds.
+- Ranger les deux scripts de l'étude dans `external/assets/`.
+- **Aucun fichier Adobe dans le dépôt** : les bancs lisent leurs échantillons hors dépôt (étagère de Painter, `~/Desktop/code/sbsar/`) et se sautent s'ils sont absents.
+- À trancher par Guillaume : public visé (lui seul, ou les graphistes avec un siège Designer chacun) et libellé du menu (neutre, sans « Substance » : marque d'Adobe).
+
+### E1 — Description et rendu, en ligne de commande · **2-3 j**
+
+En Python, testable sans ArmorPaint.
+
+- `studio_sbs_meta.py` (reprise de `sbsar_meta.py` et `sevenz.py`) :
+  - graphes ;
+  - entrées : types, défauts, bornes, pas, widgets, libellés, descriptions, groupes, `visibleif`, usages ;
+  - sorties : usage, format, `disable` ;
+  - presets, taille physique, type de graphe, icône.
+- `studio_sbs_render.py` :
+  - cuisson d'un .sbs par `sbscooker` dans `~/Library/Caches/studio/sbs/cook/`, refaite seulement si le .sbs a changé (dépendances non suivies en v0) ;
+  - rendu par `--input-graph`, `--set-value` (dont `$outputsize` et `$randomseed`), `--use-preset`, `--set-entry` pour les entrées image, `--input-graph-output` pour les seules sorties liées ;
+  - formats : TGA 8 bits ; normale et hauteur en EXR half si le projet est en 16 ou 32 bits (`--set-output-format`, `--set-output-bit-depth`). Jamais de PNG : 7,5 s au lieu de 1,4 s en 2048 ;
+  - **vérification** que chaque fichier attendu existe, et lecture de stderr. `sbsrender` rend le code 0 sur une sortie introuvable ou un bitmap manquant (image noire) ;
+  - annulation par kill du groupe de processus.
+
+**Critère de fin** :
+- les 977 .sbsar sont décrits à l'identique de la version de l'étude ;
+- les 107 matériaux de l'étagère sont rendus en 2048 sans erreur ;
+- wood_plain (sortie « ambientocclusion » introuvable) donne une erreur lisible, jamais une image noire ;
+- colorful_planks.sbs est cuit puis rendu.
+
+### E2 — Fenêtre de réglage · **4-6 j**
+
+- Ouvrir un .sbs ou un .sbsar : sélecteur de fichier, ou dépôt sur la fenêtre. S'il y a plusieurs graphes, liste et choix (par défaut : le seul graphe matériau, sinon le premier).
+- **Paramètres présentés comme dans Painter** :
+  - groupes repliables, dans l'ordre du fichier ;
+  - widgets : curseur (float ou int, 1 à 4 composantes), case, liste, couleur, angle (degrés à l'écran, tours pour `sbsrender`), position ;
+  - conditions `visibleif`, par un petit évaluateur (sans `eval`) ;
+  - infobulles tirées des descriptions ; réinitialisation par paramètre et globale ;
+  - presets du paquet, graine avec bouton « aléatoire », résolution (celle du projet par défaut) ;
+  - paramètres techniques (`$normal_map_format`, `channel_*`) fixés d'office et masqués ;
+  - entrées image : un fichier choisi à la main (courbure cuite ailleurs, masque…) ou « aucune ».
+- **Aperçu dans la fenêtre** : rendu 512 lancé au relâchement d'un réglage. L'ancienne image reste affichée pendant le calcul, et un rendu en cours est tué quand un nouveau part. Vignettes des cartes (couleur, normale, rugosité…).
+- **Sorties → canaux** : association automatique par usage, repli par identifiant, modifiable à la main. Les sorties marquées `disable` sont décochées, ce qui évite de cumuler normale et hauteur.
+- Boutons « Envoyer vers ArmorPaint » (nouveau matériau), « Mettre à jour » (matériau déjà envoyé), « Dupliquer » (nouveau matériau, nouveau dossier), « Recharger » (après un enregistrement dans Designer).
+- Message clair si Designer est absent.
+
+### E3 — Pont avec ArmorPaint · **3-4 j**
+
+En C dans `external/`, sur le modèle de `studio_export_window.c`.
+
+- `studio_sbs_window.c` : lancement de la fenêtre par `studio_proc`, protocole JSON ligne à ligne, stderr relayé dans le log.
+- **Points d'entrée**, sans patch du cœur :
+  - catégorie de menu, la 3e sur 4 (`ui_menubar_add_category`, [ui_menubar.c:29](paint/sources/ui/ui_menubar.c:29) ; Color et ShotGrid prennent les deux premières) : « Ouvrir un .sbs/.sbsar… » et « Rééditer le matériau sélectionné » ;
+  - dépôt d'un .sbs ou .sbsar dans ArmorPaint : importeur par extension dans `import_text_importers` ([globals.h:103](paint/sources/globals.h:103)), en minuscules et en majuscules, qui ouvre la fenêtre sur le fichier.
+- **Opérations** :
+  - `state` : résolution et profondeur du projet, dossier du projet, matériau sélectionné et sa recette ;
+  - `create` : rendu final à la résolution du projet, puis matériau créé (nœuds Image Texture par canal), nommé d'après le graphe ou le preset ;
+  - `update` : rendu final dans le même dossier, textures rechargées, calques remplis re-remplis. Le précédent existe : `after_reload` de `studio_ocio_import.c` bascule `g_context->material` sur chaque matériau de remplissage et appelle `layers_update_fill_layers`.
+- **Règles de liaison** (étude §3.7) :
+  - couleur de base en sRGB, alpha neutralisé, sinon ArmorPaint prémultiplie (méthode à choisir : réglage du nœud ou réécriture du fichier) ;
+  - normale en OpenGL, par `$normal_map_format` ;
+  - hauteur avec la force de relief par défaut d'ArmorPaint : le calibrage contre Painter est reporté ;
+  - émissif réduit au drapeau d'ArmorPaint ; sorties non représentables (anisotropie, sheen, coat) signalées dans la fenêtre.
+
+### E4 — Tests et recette · **1-2 j**
+
+- `.tests/sbs_window_app.sh` en `--background`, sur le modèle d'`export_window_app.sh`. `STUDIO_SBS_WINDOW_TEST=<choix.json>` donne le fichier, le preset, les valeurs et l'action ; la fenêtre les applique, envoie, écrit un résultat et se ferme.
+- Cas couverts :
+  - colorful_planks en .sbsar et en .sbs ;
+  - 20 matériaux de l'étagère, association usage → canal vérifiée par script ;
+  - wood_plain (erreur visible) ;
+  - poste sans Designer ;
+  - mise à jour d'un matériau utilisé par 2 calques ;
+  - projet rouvert sans le plugin, avec un aspect identique.
+- **Critère chronométré** : colorful_planks en 2048, « Envoyer » → calque à jour en ≤ 2,5 s (rendu seul : 1,40 s).
+
+| Chantier E (v0) — total | **11-16 j** |
+|---|---|
+
+**Compromis acceptés en v0.**
+- **Pas de temps réel.** Aperçu 512 en 0,6 à 0,9 s dans la fenêtre ; le viewport ne change qu'à « Envoyer » ou « Mettre à jour » (≈ 1,5 à 2 s en 2048). Tout le graphe est recalculé à chaque réglage.
+- **Fenêtre séparée**, pas un onglet de la barre latérale : les paramètres ne s'affichent pas à la simple sélection du calque, il faut « Rééditer ».
+- **Un matériau = un jeu de réglages.** Deux calques qui partagent le matériau partagent ses textures, comme partout dans ArmorPaint ; pour des réglages différents, « Dupliquer ».
+- **Ctrl+Z n'annule pas une mise à jour de textures**, comme « Reimport Textures » d'ArmorPaint.
+- **Pas de cartes de maillage automatiques** : un générateur (saleté, usure) prend une carte fournie à la main.
+- **Pas de surveillance du .sbs** : « Recharger » après un enregistrement dans Designer.
+- Seuls les graphes matériau sont envoyables : pas encore d'alphas, de procédurales ni de filtres.
+- macOS seulement : `studio_proc` n'existe pas sous Windows.
+
+**Ensuite, si l'usage le demande** (lots de l'étude, à rechiffrer) :
+1. Surveillance du .sbs (`select.kqueue`), puis recuisson et rendu à chaque enregistrement dans Designer ; option « mise à jour automatique » vers ArmorPaint.
+2. Cartes de maillage par `substance3d_baker` (livré avec Designer), générateurs posés en masque.
+3. Non-matériaux (alphas, procédurales) et étagère avec vignettes lues.
+4. Panneau natif dans ArmorPaint (onglet « Paramètres », nœud dédié) si la fenêtre séparée gêne : c'est la v1 de l'étude, avec son lot « Projet fiable ».
+5. Hors plan : moteur résident par le SDK (accord d'Adobe nécessaire), « aval natif » (nœuds de finition refaits en shader), moteur maison.
+
+**Risques.**
+
+| Risque | Impact | Parade |
+|---|---|---|
+| Adobe retire `sbsrender` de Designer (précédent de 2021) | 🟠 plus de nouveaux rendus | Mises à jour de Designer gelées ; les projets restent lisibles (textures sur disque) |
+| Erreurs silencieuses de `sbsrender` | 🟠 image noire | Fichiers produits vérifiés, stderr lu (E1) |
+| GPU partagé entre `sbsrender` (`mtl`) et ArmorPaint | 🟡 à-coups non mesurés | Mesure en E4 |
+| Python et PySide6 lancés depuis le Finder | 🟡 | Même réglage que B6 et C2 (environnement rez) |
+
+---
+
 ## Synthèse
 
 | Chantier | Jours-homme | Dépendances |
@@ -579,6 +704,7 @@ Décidé le 2026-09-26. Analyse, architecture et détail des phases : **`ARMORPA
 | **B — Exporter studio** | **34** | B1 avant B2-B7 ; B3 profite de C2 |
 | **C — ShotGrid** | **37** | C1+C2 avant C3-C4 ; C4 dépend de B3/B5 |
 | **D — UDIM natifs** | **56-87** | D0 indépendant ; D2 avant D3-D4 ; C4 publie `<UDIM>` sans dépendre de D |
+| **E — .sbs/.sbsar, voie sbsrender (v0)** | **11-16** | Indépendant de A-D ; réutilise `studio_proc` (C1) et le modèle de fenêtre de B6 |
 | **Total A-C** | **106 j-h** (~5,3 mois à 1 ETP) | |
 
 ### Chemin recommandé
