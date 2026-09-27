@@ -197,5 +197,105 @@ assert m["preset"]["name"] == "mine" and m["preset"]["path"].endswith("p.export_
 assert m["files"][0]["resolution"] == [1024, 1024] and m["files"][0]["path"].endswith(".tif"), m["files"]
 PY'
 
+# 6. Canaux d'un calque (lot B4) : layer('<nom>') lit le calque lui-même, pas la pile aplatie. Un calque « AO bake »
+#    opaque (0.25, 0.5, 0.75) sur le calque orange : ses canaux = la pile aplatie ; caché, il reste lu et la pile
+#    redevient orange = layer_*('Layer 1'). Calque absent, homonyme, groupe : préflight bloquant, rien d'écrit.
+cat > "$W/presets/layers.json" <<'EOF'
+{
+	"version": 1,
+	"defaults": { "format": "png", "bits": 8, "color_space": "raw" },
+	"textures": [
+		{ "name": "base", "channels": ["base_r", "base_g", "base_b", "1.0"] },
+		{ "name": "ao", "channels": ["layer_r('AO bake')", "layer_g('AO bake')", "layer_b('AO bake')", "layer_a('AO bake')"] },
+		{ "name": "gray", "channels": ["layer(\"AO bake\")"] },
+		{ "name": "under", "channels": ["layer_r('Layer 1')", "layer_g('Layer 1')", "layer_b('Layer 1')", "1.0"] },
+		{ "name": "mix", "channels": ["clamp(layer_b('AO bake') - layer('AO bake'), 0, 1)"], "bits": 16 }
+	]
+}
+EOF
+for n in missing:Nope ambiguous:Layer\ 1 group:Grp; do
+	printf '{ "version": 1, "textures": [ { "name": "m", "format": "png", "channels": ["layer('"'"'%s'"'"')"] } ] }\n' \
+		"${n#*:}" > "$W/presets/l${n%%:*}.json"
+done
+cat > "$W/layers.c" <<EOF
+int main() {
+	script_project_new();
+	slot_material_t *m = script_material_create("mat");
+	ui_node_t *rgb = script_material_create_node_at("RGB", -400.0, 0.0);
+	script_material_set_color(rgb, 0, 0, 0.8, 0.35, 0.1, 1.0);
+	script_material_connect(rgb, 0, script_material_get_node("OUTPUT_MATERIAL_PBR"), 0);
+	script_material_update();
+	script_material_set(m);
+	script_fill_layer();
+	console_log(string("t: new=%d", studio_layer_new()));
+	slot_material_t *ao = script_material_create("ao");
+	ui_node_t *grey = script_material_create_node_at("RGB", -400.0, 0.0);
+	script_material_set_color(grey, 0, 0, 0.25, 0.5, 0.75, 1.0);
+	script_material_connect(grey, 0, script_material_get_node("OUTPUT_MATERIAL_PBR"), 0);
+	script_material_update();
+	script_material_set(ao);
+	script_fill_layer();
+	console_log(string("t: rename=%d", studio_layer_rename("AO bake")));
+	console_log(string("t: shown=%d", studio_export_run("$W/out_layers", "layers", 0)));
+	console_log(string("t: hide=%d", studio_layer_set_visible(0)));
+	console_log(string("t: hidden=%d", studio_export_run("$W/out_hidden", "layers", 0)));
+	console_log(string("t: hidden_pf=%s", studio_export_preflight("$W/out_hidden", "layers", 0)));
+	console_log(string("t: missing=%d", studio_export_run("$W/out_lmissing", "lmissing", 0)));
+	console_log(string("t: missing_pf=%s", studio_export_preflight("$W/out_lmissing", "lmissing", 0)));
+	studio_layer_rename("Layer 1");
+	console_log(string("t: ambiguous_pf=%s", studio_export_preflight("$W/out_lambiguous", "lambiguous", 0)));
+	studio_layer_rename("AO bake");
+	console_log(string("t: group=%d", studio_layer_new_group()));
+	studio_layer_rename("Grp");
+	console_log(string("t: group_pf=%s", studio_export_preflight("$W/out_lgroup", "lgroup", 0)));
+	studio_export_set_preset("bad", "{\"textures\": [{\"name\": \"b\", \"channels\": [\"layer(AO bake)\"]}]}", "$W/l.export_settings.json");
+	console_log(string("t: bad=%d", studio_export_run("$W/out_lbad", "bad", 0)));
+	return 0;
+}
+EOF
+"$APP" --background --script "$W/layers.c" > "$W/layers.log" 2>&1 || true
+grep -E "^t: |Texture export|layer" "$W/layers.log" | cut -c1-300
+check "calque ajouté, renommé, caché" 'grep -q "t: new=1" "$W/layers.log" && grep -q "t: rename=1" "$W/layers.log" && grep -q "t: hide=1" "$W/layers.log"'
+check "canaux du calque du dessus = pile aplatie" 'grep -q "t: shown=1" "$W/layers.log" && python3 - "$W/out_layers" <<PY
+import sys
+from PIL import Image
+d = sys.argv[1]
+base = Image.open(f"{d}/untitled_base.png").convert("RGBA")
+ao = Image.open(f"{d}/untitled_ao.png")
+assert ao.mode == "RGBA", ao.mode
+assert [c.tobytes() for c in base.split()[:3]] == [c.tobytes() for c in ao.split()[:3]]
+alpha = ao.split()[3].histogram()
+assert alpha[255] > 0 and alpha[0] + alpha[255] == ao.width * ao.height, "alpha"  # opaque sur les îlots UV
+assert ao.getpixel((10, 10)) == (64, 128, 191, 255), ao.getpixel((10, 10))  # 0.25, 0.5, 0.75 tels quels
+gray = Image.open(f"{d}/untitled_gray.png")
+assert gray.mode == "L" and gray.tobytes() == ao.split()[0].tobytes(), gray.mode
+under = Image.open(f"{d}/untitled_under.png").convert("RGB").getpixel((10, 10))
+assert under[0] > under[1] > under[2], under  # orange, sous le calque du dessus
+PY'
+check "calque caché : toujours lu, la pile redevient orange" 'grep -q "t: hidden=1" "$W/layers.log" && ! grep "t: hidden_pf=" "$W/layers.log" | grep -q hidden_layers && grep "t: missing_pf=" "$W/layers.log" | grep -q hidden_layers && python3 - "$W" <<PY
+import sys
+from PIL import Image
+w = sys.argv[1]
+a = Image.open(f"{w}/out_layers/untitled_ao.png").tobytes()
+assert Image.open(f"{w}/out_hidden/untitled_ao.png").tobytes() == a
+base = Image.open(f"{w}/out_hidden/untitled_base.png").convert("RGB").tobytes()
+assert base == Image.open(f"{w}/out_hidden/untitled_under.png").convert("RGB").tobytes()
+assert base == Image.open(f"{w}/out_layers/untitled_under.png").convert("RGB").tobytes()
+PY'
+check "expression sur des canaux de calque (16 bits)" 'python3 - "$W/out_layers" <<PY
+import struct, sys
+from PIL import Image
+d = sys.argv[1]
+ihdr = struct.unpack(">IIBB", open(f"{d}/untitled_mix.png", "rb").read(26)[16:26])
+assert ihdr[2:] == (16, 0), ihdr  # gris 16 bits
+r, g, b, _ = Image.open(f"{d}/untitled_ao.png").getpixel((10, 10))
+v = Image.open(f"{d}/untitled_mix.png").getpixel((10, 10)) / 65535
+assert abs(v - (b - r) / 255) < 2 / 255, (v, r, b)
+PY'
+check "calque absent : bloquant, rien d écrit" 'grep -q "t: missing=0" "$W/layers.log" && grep "t: missing_pf=" "$W/layers.log" | grep -q "\"code\": *\"layer_missing\"" && [ ! -e "$W/out_lmissing" ]'
+check "calques homonymes : bloquant" 'grep "t: ambiguous_pf=" "$W/layers.log" | grep -q "\"code\": *\"layer_ambiguous\"" && [ ! -e "$W/out_lambiguous" ]'
+check "groupe de calques : bloquant" 'grep -q "t: group=1" "$W/layers.log" && grep "t: group_pf=" "$W/layers.log" | grep -q "\"code\": *\"layer_group\""'
+check "nom sans guillemets : preset refusé" 'grep -q "t: bad=0" "$W/layers.log" && grep -q "takes a layer name in quotes" "$W/layers.log" && [ ! -e "$W/out_lbad" ]'
+
 chmod 755 "$W/ro"
 [ $FAIL -eq 0 ] && echo "export app: OK ($W)" || { echo "export app: FAILED ($W)"; exit 1; }

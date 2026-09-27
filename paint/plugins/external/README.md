@@ -684,9 +684,16 @@ La lecture est stricte : une clé inconnue, un type faux ou une combinaison impo
 presets upstream, avec les mêmes définitions.
 - **Opérateurs** : `+ - * /` et les parenthèses.
 - **Fonctions** : `abs`, `sqrt`, `min`, `max`, `pow`, `step(edge, x)`, `clamp(x, lo, hi)`, `mix(a, b, t)`.
+- **Canaux d'un calque** : `layer('<nom>')` (son rouge : un bake en gris, un masque) et `layer_r`, `layer_g`,
+  `layer_b`, `layer_a('<nom>')`, nom entre guillemets simples ou doubles. Ils lisent un calque ou un masque par son
+  nom, pas la pile aplatie : un bake (outil Bake dans un calque : AO, épaisseur, courbure...) ou un masque sort ainsi
+  en map à part. Valeurs brutes du calque, alpha à part (la pile compose chaque calque selon son alpha) ; un calque
+  caché est lu quand même. Découpés et placés comme la pile : case de la tuile UDIM, calque d'une tuile dans sa case
+  ou dans sa tuile seule, vides pour un calque limité à un autre objet ou à un autre jeu. 8 canaux de calque au plus
+  par expression. Un calque absent, deux calques du même nom ou un groupe bloquent l'export.
 - **Garde-fous** : une division par zéro, la racine d'un négatif ou un NaN donnent 0.
 - **Exemples** : un masque d'émission `base_r * emis`, un ORM `occ`, `rough`, `metal`, une carte de brillance
-  `1 - rough`.
+  `1 - rough`, une AO bakée à part `layer('AO bake')`, combinée `clamp(layer('AO bake') * occ, 0, 1)`.
 
 ### Déroulé d'un export
 
@@ -697,7 +704,7 @@ presets upstream, avec les mêmes définitions.
 
    | Bloquant | Avertissement |
    |---|---|
-   | nommage impossible (template ShotGrid), aucun calque visible, aucun fichier, aucun fichier coché (B6), résolution hors show, chemins en double, fichier existant (`block`), dossier non inscriptible, espace disque insuffisant, PNG > 2 Gio, TIFF non compressé > 4 Gio, espace OCIO inconnu ou OCIO indisponible (A3) | maillage UDIM exporté hors mode tuile, tuiles UDIM manquantes, fichier existant (`warn`), marge disque faible, TIFF compressé > 4 Gio |
+   | nommage impossible (template ShotGrid), aucun calque visible, aucun fichier, aucun fichier coché (B6), calque de `layer()` absent, en double ou groupe, résolution hors show, chemins en double, fichier existant (`block`), dossier non inscriptible, espace disque insuffisant, PNG > 2 Gio, TIFF non compressé > 4 Gio, espace OCIO inconnu ou OCIO indisponible (A3) | maillage UDIM exporté hors mode tuile, tuiles UDIM manquantes, fichier existant (`warn`), marge disque faible, TIFF compressé > 4 Gio |
 
    Les **notes** (niveau `note`) décrivent des choix du preset, pas des erreurs : calques masqués ignorés, hauteur en
    8 bits, données en JPG, EXR `srgb` ou non linéaire, couleur linéaire en 8 bits, données converties vers un espace
@@ -876,6 +883,9 @@ char *studio_set_atlases(char *json);                // {"names": [...], "object
 int   studio_layer_set_atlas(int atlas);             // limite le calque courant à un jeu ; -1 : partagé
 int   studio_layer_set_object(int index);            // limite le calque courant à un objet (ordre de studio_atlases) ; -1 : partagé
 int   studio_layer_new(void);                        // nouveau calque de peinture vide, au-dessus du courant, devenu courant
+int   studio_layer_new_group(void);                  // nouveau groupe de calques vide, devenu courant
+int   studio_layer_rename(char *name);               // renomme le calque courant (le nom que lit layer('<nom>'))
+int   studio_layer_set_visible(int visible);         // montre (1) ou cache (0) le calque courant, comme son œil
 char *studio_object_rename(int index, char *name);   // comme l'onglet Meshes : le suffixe de tuile UDIM reste (body.1001 → torso.1001) ; nouveau nom
 int   studio_import_mesh(char *path, int split);     // remplace le maillage ; split : 0 objet, 1 matériau, 2 tuile UDIM, 3 matériau et tuile UDIM ; fini au retour
 int   studio_meshes_sort(void);                      // Edit > Sort de l'onglet Meshes : objets triés par nom
@@ -1348,14 +1358,14 @@ int   studio_ocio_import_reconvert(void);        // recharge et reconvertit les 
 .tests/proc.sh [dossier de travail]    # processus (C1)
 .tests/obj.sh [dossier de travail]     # import OBJ (patches obj-global-indices, obj-float-exponent, udim-import) ; FUZZ=<n> pour le nombre de mutations
 .tests/fbx.sh [dossier de travail]     # import FBX (patch fbx-split) : splits = upstream, UDIM, matériaux, fuzz ; FUZZ=<n>
-.tests/udim_app.sh [dossier]           # UDIM dans l'app (lot D0) : import OBJ/FBX, refus, ajout, 70 tuiles (atlas, peinture, export), conseil de résolution
+.tests/udim_app.sh [dossier]           # UDIM dans l'app (lot D0) : import OBJ/FBX, refus, ajout, 70 tuiles (atlas, peinture, export), conseil de résolution, layer() par tuile
 .tests/sg.sh [dossier de travail]     # ShotGrid hors app : sidecar (C2), noms des exports (B3), moteur (C3), publish (C4), mode dégradé et file d'attente (C5) ; Toolkit de .shotgrid/
 .tests/publish_app.sh [dossier]        # publish ShotGrid (C4) dans l'app, site simulé : op publish, puis fenêtre Publish (Qt offscreen) ; copie publiée rouverte sans le dossier de travail ; PY=<python PySide6>
 .tests/sg_context_app.sh [dossier]     # contexte et mode dégradé ShotGrid (C5) dans l'app, site simulé : contexte gardé dans le .arm, site coupé (mode fichier, retour trouvé au repos), coupure en plein publish (file rejouée), journal d'audit
 .tests/arm_paths_app.sh [dossier]      # chemins enregistrés dans les .arm (patch arm-relative-paths) : relatifs, normalisés, rouverts sans l'ancien dossier
 python3 .tests/arm_paths.py <projet.arm> [fichier...]   # chemins des fichiers d'un .arm ; avec des fichiers, vérifie qu'il les désigne, relatifs et normalisés
 .tests/export.sh [dossier de travail]  # export studio (B2, B4, B5) hors app : encodeurs relus par libpng/libtiff (patches sdefl-bound, encode-image-overflow), expressions, presets, préflight, conseil de résolution UDIM ; FUZZ=<n>
-.tests/export_app.sh [dossier]         # export studio dans l'app : scripts, --export-textures, pixels = upstream, manifeste, atomicité
+.tests/export_app.sh [dossier]         # export studio dans l'app : scripts, --export-textures, pixels = upstream, manifeste, atomicité, canaux de calque
 .tests/batch_app.sh [dossier]          # mode batch (B7) : sans fenêtre ni Dock, --export-mode/-naming/-color-space, rapport JSON, codes de retour 0/1/2
 .tests/ocio.sh [dossier de travail]    # OCIO (A1) hors app : ABI, module, références PyOpenColorIO, threads, erreurs ; OCIO_TEST_CONFIGS=<configs>
 .tests/ocio_app.sh [dossier]           # OCIO dans l'app : configuration par défaut, $OCIO, $OCIO invalide, API de scripting

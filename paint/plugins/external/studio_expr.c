@@ -55,6 +55,9 @@ struct studio_expr {
 	int      count;
 	int      depth;
 	uint32_t vars;
+	int      layer_count;
+	char     layer_names[STUDIO_EXPR_MAX_LAYERS][STUDIO_EXPR_MAX_LAYER_NAME];
+	int      layer_channels[STUDIO_EXPR_MAX_LAYERS];
 };
 
 typedef struct {
@@ -239,6 +242,54 @@ static void expect(parser_t *ps, char c) {
 	ps->p++;
 }
 
+// layer('<nom>'), layer_r... : ps->p sur '(' ; channel 0-3.
+static void parse_layer(parser_t *ps, const char *fn, int channel) {
+	ps->p++; // '('
+	skip_space(ps);
+	char quote = *ps->p;
+	if (quote != '\'' && quote != '"') {
+		fail(ps, "%s() takes a layer name in quotes", fn);
+		return;
+	}
+	const char *start = ++ps->p;
+	while (*ps->p != 0 && *ps->p != quote) {
+		ps->p++;
+	}
+	size_t len = (size_t)(ps->p - start);
+	if (*ps->p == 0) {
+		ps->p = start - 1;
+		fail(ps, "unterminated layer name");
+		return;
+	}
+	if (len == 0 || len >= STUDIO_EXPR_MAX_LAYER_NAME) {
+		ps->p = start - 1;
+		fail(ps, len == 0 ? "empty layer name" : "layer name too long");
+		return;
+	}
+	ps->p++; // guillemet fermant
+	expect(ps, ')');
+	if (ps->failed) {
+		return;
+	}
+	studio_expr_t *e = ps->e;
+	int            i = 0;
+	while (i < e->layer_count &&
+	       !(e->layer_channels[i] == channel && strlen(e->layer_names[i]) == len && memcmp(e->layer_names[i], start, len) == 0)) {
+		i++;
+	}
+	if (i == e->layer_count) {
+		if (i == STUDIO_EXPR_MAX_LAYERS) {
+			fail(ps, "more than %d layer channels", STUDIO_EXPR_MAX_LAYERS);
+			return;
+		}
+		memcpy(e->layer_names[i], start, len);
+		e->layer_names[i][len] = 0;
+		e->layer_channels[i]   = channel;
+		e->layer_count++;
+	}
+	emit(ps, (instr_t){.op = OP_VAR, .var = STUDIO_VAR_COUNT + i});
+}
+
 static void parse_primary(parser_t *ps) {
 	skip_space(ps);
 	if (ps->failed) {
@@ -287,6 +338,13 @@ static void parse_primary(parser_t *ps) {
 		ps->e->vars |= 1u << var;
 		emit(ps, (instr_t){.op = OP_VAR, .var = var});
 		return;
+	}
+	static const char *layer_fns[] = {"layer", "layer_r", "layer_g", "layer_b", "layer_a"};
+	for (int i = 0; i < (int)(sizeof(layer_fns) / sizeof(layer_fns[0])); ++i) {
+		if (strcmp(layer_fns[i], name) == 0) {
+			parse_layer(ps, name, i > 0 ? i - 1 : 0);
+			return;
+		}
 	}
 	static const struct {
 		const char *name;
@@ -403,6 +461,20 @@ void studio_expr_free(studio_expr_t *e) {
 
 uint32_t studio_expr_vars(const studio_expr_t *e) {
 	return e->vars;
+}
+
+int studio_expr_layer_count(const studio_expr_t *e) {
+	return e->layer_count;
+}
+
+const char *studio_expr_layer(const studio_expr_t *e, int i, int *channel) {
+	if (i < 0 || i >= e->layer_count) {
+		return NULL;
+	}
+	if (channel != NULL) {
+		*channel = e->layer_channels[i];
+	}
+	return e->layer_names[i];
 }
 
 bool studio_expr_constant(const studio_expr_t *e, float *value) {

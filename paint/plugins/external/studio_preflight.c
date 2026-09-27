@@ -138,6 +138,17 @@ static bool is_data_texture(const studio_preset_texture_t *t) {
 	return vars != 0 && (vars & STUDIO_VAR_COLOR_MASK) == 0;
 }
 
+// Que des canaux de calque (layer('AO')) : couleur ou donnée, le preset seul ne le dit pas.
+static bool layers_only(const studio_preset_texture_t *t) {
+	uint32_t vars   = 0;
+	int      layers = 0;
+	for (int i = 0; i < t->channels && i < 3; ++i) {
+		vars |= studio_expr_vars(t->exprs[i]);
+		layers += studio_expr_layer_count(t->exprs[i]);
+	}
+	return vars == 0 && layers > 0;
+}
+
 static bool reads_var(const studio_preset_texture_t *t, int var) {
 	for (int i = 0; i < t->channels; ++i) {
 		if (studio_expr_vars(t->exprs[i]) & (1u << var)) {
@@ -217,7 +228,7 @@ static void check_textures(studio_plan_t *plan, studio_report_t *r) {
 		if (t->format == STUDIO_FORMAT_EXR && t->color == STUDIO_COLOR_SRGB) {
 			studio_report_note(r, "exr_srgb", "%s: sRGB-encoded EXR, renderers expect linear values", t->name);
 		}
-		if (t->bits == 8 && t->color == STUDIO_COLOR_LINEAR && !is_data_texture(t)) {
+		if (t->bits == 8 && t->color == STUDIO_COLOR_LINEAR && !is_data_texture(t) && !layers_only(t)) {
 			studio_report_note(r, "linear_8bit", "%s: linear colour in 8 bits: banding in dark values, use "
 			                  "srgb or 16 bits", t->name);
 		}

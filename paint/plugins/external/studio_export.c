@@ -57,8 +57,16 @@ extern bool             args_export_textures;
 extern bool             args_background;
 extern char            *args_export_textures_preset;
 buffer_t               *gpu_get_texture_pixels(gpu_texture_t *image); // défini dans iron.h
+gpu_texture_t          *gpu_create_render_target(i32 width, i32 height, i32 format); // défini dans iron.h
+void                    gpu_delete_texture(gpu_texture_t *texture);                 // défini dans iron.h
+extern gpu_pipeline_t  *pipes_copy;
 bool                    slot_layer_is_visible(slot_layer_t *raw);
 bool                    slot_layer_is_layer(slot_layer_t *raw);
+bool                    slot_layer_is_group(slot_layer_t *raw);
+i32                     slot_layer_get_object_mask(slot_layer_t *raw);
+i32                     layers_udim_tile_slot(slot_layer_t *l);
+bool                    util_mesh_udim_layer(slot_layer_t *l);
+i32                     util_mesh_atlas_stride(void);
 slot_layer_t_array_t   *slot_layer_get_filters(slot_layer_t *raw, bool include_group_filters);
 i32                     config_get_texture_res_x(void);
 i32                     config_get_texture_res_y(void);
@@ -66,6 +74,8 @@ char                   *config_get_sha(void);
 char                   *project_filepath_get(void);
 i32                     util_mesh_udim_tile(char *name);
 i32                     util_mesh_udim_slot(i32 tile);
+string_array_t         *project_get_used_atlases(void);
+mesh_object_t_array_t  *project_get_atlas_objects(i32 object_mask);
 bool                    util_mesh_udim_active(void);
 void                    export_texture_run(char *path, bool bake_material);
 void                    console_info(char *s);
@@ -620,10 +630,19 @@ static inline float decode_color(float v) {
 	return v > 0.0f ? powf(v, 2.2f) : 0.0f;
 }
 
+// Calque lu par layer('<nom>') (studio_expr) : ses pixels à la taille des calques, pour la variante exportée.
 typedef struct {
-	source_t base, nor, pack;
-	int      width;
-	int      height;
+	char    *name;
+	source_t src;
+	uint8_t *data; // copie (malloc) des pixels
+} layer_source_t;
+
+typedef struct {
+	source_t        base, nor, pack;
+	int             width;
+	int             height;
+	layer_source_t *layers;
+	int             layer_count;
 } sources_t;
 
 // Ligne y de la variable v, en float. decode : couleurs décodées (gamma 2.2 -> linéaire), diff et spec calculés ensuite.
@@ -775,15 +794,33 @@ typedef struct {
 	const char                    *ocio_dst;        // NULL : aucune transformation OCIO
 	bool                           failed;
 	bool                           ocio_failed;
+	// Canaux de calque des expressions de la texture, sans doublon : calque (src->layers) et canal de chacun, et pour
+	// la variable STUDIO_VAR_COUNT + i de l'expression k, le canal ref_of[k][i].
+	int                            ref_count;
+	int                            ref_layer[4 * STUDIO_EXPR_MAX_LAYERS];
+	int                            ref_channel[4 * STUDIO_EXPR_MAX_LAYERS];
+	int                            ref_of[4][STUDIO_EXPR_MAX_LAYERS];
 } compose_t;
 
+#define ROW_SLOTS (STUDIO_VAR_COUNT + 4 * STUDIO_EXPR_MAX_LAYERS) // lignes d'un job : variables, puis canaux de calque
+#define VAR_SLOTS (STUDIO_VAR_COUNT + STUDIO_EXPR_MAX_LAYERS)     // variables d'une expression
+
 // Canaux de la texture pour la ligne y des calques (largeur des calques), avant tout encodage.
-static void eval_row(compose_t *c, int y, float **rows, float *scratch, float **res, const bool *constant,
-                     const float *value) {
+// vars[k] : les lignes vues par l'expression k (rows, puis ses canaux de calque).
+static void eval_row(compose_t *c, int y, float **rows, const float *const (*vars)[VAR_SLOTS], float *scratch,
+                     float **res, const bool *constant, const float *value) {
 	int w = c->src->width;
 	for (int v = 0; v < STUDIO_VAR_COUNT; ++v) {
 		if (rows[v] != NULL) {
 			load_row(c->src, v, y, c->decode, rows[v]);
+		}
+	}
+	size_t p0 = (size_t)y * (size_t)w;
+	for (int r = 0; r < c->ref_count; ++r) { // valeurs du calque telles quelles, jamais décodées
+		const source_t *ls  = &c->src->layers[c->ref_layer[r]].src;
+		float          *row = rows[STUDIO_VAR_COUNT + r];
+		for (int x = 0; x < w; ++x) {
+			row[x] = sample(ls, p0 + x, c->ref_channel[r]);
 		}
 	}
 	for (int k = 0; k < c->out_channels; ++k) {
@@ -793,7 +830,7 @@ static void eval_row(compose_t *c, int y, float **rows, float *scratch, float **
 			}
 		}
 		else {
-			studio_expr_eval(c->t->exprs[k], w, (const float *const *)rows, res[k], scratch);
+			studio_expr_eval(c->t->exprs[k], w, vars[k], res[k], scratch);
 		}
 	}
 }
@@ -805,7 +842,7 @@ static void compose_job(void *ctx, int job) {
 	int                            w  = c->width;
 	int                            y0 = job * ROWS_PER_JOB;
 	int y1 = y0 + ROWS_PER_JOB < c->height ? y0 + ROWS_PER_JOB : c->height;
-	float *rows[STUDIO_VAR_COUNT] = {0};
+	float *rows[ROW_SLOTS] = {0};
 	float *scratch = malloc(sizeof(float) * (size_t)sw * (size_t)(c->depth > 0 ? c->depth : 1));
 	float *res[4]  = {0}; // ligne du fichier
 	float *src[4]  = {0}; // ligne des calques, quand la taille diffère
@@ -816,10 +853,17 @@ static void compose_job(void *ctx, int job) {
 		src[k] = c->resample ? malloc(sizeof(float) * (size_t)sw) : res[k];
 		ok     = res[k] != NULL && src[k] != NULL;
 	}
-	for (int v = 0; ok && v < STUDIO_VAR_COUNT; ++v) {
-		if (c->vars & (1u << v)) {
+	for (int v = 0; ok && v < STUDIO_VAR_COUNT + c->ref_count; ++v) {
+		if (v >= STUDIO_VAR_COUNT || (c->vars & (1u << v))) {
 			rows[v] = malloc(sizeof(float) * (size_t)sw);
 			ok      = rows[v] != NULL;
+		}
+	}
+	const float *vars[4][VAR_SLOTS] = {{0}};
+	for (int k = 0; k < t->channels; ++k) {
+		memcpy(vars[k], rows, sizeof(float *) * STUDIO_VAR_COUNT);
+		for (int i = 0; i < studio_expr_layer_count(t->exprs[k]); ++i) {
+			vars[k][STUDIO_VAR_COUNT + i] = rows[STUDIO_VAR_COUNT + c->ref_of[k][i]];
 		}
 	}
 	bool  constant[4] = {false};
@@ -837,7 +881,7 @@ static void compose_job(void *ctx, int job) {
 	}
 	for (int y = y0; ok && y < y1; ++y) {
 		if (!c->resample) {
-			eval_row(c, y, rows, scratch, res, constant, value);
+			eval_row(c, y, rows, vars, scratch, res, constant, value);
 		}
 		else {
 			for (int k = 0; k < c->out_channels; ++k) {
@@ -847,7 +891,7 @@ static void compose_job(void *ctx, int job) {
 			}
 			const float *wy = c->ty.weight + (size_t)y * (size_t)c->ty.max;
 			for (int j = 0; j < c->ty.count[y]; ++j) {
-				eval_row(c, c->ty.first[y] + j, rows, scratch, src, constant, value);
+				eval_row(c, c->ty.first[y] + j, rows, vars, scratch, src, constant, value);
 				for (int k = 0; k < c->out_channels; ++k) {
 					if (constant[k]) {
 						continue;
@@ -930,7 +974,7 @@ static void compose_job(void *ctx, int job) {
 			}
 		}
 	}
-	for (int v = 0; v < STUDIO_VAR_COUNT; ++v) {
+	for (int v = 0; v < ROW_SLOTS; ++v) {
 		free(rows[v]);
 	}
 	free(scratch);
@@ -1028,6 +1072,30 @@ static bool encode_texture(const sources_t *src, const studio_preset_texture_t *
 	for (int k = 0; k < t->channels; ++k) {
 		c.vars |= studio_expr_vars(t->exprs[k]);
 		c.depth = studio_expr_depth(t->exprs[k]) > c.depth ? studio_expr_depth(t->exprs[k]) : c.depth;
+		for (int i = 0; i < studio_expr_layer_count(t->exprs[k]); ++i) {
+			int         channel = 0;
+			const char *name    = studio_expr_layer(t->exprs[k], i, &channel);
+			int         layer   = 0;
+			while (layer < src->layer_count && strcmp(src->layers[layer].name, name) != 0) {
+				layer++;
+			}
+			if (layer == src->layer_count) { // write_variant lit tous les calques nommés
+				taps_free(&c.tx);
+				taps_free(&c.ty);
+				fail("%s: layer '%s' not read", t->name, name);
+				return false;
+			}
+			int r = 0;
+			while (r < c.ref_count && !(c.ref_layer[r] == layer && c.ref_channel[r] == channel)) {
+				r++;
+			}
+			if (r == c.ref_count) {
+				c.ref_layer[r]   = layer;
+				c.ref_channel[r] = channel;
+				c.ref_count++;
+			}
+			c.ref_of[k][i] = r;
+		}
 	}
 	int jobs = (h + ROWS_PER_JOB - 1) / ROWS_PER_JOB;
 	c.out    = malloc(bytes);
@@ -1427,6 +1495,21 @@ static bool commit(const studio_report_t *r, char **manifest_out) {
 
 // ---- Plan et préflight -----------------------------------------------------------------------------------------------
 
+// Vrai si une texture du preset lit le calque name par layer('<nom>') : caché, il est quand même exporté.
+static bool layer_read_by_preset(const char *name) {
+	for (int i = 0; name != NULL && i < ex.preset->texture_count; ++i) {
+		const studio_preset_texture_t *t = &ex.preset->textures[i];
+		for (int k = 0; k < t->channels; ++k) {
+			for (int j = 0; j < studio_expr_layer_count(t->exprs[k]); ++j) {
+				if (strcmp(studio_expr_layer(t->exprs[k], j, NULL), name) == 0) {
+					return true;
+				}
+			}
+		}
+	}
+	return false;
+}
+
 static void count_layers(slot_layer_t_array_t *layers) {
 	if (ex.layers_counted || layers == NULL) {
 		return;
@@ -1439,7 +1522,7 @@ static void count_layers(slot_layer_t_array_t *layers) {
 			continue;
 		}
 		if (!export_selected && !slot_layer_is_visible(l)) {
-			ex.hidden_layers++;
+			ex.hidden_layers += !layer_read_by_preset(l->name);
 		}
 		else {
 			ex.layer_count++;
@@ -1543,6 +1626,238 @@ static bool texture_selected(const studio_preset_texture_t *t) {
 	return false;
 }
 
+// ---- Calques lus par layer('<nom>') ----------------------------------------------------------------------------------
+
+// Calques du projet (calques, masques, groupes) nommés name : le premier, et leur nombre dans *count.
+static slot_layer_t *layer_named(const char *name, int *count) {
+	slot_layer_t         *found  = NULL;
+	slot_layer_t_array_t *layers = g_project->_->layers;
+	*count                       = 0;
+	for (int i = 0; layers != NULL && i < (int)layers->length; ++i) {
+		slot_layer_t *l = layers->buffer[i];
+		if (l->name != NULL && strcmp(l->name, name) == 0) {
+			found = found != NULL ? found : l;
+			(*count)++;
+		}
+	}
+	return found;
+}
+
+// Préflight : chaque calque nommé par une texture cochée existe, une seule fois, et a des pixels.
+static void check_layers(studio_report_t *r) {
+	for (int i = 0; i < ex.preset->texture_count; ++i) {
+		const studio_preset_texture_t *t = &ex.preset->textures[i];
+		if (!texture_selected(t)) {
+			continue;
+		}
+		const char *seen[4 * STUDIO_EXPR_MAX_LAYERS]; // noms déjà vus pour cette texture
+		int         seen_count = 0;
+		for (int k = 0; k < t->channels; ++k) {
+			for (int j = 0; j < studio_expr_layer_count(t->exprs[k]); ++j) {
+				const char *name = studio_expr_layer(t->exprs[k], j, NULL);
+				bool        dup  = false;
+				for (int n = 0; n < seen_count && !dup; ++n) {
+					dup = strcmp(seen[n], name) == 0;
+				}
+				if (dup) {
+					continue;
+				}
+				seen[seen_count++]  = name;
+				int           count = 0;
+				slot_layer_t *l     = layer_named(name, &count);
+				if (count == 0) {
+					studio_report_add(r, true, "layer_missing", "%s: no layer named '%s' in the project", t->name, name);
+				}
+				else if (count > 1) {
+					studio_report_add(r, true, "layer_ambiguous", "%s: %d layers are named '%s': give it a name of its own",
+					                  t->name, count, name);
+				}
+				else if (slot_layer_is_group(l) || l->texpaint == NULL) {
+					studio_report_add(r, true, "layer_group", "%s: '%s' is a layer group, it has no pixels of its own",
+					                  t->name, name);
+				}
+			}
+		}
+	}
+}
+
+static gpu_texture_t        *layer_copy_target;
+static slot_layer_t_array_t *file_layers; // calques que l'upstream aplatit pour le fichier en cours
+
+// Le fichier en cours comme export_texture_run_layers le voit : object, son object_name ("" : aucun, ".1004" par tuile,
+// l'objet par objet, le jeu par jeu de textures), et la case UDIM découpée (-1 : l'atlas entier).
+static int file_slot(const char *variant, const char *tile, const char **object) {
+	static char udim[16];
+	bool        selected = g_context->layers_export == EXPORT_MODE_SELECTED;
+	*object              = "";
+	if (tile[0] != 0) {
+		snprintf(udim, sizeof(udim), ".%s", tile);
+		*object = udim;
+	}
+	else if (!selected) {
+		*object = variant;
+	}
+	if (!util_mesh_udim_active()) {
+		return -1;
+	}
+	int t = util_mesh_udim_tile((char *)*object);
+	if (t >= 0) {
+		return util_mesh_udim_slot(t);
+	}
+	return selected && file_layers != NULL && file_layers->length > 0 ? layers_udim_tile_slot(file_layers->buffer[0]) : -1;
+}
+
+// Vrai si l'upstream aplatit le calque l dans ce fichier (export_texture_run_layers) : parmi ses calques (un jeu de
+// textures n'a que les siens), pas limité à un autre objet, une autre tuile ou un jeu sans l'objet. En mode Selected,
+// l'upstream n'exporte que le calque sélectionné : les autres, nommés par layer(), sont lus s'ils sont de la tuile.
+static bool layer_in_file(slot_layer_t *l, const char *object, int slot) {
+	bool selected   = g_context->layers_export == EXPORT_MODE_SELECTED;
+	bool per_object = g_context->layers_export == EXPORT_MODE_PER_OBJECT;
+	bool per_tile   = g_context->layers_export == EXPORT_MODE_PER_UDIM_TILE;
+	bool listed     = false;
+	for (int i = 0; file_layers != NULL && i < (int)file_layers->length && !listed; ++i) {
+		listed = file_layers->buffer[i] == l;
+	}
+	if (!selected && !listed) {
+		return false;
+	}
+	mesh_object_t_array_t *objects = g_project->_->paint_objects;
+	i32                    count   = (i32)objects->length;
+	i32                    mask    = slot_layer_get_object_mask(l);
+	if (object[0] != 0 && mask > 0 && mask <= count) {
+		const char *name = objects->buffer[mask - 1]->base->name;
+		size_t      n = strlen(name), m = strlen(object);
+		if (per_tile && (n < m || strcmp(name + n - m, object) != 0)) {
+			return false;
+		}
+		if (per_object && strcmp(name, object) != 0) {
+			return false;
+		}
+	}
+	// Calque limité à un jeu de textures, par objet : avec les objets du jeu (export_texture_mask_set_objects)
+	string_array_t *sets = project_get_used_atlases();
+	if (per_object && object[0] != 0 && mask > count && sets != NULL && mask - count - 1 < (i32)sets->length &&
+	    (i32)g_project->atlas_objects->length == count) {
+		mesh_object_t_array_t *set = project_get_atlas_objects(mask);
+		bool                   has = false;
+		for (int i = 0; set != NULL && i < (int)set->length && !has; ++i) {
+			has = strcmp(set->buffer[i]->base->name, object) == 0;
+		}
+		if (!has) {
+			return false;
+		}
+	}
+	i32 tile_slot = layers_udim_tile_slot(l); // calque d'une tuile : sa case, -2 sans case
+	if (slot < 0 && !selected && tile_slot == -2) {
+		return false;
+	}
+	return !(slot >= 0 && tile_slot >= 0 && tile_slot != slot); // Selected : le calque d'une autre tuile
+}
+
+// Pixels du calque l pour le fichier en cours (variante et tuile UDIM, "" : aucune), à la taille des calques : ceux du
+// calque tel quel, découpés ou replacés dans la grille UDIM comme l'upstream le fait pour la pile, ou vides pour un
+// calque que l'upstream n'aplatit pas dans ce fichier (layer_in_file). *bits : 8, 16 (half) ou 32 (float). NULL si la
+// mémoire manque.
+static uint8_t *read_layer(slot_layer_t *l, const char *variant, const char *tile, int *bits) {
+	gpu_texture_t *tex       = l->texpaint;
+	const char    *object    = "";
+	int            slot      = file_slot(variant, tile, &object);
+	i32            tile_slot = layers_udim_tile_slot(l);
+	size_t         size      = (size_t)gpu_texture_format_size(tex->format) * (size_t)tex->width * (size_t)tex->height;
+	if (!layer_in_file(l, object, slot)) {
+		*bits = 8;
+		return calloc((size_t)tex->width * (size_t)tex->height, 4);
+	}
+	gpu_texture_t *t = layer_copy_target;
+	if (t != NULL && (t->width != tex->width || t->height != tex->height || t->format != tex->format)) {
+		gpu_delete_texture(t);
+		t = NULL;
+	}
+	if (t == NULL) {
+		t = layer_copy_target = gpu_create_render_target(tex->width, tex->height, tex->format);
+	}
+	int   stride = util_mesh_atlas_stride();
+	float cw     = tex->width / (float)stride;
+	float ch     = tex->height / (float)stride;
+	draw_begin(t, true, 0x00000000);
+	draw_set_pipeline(pipes_copy);
+	if (slot >= 0 && util_mesh_udim_layer(l)) { // calque partagé : la case de la tuile, à la taille entière
+		draw_scaled_sub_image(tex, (slot % stride) * cw, (slot / stride) * ch, cw, ch, 0, 0, tex->width, tex->height);
+	}
+	else if (slot < 0 && tile_slot >= 0) { // calque d'une tuile, export de la grille entière : dans sa case
+		draw_scaled_image(tex, (tile_slot % stride) * cw, (tile_slot / stride) * ch, cw, ch);
+	}
+	else {
+		draw_image(tex, 0, 0);
+	}
+	draw_set_pipeline(NULL);
+	draw_end();
+	buffer_t *pixels = gpu_get_texture_pixels(t);
+	uint8_t  *copy   = pixels != NULL && pixels->buffer != NULL ? malloc(size) : NULL;
+	if (copy != NULL) {
+		memcpy(copy, pixels->buffer, size);
+	}
+	uint32_t format_size = gpu_texture_format_size(tex->format);
+	*bits                = format_size == 16 ? 32 : format_size == 8 ? 16 : 8;
+	return copy;
+}
+
+static void free_layer_sources(sources_t *src) {
+	for (int i = 0; i < src->layer_count; ++i) {
+		free(src->layers[i].name);
+		free(src->layers[i].data);
+	}
+	free(src->layers);
+	src->layers      = NULL;
+	src->layer_count = 0;
+}
+
+// Calques nommés par les textures cochées du preset, lus pour la variante : false et ex.error sinon.
+static bool read_layer_sources(sources_t *src, const char *variant, const char *tile) {
+	for (int i = 0; i < ex.preset->texture_count; ++i) {
+		const studio_preset_texture_t *t = &ex.preset->textures[i];
+		for (int k = 0; texture_selected(t) && k < t->channels; ++k) {
+			for (int j = 0; j < studio_expr_layer_count(t->exprs[k]); ++j) {
+				const char *name = studio_expr_layer(t->exprs[k], j, NULL);
+				bool        read = false;
+				for (int n = 0; n < src->layer_count && !read; ++n) {
+					read = strcmp(src->layers[n].name, name) == 0;
+				}
+				if (read) {
+					continue;
+				}
+				int           count = 0;
+				slot_layer_t *l     = layer_named(name, &count);
+				if (count != 1 || l->texpaint == NULL || slot_layer_is_group(l)) { // le préflight l'a signalé
+					fail("%s: layer '%s' not found, or not a single layer with pixels", t->name, name);
+					return false;
+				}
+				if (l->texpaint->width != src->width || l->texpaint->height != src->height) {
+					fail("%s: layer '%s' is %dx%d, the layers %dx%d", t->name, name, l->texpaint->width,
+					     l->texpaint->height, src->width, src->height);
+					return false;
+				}
+				layer_source_t *grown = realloc(src->layers, sizeof(layer_source_t) * (size_t)(src->layer_count + 1));
+				if (grown == NULL) {
+					fail("out of memory");
+					return false;
+				}
+				src->layers        = grown;
+				layer_source_t *ls = &src->layers[src->layer_count];
+				int             bits = 8;
+				*ls                = (layer_source_t){.name = strdup(name), .data = read_layer(l, variant, tile, &bits)};
+				src->layer_count++;
+				if (ls->name == NULL || ls->data == NULL) {
+					fail("%s: cannot read the layer '%s' back from the GPU", t->name, name);
+					return false;
+				}
+				ls->src = (source_t){.data = ls->data, .bits = bits};
+			}
+		}
+	}
+	return true;
+}
+
 static void write_variant(const char *variant, const char *udim) {
 	sources_t src = {.width = config_get_texture_res_x(), .height = config_get_texture_res_y()};
 	uint32_t  vars = 0;
@@ -1573,6 +1888,10 @@ static void write_variant(const char *variant, const char *udim) {
 		}
 		*targets[i] = (source_t){.data = pixels->buffer, .bits = size == 16 ? 32 : size == 8 ? 16 : 8};
 	}
+	if (!read_layer_sources(&src, variant, udim)) {
+		free_layer_sources(&src);
+		return;
+	}
 	for (int i = 0; i < ex.preset->texture_count && !ex.failed; ++i) {
 		const studio_preset_texture_t *t     = &ex.preset->textures[i];
 		char                          *error = NULL;
@@ -1582,6 +1901,7 @@ static void write_variant(const char *variant, const char *udim) {
 			fail("%s: the file plan changed during the export (%s)", t->name, error != NULL ? error : path);
 			free(path);
 			free(error);
+			free_layer_sources(&src);
 			return;
 		}
 		if (ex.files[index].skip) {
@@ -1597,6 +1917,7 @@ static void write_variant(const char *variant, const char *udim) {
 		free(path);
 		iron_log("studio: export: %s", ex.files[index].path);
 	}
+	free_layer_sources(&src);
 }
 
 // ---- Points d'injection ----------------------------------------------------------------------------------------------
@@ -1795,6 +2116,7 @@ bool studio_export_begin(char *path, bool bake_material) {
 	studio_report_free(&last_report);
 	studio_preflight_run(&plan, &last_report);
 	check_ocio(&last_report);
+	check_layers(&last_report);
 	free(ex.last_report);
 	ex.last_report = studio_report_json(&plan, &last_report);
 	ex.last_ok     = last_report.blocking == 0;
@@ -1841,7 +2163,9 @@ bool studio_export_layers(char *path, char *base, char *f, char *udim, slot_laye
 		plan_variant(variant, tile);
 	}
 	else if (!ex.failed) {
+		file_layers = layers;
 		write_variant(variant, tile);
+		file_layers = NULL;
 	}
 	return true;
 }

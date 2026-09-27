@@ -398,7 +398,14 @@ que la production maintient déjà dans `templates.yml`. On n'ajoute ni langage 
   upstream homonyme n'est jamais écrasé. `STUDIO_EXPORT_PRESETS` pour les presets du studio ou du show.
 - ✅ Injection upstream `studio-export` : 18 lignes, 3 blocs dans `export_texture.c`. Les boucles upstream (objets,
   atlas, tuiles, bake) restent la seule source des variantes.
-- Reste : les canaux d'un nœud de bake (ils passent par le calque aplati).
+- ✅ **Canaux d'un calque** (fait le 2026-09-27) : `layer('<nom>')` (son rouge) et `layer_r/g/b/a('<nom>')` lisent un
+  calque ou un masque par son nom, pas la pile aplatie. Un bake (outil Bake dans un calque : AO, épaisseur,
+  courbure...) ou un masque sort ainsi en map à part, et entre dans une expression (`clamp(layer('AO') * occ, 0, 1)`).
+  Choisi plutôt que le nœud Bake Texture : sa cible n'est pas sauvée dans le `.arm` et se calcule sur plusieurs
+  images, donc absente d'un export en `--background` ; un calque est sauvé, versionné, et c'est déjà là que l'outil
+  Bake écrit. Valeurs brutes, alpha à part ; un calque caché est lu quand même. Découpé et placé comme la pile, par
+  les mêmes règles que l'aplatissement upstream (tuiles UDIM, calque d'une tuile, par objet, jeux de textures, mode
+  Selected). Préflight bloquant : calque absent, homonymes, groupe. 8 canaux de calque au plus par expression.
 
 - Étendre le format de preset : format et profondeur **par texture** (pas globaux), colorspace OCIO, compression, template de nommage, suffixe de canal
 - Canaux personnalisés au-delà des 23 en dur — permettre une expression (`occ*rough`, constante, canal d'un nœud de bake)

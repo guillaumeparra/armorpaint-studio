@@ -36,6 +36,10 @@
 #      robe.1002) ; un nom vide laisse le nom ; un objet sans tuile n'en gagne pas (cap renommé cap.1005 reste cap) ;
 #      projet sauvé puis rouvert : mêmes tuiles, mêmes jeux, le calque limité à torso.1011 exporté dans skin.1011 seul
 #      (l'upstream renommait skin.1011 en torso, un objet sans tuile : la 1011 disparaissait de l'export).
+#  10. canaux d'un calque dans un preset studio (layer('<nom>'), lot B4) : découpés par tuile comme la pile — le calque
+#      partagé seul (bruit) donne dans chaque tuile les pixels de la pile aplatie, et dans la 1004 ceux du banc 6 ; un
+#      calque limité à strip.1004 est dans la 1004 seule (vide ailleurs) ; grille entière (Visible) : dans sa case,
+#      égal à la pile ; par objet, strip.1004 découpé comme la tuile 1004.
 #
 #   sh .tests/udim_app.sh [dossier de travail]
 #   APP=<binaire ArmorPaint> pour un autre build (défaut : build Release de paint/).
@@ -639,6 +643,116 @@ check "renommer : skin.1011 en torso donne torso.1011, un nom vide laisse skin.1
 check "suffixe tapé d'une autre tuile ignoré, avec un message ; un objet sans tuile n'en gagne pas" '[ "$(line rename robe) $(line rename cap)" = "robe.1002 cap" ] && line rename robe_status | grep -q "^robe.1005: the UDIM tile of an object comes from its import, a rename keeps it$" && line rename cap_status | grep -q "^cap.1005: the UDIM tile"'
 check "projet rouvert : les noms, leurs jeux et leurs tuiles gardés" '[ "$(line reopened atlases | python3 -c "import json,sys; j=json.load(sys.stdin); print(\" \".join(\"%s:%s\" % (o[\"name\"], j[\"names\"][o[\"atlas\"]]) for o in j[\"objects\"]))")" = "robe.1002:cloth skin.1001:skin skin2.1002:skin torso.1011:skin" ]'
 check "export par tuile après réouverture : la 1011 toujours là, le calque de torso.1011 dans skin.1011 seul (cloth sans calque, sans fichier)" '[ "$(line renamedfiles files)" = "skin.1001 skin.1002 skin.1011 15" ] && [ "$(line renamedfiles reds)" = "skin.1001:0 skin.1002:0 skin.1011:1" ]'
+
+echo "== canaux d'un calque (layer) par tuile"
+# Calque partagé : le bruit ; calque limité à strip.1004 : (0.25, 0.5, 0.75) opaque, au-dessus.
+mkdir -p "$W/upresets"
+cat > "$W/upresets/ulayers.json" <<'EOF'
+{
+	"version": 1,
+	"defaults": { "format": "png", "bits": 8, "color_space": "raw" },
+	"textures": [
+		{ "name": "base", "channels": ["base_r", "base_g", "base_b"] },
+		{ "name": "shared", "channels": ["layer_r('Layer 1')", "layer_g('Layer 1')", "layer_b('Layer 1')", "layer_a('Layer 1')"] },
+		{ "name": "tile", "channels": ["layer_r('T1004')", "layer_g('T1004')", "layer_b('T1004')", "layer_a('T1004')"] }
+	]
+}
+EOF
+export STUDIO_EXPORT_PRESETS="$W/upresets"
+script ulayers <<EOF
+int main() {
+	studio_import_mesh("$W/strip.obj", 2);
+	$NOISE
+	script_fill_layer();
+	console_log(string("t: new %d", studio_layer_new()));
+	console_log(string("t: set %d", studio_layer_set_object(3)));
+	slot_material_t *flat = script_material_create("flat");
+	ui_node_t *rgb = script_material_create_node_at("RGB", -400.0, 0.0);
+	script_material_set_color(rgb, 0, 0, 0.25, 0.5, 0.75, 1.0);
+	script_material_connect(rgb, 0, script_material_get_node("OUTPUT_MATERIAL_PBR"), 0);
+	script_material_update();
+	script_material_set(flat);
+	script_fill_layer();
+	console_log(string("t: rename %d", studio_layer_rename("T1004")));
+	console_log(string("t: tiles %d", studio_export_run("$W/out_ltiles", "ulayers", 3)));
+	console_log(string("t: visible %d", studio_export_run("$W/out_lvisible", "ulayers", 0)));
+	console_log(string("t: object %d", studio_export_run("$W/out_lobject", "ulayers", 2)));
+	return 0;
+}
+EOF
+unset STUDIO_EXPORT_PRESETS
+python3 - "$W" > "$W/ulayerscheck.out" <<'EOF'
+import glob, os, sys
+from PIL import Image
+w = sys.argv[1]
+
+
+def img(pattern):
+    f = glob.glob(os.path.join(w, pattern))
+    assert len(f) == 1, (pattern, f)
+    return Image.open(f[0])
+
+
+rgb = lambda i: i.convert("RGB").tobytes()
+
+
+def over_black(layer, stack):
+    """Écarts entre la pile aplatie et un calque RGBA brut composé sur du noir (la pile d'un calque seul) : pixels
+    opaques différents, écart maximal sur les autres (bords des cases UDIM, alpha partiel), part de ces derniers."""
+    lp, sp = list(layer.getdata()), list(stack.convert("RGB").getdata())
+    diff, worst, partial = 0, 0, 0
+    for (r, g, b, a), q in zip(lp, sp):
+        if a == 255:
+            diff += (r, g, b) != q
+        elif a > 0:
+            partial += 1
+            worst = max(worst, max(abs(c * a / 255 - d) for c, d in zip((r, g, b), q)))
+    return diff, worst, partial / len(lp)
+
+
+ok = []
+# Par tuile : la pile aplatie = le calque partagé composé sur du noir, partout sauf dans la 1004 où le calque de la
+# tuile la couvre ; les canaux d'un calque sont ses valeurs brutes, alpha à part.
+for t in (1001, 1002, 1003, 1004, 1011):
+    base, shared, tile = img("out_ltiles/*_base.%d.png" % t), img("out_ltiles/*_shared.%d.png" % t), img("out_ltiles/*_tile.%d.png" % t)
+    if t == 1004:
+        a = tile.split()[3].histogram()
+        assert a[255] > 0 and a[0] + a[255] == tile.width * tile.height, "alpha 1004"
+        assert rgb(tile) == rgb(base), "tile 1004 != stack"
+        d, worst, part = over_black(shared, img("out_noise/*_base.1004.png"))
+        assert d == 0 and worst <= 1.5 and part < 0.01, ("shared 1004 != noise bench", d, worst, part)
+        assert rgb(shared) != rgb(base)
+    else:
+        d, worst, part = over_black(shared, base)
+        assert d == 0 and worst <= 1.5 and part < 0.01, ("shared %d != stack" % t, d, worst, part)
+        assert tile.getextrema() == ((0, 0),) * 4, "tile layer in %d" % t
+ok.append("tiles")
+# Grille entière : le calque de la tuile dans sa case (1/9 de la grille 3 x 3), égal à la pile là où il est opaque ;
+# ailleurs la pile = le calque partagé (bords des cases filtrés tolérés).
+base, shared, tile = img("out_lvisible/*_base.png"), img("out_lvisible/*_shared.png"), img("out_lvisible/*_tile.png")
+bp, sp, tp = list(base.convert("RGB").getdata()), list(shared.getdata()), list(tile.getdata())
+n = len(tp)
+opaque = [i for i in range(n) if tp[i][3] == 255]
+empty = [i for i in range(n) if tp[i][3] == 0]
+assert abs(len(opaque) / n - 1 / 9) < 0.01, len(opaque) / n
+assert sum(tp[i][:3] != bp[i] for i in opaque) < 0.002 * n, "visible: tile != stack"
+assert sum(sp[i][:3] != bp[i] for i in empty if sp[i][3] == 255) < 0.002 * n, "visible: shared != stack"
+ok.append("visible")
+# Par objet : l'upstream n'exporte que strip.1004 (le seul objet d'un calque limité), découpé comme la tuile 1004.
+files = sorted(os.path.basename(f) for f in glob.glob(os.path.join(w, "out_lobject", "*.png")))
+assert len(files) == 3 and all("strip.1004" in f for f in files), files
+for c in ("base", "shared", "tile"):
+    a = [f for f in files if "_%s" % c in f]
+    assert len(a) == 1, (c, files)
+    assert Image.open(os.path.join(w, "out_lobject", a[0])).tobytes() == img("out_ltiles/*_%s.1004.png" % c).tobytes(), c
+ok.append("object")
+print("ok " + " ".join(ok))
+EOF
+cat "$W/ulayerscheck.out"
+check "calque ajouté, limité à strip.1004, renommé ; trois exports" '[ "$(line ulayers new) $(line ulayers set) $(line ulayers rename) $(line ulayers tiles) $(line ulayers visible) $(line ulayers object)" = "1 1 1 1 1 1" ]'
+check "layer() par tuile : calque partagé découpé, calque de la tuile dans la sienne seule" 'grep -q "^ok tiles" "$W/ulayerscheck.out"'
+check "layer() grille entière : le calque de la tuile dans sa case" 'grep -q "^ok tiles visible" "$W/ulayerscheck.out"'
+check "layer() par objet : strip.1004 comme la tuile 1004" 'grep -q "^ok tiles visible object" "$W/ulayerscheck.out"'
 
 [ $FAIL -eq 0 ] && echo "== OK" || echo "== FAIL"
 exit $FAIL

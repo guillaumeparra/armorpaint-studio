@@ -150,6 +150,57 @@ static void test_expr(void) {
 	CHECK(e != NULL && studio_expr_constant(e, &value) && fabsf(value - 0.25f) < 1e-6f, "constant fold %g", value);
 	studio_expr_free(e);
 
+	// Canaux de calque : une variable par (nom, canal), dédoublonnée, après les variables de la pile.
+	e = studio_expr_compile("layer('AO bake') * layer_g(\"AO bake\") + layer ( 'AO bake' ) - layer_r('AO bake') + "
+	                        "layer_a('Masque (é)') * rough",
+	                        err, sizeof(err));
+	CHECK(e != NULL, "layer compile: %s", err);
+	if (e != NULL) {
+		int         ch[3] = {-1, -1, -1};
+		const char *n0 = studio_expr_layer(e, 0, &ch[0]), *n1 = studio_expr_layer(e, 1, &ch[1]),
+		           *n2 = studio_expr_layer(e, 2, &ch[2]);
+		CHECK(studio_expr_layer_count(e) == 3, "layer count %d", studio_expr_layer_count(e));
+		CHECK(n0 != NULL && strcmp(n0, "AO bake") == 0 && ch[0] == 0, "layer 0");
+		CHECK(n1 != NULL && strcmp(n1, "AO bake") == 0 && ch[1] == 1, "layer 1");
+		CHECK(n2 != NULL && strcmp(n2, "Masque (é)") == 0 && ch[2] == 3, "layer 2");
+		CHECK(studio_expr_layer(e, 3, NULL) == NULL && studio_expr_layer(e, -1, NULL) == NULL, "layer bounds");
+		CHECK(studio_expr_vars(e) == (1u << STUDIO_VAR_ROUGH), "layer vars mask %x", studio_expr_vars(e));
+		float        v2[STUDIO_VAR_COUNT + 3];
+		const float *vp[STUDIO_VAR_COUNT + 3];
+		for (int i = 0; i < STUDIO_VAR_COUNT + 3; ++i) {
+			v2[i] = i < STUDIO_VAR_COUNT ? v[i] : 0.2f * (float)(i - STUDIO_VAR_COUNT + 1);
+			vp[i] = &v2[i];
+		}
+		float  out     = 0;
+		float *scratch = malloc(sizeof(float) * (size_t)(studio_expr_depth(e) + 1));
+		studio_expr_eval(e, 1, vp, &out, scratch);
+		free(scratch);
+		float want = 0.2f * 0.4f + 0.2f - 0.2f + 0.6f * rough;
+		CHECK(fabsf(out - want) < 1e-5f, "layer eval %g, want %g", out, want);
+		studio_expr_free(e);
+	}
+	e = studio_expr_compile("layer_b('x')", err, sizeof(err));
+	CHECK(e != NULL && studio_expr_single_var(e) == STUDIO_VAR_COUNT && studio_expr_vars(e) == 0, "single layer var");
+	studio_expr_free(e);
+	e = studio_expr_compile("layer('a')+layer('b')+layer('c')+layer('d')+layer('e')+layer('f')+layer('g')+layer('h')",
+	                        err, sizeof(err));
+	CHECK(e != NULL && studio_expr_layer_count(e) == STUDIO_EXPR_MAX_LAYERS, "max layers: %s", err);
+	studio_expr_free(e);
+	const char *bad_layer[] = {"layer(AO)",      "layer()",          "layer('')",     "layer('AO",     "layer('AO'",
+	                           "layer('AO', 1)", "layer_x('AO')",    "layer",         "layer * 2",     "layer(\"AO')",
+	                           ("layer('a')+layer('b')+layer('c')+layer('d')+layer('e')+layer('f')+layer('g')+layer('h')+"
+	                            "layer('i')")};
+	for (size_t i = 0; i < sizeof(bad_layer) / sizeof(bad_layer[0]); ++i) {
+		err[0] = 0;
+		e      = studio_expr_compile(bad_layer[i], err, sizeof(err));
+		CHECK(e == NULL && err[0] != 0, "'%s' should fail", bad_layer[i]);
+		studio_expr_free(e);
+	}
+	char longname[STUDIO_EXPR_MAX_LAYER_NAME + 16] = "layer('";
+	memset(longname + 7, 'n', STUDIO_EXPR_MAX_LAYER_NAME);
+	strcpy(longname + 7 + STUDIO_EXPR_MAX_LAYER_NAME, "')");
+	CHECK(studio_expr_compile(longname, err, sizeof(err)) == NULL && strstr(err, "long") != NULL, "long name: %s", err);
+
 	const char *bad[] = {"", "occ*", "foo", "min(1)", "min(1,2,3)", "(((", "rough rough", "1..2", "rough)", "é",
 	                     "abs", "abs()", "sqrt(1,)", ",", "1 +* 2", "base_rr", "BASE_R", "clamp(1,2)"};
 	for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
@@ -217,7 +268,7 @@ static void test_expr(void) {
 }
 
 static void gen_expr(char *out, size_t size, int depth, int constant) {
-	static const char *vars[]  = {"occ", "rough", "metal", "base_r", "nor_g", "height", "spec_b"};
+	static const char *vars[]  = {"occ", "rough", "metal", "base_r", "layer('AO bake')", "height", "layer_a(\"m\")"};
 	static const char *nums[]  = {"0", "1", "0.5", "2", "1e-3", "3.25", "0.0"};
 	static const char *ops[]   = {" + ", " - ", " * ", " / "};
 	static const char *fn1[]   = {"abs", "sqrt"};
@@ -271,11 +322,11 @@ static void gen_expr(char *out, size_t size, int depth, int constant) {
 static void fuzz_expr(int count) {
 	static const char *tokens[] = {"occ", "rough", "metal", "base_r", "1", "0.5", "2e3", "-", "+", "*", "/", "(", ")",
 	                               ",", "min(", "max(", "clamp(", "mix(", "pow(", "abs(", "sqrt(", "step(", " ", "x", ".",
-	                               "e", "é", "\t"};
+	                               "e", "é", "\t", "layer(", "layer_g('AO')", "'", "\"m\""};
 	int ntok = (int)(sizeof(tokens) / sizeof(tokens[0]));
-	float  vals[STUDIO_VAR_COUNT * 4];
-	float *rows[STUDIO_VAR_COUNT];
-	for (int i = 0; i < STUDIO_VAR_COUNT; ++i) {
+	float  vals[(STUDIO_VAR_COUNT + STUDIO_EXPR_MAX_LAYERS) * 4];
+	float *rows[STUDIO_VAR_COUNT + STUDIO_EXPR_MAX_LAYERS];
+	for (int i = 0; i < STUDIO_VAR_COUNT + STUDIO_EXPR_MAX_LAYERS; ++i) {
 		rows[i] = &vals[i * 4];
 		for (int k = 0; k < 4; ++k) {
 			rows[i][k] = (float)(rnd() % 2001) / 1000.0f - 1.0f;
@@ -322,7 +373,7 @@ static void fuzz_expr(int count) {
 		float  out[4];
 		studio_expr_eval(e, 4, (const float *const *)rows, out, scratch);
 		float c = 0;
-		if (studio_expr_vars(e) == 0) {
+		if (studio_expr_vars(e) == 0 && studio_expr_layer_count(e) == 0) {
 			CHECK(studio_expr_constant(e, &c), "'%s' not folded", src);
 			CHECK(c == out[0] || (isnan(c) && out[0] == 0) || (isinf(c) && c == out[0]), "fold '%s': %g vs %g", src, c,
 			      out[0]);
@@ -791,6 +842,37 @@ static void test_preflight(const char *work) {
 	studio_preflight_run(&plan, &r);
 	CHECK(has_issue(&r, "no_files", true) && has_issue(&r, "naming", true), "no files, naming");
 	studio_report_free(&r);
+
+	// Linéaire en 8 bits : noté pour une couleur de la pile, pas pour des canaux de calque seuls (couleur ou donnée,
+	// le preset ne le dit pas).
+	char             lerr[256];
+	studio_preset_t *lp = parse("{\"version\": 1, \"defaults\": {\"format\": \"png\", \"bits\": 8, \"color_space\": "
+	                            "\"linear\"}, \"textures\": [{\"name\": \"ao\", \"channels\": [\"layer('AO')\"]}, "
+	                            "{\"name\": \"col\", \"channels\": [\"base_r\", \"base_g\", \"layer_b('AO')\"]}]}",
+	                            lerr, sizeof(lerr));
+	CHECK(lp != NULL, "layer preset: %s", lerr);
+	if (lp != NULL) {
+		studio_plan_file_t lf[2];
+		char               lpath[2][1100];
+		for (int i = 0; i < 2; ++i) {
+			snprintf(lpath[i], sizeof(lpath[i]), "%s/l%d.png", dir, i);
+			lf[i] = (studio_plan_file_t){.path = lpath[i], .texture = &lp->textures[i], .variant = "", .udim = "",
+			                             .width = 64, .height = 64, .raw_size = 64 * 64 * 4};
+		}
+		studio_plan_t lplan = {.preset = lp, .files = lf, .file_count = 2, .width = 64, .height = 64, .source_bits = 8,
+		                       .mode = "visible", .layer_count = 1, .destination = dir};
+		studio_preflight_run(&lplan, &r);
+		int linear = 0;
+		for (int i = 0; i < r.count; ++i) {
+			if (strcmp(r.issues[i].code, "linear_8bit") == 0) {
+				linear++;
+				CHECK(strncmp(r.issues[i].message, "col:", 4) == 0, "linear_8bit on %s", r.issues[i].message);
+			}
+		}
+		CHECK(linear == 1, "linear_8bit: %d notes", linear);
+		studio_report_free(&r);
+		studio_preset_free(lp);
+	}
 
 	chmod(ro, 0755);
 	studio_preset_free(p);

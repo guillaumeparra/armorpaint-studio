@@ -31,6 +31,8 @@ void              layers_set_object_mask(void);
 slot_layer_t     *layers_new_layer(bool clear, i32 position, slot_layer_t *parent);
 void              slot_layer_clear(slot_layer_t *raw, i32 base_color, gpu_texture_t *base_image, f32 occlusion, f32 roughness, f32 metallic);
 void              history_new_layer(void);
+slot_layer_t     *layers_new_group(void);
+void              history_new_group(void);
 extern f32        layers_default_rough;
 void              import_mesh_run(char *path, bool clear_layers, bool replace_existing, bool keep_camera);
 i32               util_mesh_udim_tile(char *name);
@@ -516,6 +518,36 @@ static minic_val_t mn_studio_layer_new(minic_val_t *a, int n) {
 	return minic_val_int(1);
 }
 
+// Nouveau groupe de calques (vide), devenu le calque courant, comme le bouton New Group. 1 si fait.
+static minic_val_t mn_studio_layer_new_group(minic_val_t *a, int n) {
+	(void)a, (void)n;
+	if (layers_new_group() == NULL) {
+		return minic_val_int(0);
+	}
+	history_new_group();
+	return minic_val_int(1);
+}
+
+// Renomme le calque courant (le nom que lit layer('<nom>') des presets studio). 1 si fait.
+static minic_val_t mn_studio_layer_rename(minic_val_t *a, int n) {
+	char *name = minic_arg_p(a, n, 0);
+	if (g_context->layer == NULL || name == NULL || name[0] == 0) {
+		return minic_val_int(0);
+	}
+	g_context->layer->name = string_copy(name);
+	return minic_val_int(1);
+}
+
+// Montre (1) ou cache (0) le calque courant, comme son œil dans l'onglet Layers. 1 si fait.
+static minic_val_t mn_studio_layer_set_visible(minic_val_t *a, int n) {
+	if (g_context->layer == NULL) {
+		return minic_val_int(0);
+	}
+	g_context->layer->visible = minic_arg_i(a, n, 0) != 0;
+	g_context->ddirty         = 2;
+	return minic_val_int(1);
+}
+
 // Renomme l'objet index (ordre de studio_atlases) comme l'onglet Meshes : le nom donné, suivi du suffixe de tuile UDIM
 // de l'objet, qui reste (un suffixe donné est ignoré, un nom vide laisse le nom d'une tuile). Rend le nouveau nom, ""
 // pour un index hors des objets.
@@ -587,6 +619,9 @@ void studio_atlas_init(void) {
 	minic_register("studio_layer_set_atlas", "i(i)", mn_studio_layer_set_atlas);
 	minic_register("studio_layer_set_object", "i(i)", mn_studio_layer_set_object);
 	minic_register("studio_layer_new", "i()", mn_studio_layer_new);
+	minic_register("studio_layer_new_group", "i()", mn_studio_layer_new_group);
+	minic_register("studio_layer_rename", "i(p)", mn_studio_layer_rename);
+	minic_register("studio_layer_set_visible", "i(i)", mn_studio_layer_set_visible);
 	minic_register("studio_object_rename", "p(i,p)", mn_studio_object_rename);
 	minic_register("studio_meshes_sort", "i()", mn_studio_meshes_sort);
 	minic_register("studio_mesh_set_parent", "i(p,p)", mn_studio_mesh_set_parent);
