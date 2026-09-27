@@ -1,5 +1,6 @@
 // Banc du lot B2 (studio_image.c) : chaque image encodée est relue par libpng ou libtiff et comparée à la source.
 #include "../studio_image.h"
+#include "iron_image.h" // iron_encode_png, iron_encode_jpg (base/sources/iron_image.c, WITH_IMAGE_WRITE)
 #include <png.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -254,6 +255,43 @@ int main(int argc, char **argv) {
 		CHECK(z != NULL && len > n, "iron_deflate_raw on noise (%d -> %d)", n, len);
 		free(z);
 		free(raw);
+	}
+
+	// Patch encode-image-overflow : iron_encode_png et iron_encode_jpg (le paquet d'assets d'un .arm, Pack Assets)
+	// écrivaient le fichier dans les w * h * 4 octets des pixels. Une petite image ou du bruit donnent un fichier plus
+	// gros : ASan s'arrête ici sans le patch. Le PNG relu par libpng doit redonner les pixels.
+	{
+		int sizes[][2] = {{1, 1}, {8, 4}, {16, 16}, {64, 64}};
+		for (int s = 0; s < 4; ++s) {
+			int      w = sizes[s][0], h = sizes[s][1], n = w * h * 4;
+			buffer_t px = {.buffer = malloc(n), .length = n, .capacity = n};
+			for (int i = 0; i < n; ++i) {
+				px.buffer[i] = (uint8_t)rnd();
+			}
+			uint8_t *src = malloc(n); // IRON_BGRA échange R et B dans px pendant l'encodage
+			memcpy(src, px.buffer, n);
+			buffer_t *png = iron_encode_png(&px, w, h, 0);
+			png_image pi  = {.version = PNG_IMAGE_VERSION};
+			uint8_t  *got = malloc(n);
+			bool      ok  = png_image_begin_read_from_memory(&pi, png->buffer, png->length);
+			pi.format     = PNG_FORMAT_RGBA;
+			ok            = ok && pi.width == (uint32_t)w && pi.height == (uint32_t)h && png_image_finish_read(&pi, NULL, got, 0, NULL);
+			png_image_free(&pi);
+			CHECK(ok && memcmp(got, src, n) == 0, "iron_encode_png %dx%d noise (%d bytes of pixels, %u of png)", w, h, n, png->length);
+			memcpy(px.buffer, src, n);
+			buffer_t *jpg = iron_encode_jpg(&px, w, h, 0, 80);
+			CHECK(jpg->length > 4 && jpg->buffer[0] == 0xff && jpg->buffer[1] == 0xd8 && jpg->buffer[jpg->length - 2] == 0xff &&
+			          jpg->buffer[jpg->length - 1] == 0xd9,
+			      "iron_encode_jpg %dx%d noise (%u bytes)", w, h, jpg->length);
+			free(png->buffer);
+			free(png);
+			free(jpg->buffer);
+			free(jpg);
+			free(got);
+			free(src);
+			free(px.buffer);
+			count += 2;
+		}
 	}
 
 	// Erreurs.
