@@ -70,6 +70,9 @@ void              slot_layer_apply_mask(slot_layer_t *raw);
 void              slot_layer_to_paint_layer(slot_layer_t *raw);
 bool              slot_layer_is_group(slot_layer_t *raw);
 void              make_material_parse_mesh_material(void);
+void              history_clear_layer(void);
+extern slot_layer_t *tab_layers_l;
+void              tab_layers_draw_layer_context_menu_merge_group(void *_);
 
 #define DEFAULT_NAME "Atlas 1"
 #define MAX_NAME     64
@@ -797,6 +800,20 @@ static minic_val_t mn_studio_udim_fill(minic_val_t *a, int n) {
 	return minic_val_int(1);
 }
 
+// Pile de calques, de bas en haut : « nom<parent » séparés par « | » (bancs).
+static minic_val_t mn_studio_layer_tree(minic_val_t *a, int n) {
+	(void)a, (void)n;
+	text_t                b      = {0};
+	slot_layer_t_array_t *layers = g_project->_->layers;
+	for (int i = 0; layers != NULL && i < (int)layers->length; ++i) {
+		slot_layer_t *l = layers->buffer[i];
+		put(&b, "%s%s%s%s", i > 0 ? " | " : "", l->name, l->parent != NULL ? "<" : "", l->parent != NULL ? l->parent->name : "");
+	}
+	char *s = string_copy(b.data != NULL ? b.data : "");
+	free(b.data);
+	return minic_val_ptr(s);
+}
+
 // Calque courant = calque i. 1 si fait.
 static minic_val_t mn_studio_layer_select(minic_val_t *a, int n) {
 	int                   i      = (int)minic_arg_i(a, n, 0);
@@ -834,9 +851,9 @@ static minic_val_t mn_studio_layer_set_opacity(minic_val_t *a, int n) {
 	return minic_val_int(1);
 }
 
-// Opération sur le calque courant, comme les menus, avec son pas d'historique, finie tout de suite : "merge_down" (Merge
-// Down), "merge_group" (Merge Group d'un groupe), "apply_mask" (Apply Mask d'un masque), "undo", "redo". Le lot D2 en
-// ajoute d'autres (même fonction). 1 si fait.
+// Opération sur le calque courant, comme les menus, avec son pas d'historique, finie tout de suite : "clear", "merge_down"
+// (Merge Down), "merge_group" (Merge Group d'un groupe, par son menu), "apply_mask" (Apply Mask d'un masque), "undo",
+// "redo". Le lot D2 en ajoute d'autres (même fonction). 1 si fait.
 static minic_val_t mn_studio_layer_op(minic_val_t *a, int n) {
 	char         *op = minic_arg_p(a, n, 0);
 	slot_layer_t *l  = g_context->layer;
@@ -850,15 +867,20 @@ static minic_val_t mn_studio_layer_op(minic_val_t *a, int n) {
 	}
 	i32 before = (i32)_sys_on_next_frames->length;
 	int done   = 1;
-	if (strcmp(op, "merge_down") == 0 && array_index_of((any_array_t *)g_project->_->layers, l) > 0) { // tab_layers.c, menu du calque
+	if (strcmp(op, "clear") == 0) {
+		history_clear_layer();
+		slot_layer_clear(l, slot_layer_is_mask(l) ? 0xffffffff : 0x00000000, NULL, 1.0, layers_default_rough, 0.0);
+	}
+	else if (strcmp(op, "merge_down") == 0 && array_index_of((any_array_t *)g_project->_->layers, l) > 0) { // tab_layers.c, menu du calque
 		history_merge_layers();
 		layers_merge_down();
 		if (g_context->layer->fill_material != NULL) {
 			slot_layer_to_paint_layer(g_context->layer);
 		}
 	}
-	else if (strcmp(op, "merge_group") == 0 && slot_layer_is_group(l)) {
-		layers_merge_group(l);
+	else if (strcmp(op, "merge_group") == 0 && slot_layer_is_group(l)) { // Par le menu : son pas d'historique (patch merge-group-undo)
+		tab_layers_l = l;
+		tab_layers_draw_layer_context_menu_merge_group(NULL);
 	}
 	else if (strcmp(op, "apply_mask") == 0 && slot_layer_is_mask(l)) {
 		history_apply_mask();
@@ -911,5 +933,6 @@ void studio_atlas_init(void) {
 	minic_register("studio_layer_set_opacity", "i(f)", mn_studio_layer_set_opacity);
 	minic_register("studio_udim_fill", "i(i,i,i,f,f,f,f)", mn_studio_udim_fill);
 	minic_register("studio_layer_op", "i(p)", mn_studio_layer_op);
+	minic_register("studio_layer_tree", "p()", mn_studio_layer_tree);
 #endif
 }

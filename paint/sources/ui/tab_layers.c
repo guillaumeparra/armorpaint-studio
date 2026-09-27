@@ -594,7 +594,7 @@ void tab_layers_draw_layer_context_menu_merge_down(void *_) {
 
 void tab_layers_draw_layer_context_menu_merge_group(void *_) {
 	slot_layer_t *l = tab_layers_l;
-	layers_merge_group(l);
+	history_merge_group(l); // STUDIO-PATCH(merge-group-undo): one history step, then layers_merge_group
 }
 
 void tab_layers_draw_layer_context_menu_apply(void *_) {

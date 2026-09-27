@@ -83,6 +83,8 @@ char *history_action_to_string(history_action_t action) {
 		return tr("Edit Swatch");
 	case HISTORY_ACTION_OBJECT_TRANSFORM:
 		return tr("Transform Object");
+	case HISTORY_ACTION_MERGE_GROUP: // STUDIO-PATCH(merge-group-undo)
+		return tr("Merge Group");
 	}
 	return tr("Paint");
 }
@@ -294,6 +296,48 @@ void history_swap_canvas(history_step_t *step) {
 
 	ui_nodes_canvas_changed();
 	ui_nodes_hwnd->redraws = 2;
+}
+
+// STUDIO-PATCH(merge-group-undo): Merge Group is one step holding an undo slot per layer and mask of the group,
+// the merges inside it record nothing
+bool history_merging_group = false;
+
+void history_undo_merge_group(history_step_t *step) {
+	slot_layer_t_array_t *layers = step->merge_layers;
+	for (i32 i = 0; i < layers->length; ++i) {
+		slot_layer_t *l     = layers->buffer[i];
+		slot_layer_t *saved = &step->merge_saved[i];
+		if (array_index_of(g_project->_->layers, l) >= 0) { // The merged layer
+			array_remove(g_project->_->layers, l);
+		}
+		else if (!slot_layer_is_group(saved)) { // Deleted by the merge, new textures under the same ext
+			slot_layer_t *t     = slot_layer_create(saved->ext, slot_layer_is_mask(saved) ? LAYER_SLOT_TYPE_MASK : LAYER_SLOT_TYPE_LAYER, NULL);
+			l->texpaint         = t->texpaint;
+			l->texpaint_nor     = t->texpaint_nor;
+			l->texpaint_pack    = t->texpaint_pack;
+			l->texpaint_preview = t->texpaint_preview;
+			free(t);
+		}
+		slot_layer_t live   = *l;
+		*l                  = *saved;
+		l->texpaint         = live.texpaint;
+		l->texpaint_nor     = live.texpaint_nor;
+		l->texpaint_pack    = live.texpaint_pack;
+		l->texpaint_preview = live.texpaint_preview;
+		l->texpaint_sculpt  = live.texpaint_sculpt;
+		array_insert(g_project->_->layers, step->layer + i, l);
+	}
+	for (i32 i = layers->length - 1; i >= 0; --i) {
+		slot_layer_t *l = layers->buffer[i];
+		if (!slot_layer_is_group(l)) {
+			history_undo_i    = history_undo_i - 1 < 0 ? g_config->undo_steps - 1 : history_undo_i - 1;
+			slot_layer_t *lay = history_undo_slot(history_undo_i);
+			slot_layer_swap(l, lay);
+		}
+	}
+	context_set_layer(layers->buffer[layers->length - 1]);
+	g_context->layers_preview_dirty = true;
+	make_material_parse_mesh_material();
 }
 
 void history_undo() {
@@ -510,6 +554,9 @@ void history_undo() {
 			step->canvas        = g_context->material->canvas;
 			slot_material_delete(g_context->material);
 		}
+		else if (step->action == HISTORY_ACTION_MERGE_GROUP) { // STUDIO-PATCH(merge-group-undo)
+			history_undo_merge_group(step);
+		}
 		else { // Paint operation
 			history_undo_i    = history_undo_i - 1 < 0 ? g_config->undo_steps - 1 : history_undo_i - 1;
 			slot_layer_t *lay = history_undo_slot(history_undo_i);
@@ -650,6 +697,23 @@ void history_swap_active() {
 	slot_layer_t *undo_layer = history_undo_slot(history_undo_i);
 	slot_layer_swap(undo_layer, g_context->layer);
 	history_undo_i = (history_undo_i + 1) % g_config->undo_steps;
+}
+
+// STUDIO-PATCH(merge-group-undo)
+void history_copy_merge_group(history_step_t *step) {
+	for (i32 i = 0; i < step->merge_layers->length; ++i) {
+		slot_layer_t *l = step->merge_layers->buffer[i];
+		if (!slot_layer_is_group(l)) {
+			history_copy_to_undo(l->id, history_undo_i, slot_layer_is_mask(l));
+		}
+	}
+}
+
+void history_redo_merge_group(history_step_t *step) {
+	history_copy_merge_group(step);
+	history_merging_group = true;
+	layers_merge_group(step->merge_layers->buffer[step->merge_layers->length - 1]);
+	history_merging_group = false;
 }
 
 void history_redo() {
@@ -825,6 +889,9 @@ void history_redo() {
 			ui_nodes_canvas_changed();
 			ui_nodes_hwnd->redraws = 2;
 		}
+		else if (step->action == HISTORY_ACTION_MERGE_GROUP) { // STUDIO-PATCH(merge-group-undo)
+			sys_notify_on_next_frame(&history_redo_merge_group, step);
+		}
 		else { // Paint operation
 			slot_layer_t *lay = history_undo_slot(history_undo_i);
 			context_select_paint_object(g_project->_->paint_objects->buffer[step->object]);
@@ -869,6 +936,33 @@ void history_reset() {
 	history_undos  = 0;
 	history_redos  = 0;
 	history_undo_i = 0;
+}
+
+// STUDIO-PATCH(merge-group-undo): undo slots held by a step
+i32 history_step_slots(history_step_t *step) {
+	if (step->action != HISTORY_ACTION_MERGE_GROUP || step->merge_layers == NULL) {
+		return 1;
+	}
+	i32 slots = 0;
+	for (i32 i = 0; i < step->merge_layers->length; ++i) {
+		if (!slot_layer_is_group(&step->merge_saved[i])) {
+			slots++;
+		}
+	}
+	return slots;
+}
+
+// STUDIO-PATCH(merge-group-undo): drop the oldest steps until the undoable ones fit in the undo slots
+void history_fit_undo_slots() {
+	i32 slots = 0;
+	for (i32 i = history_steps->length - history_redos - history_undos; i < history_steps->length - history_redos; ++i) {
+		slots += history_step_slots(history_steps->buffer[i]);
+	}
+	while (history_undos > 1 && slots > g_config->undo_steps) {
+		free(array_shift(history_steps));
+		history_undos--;
+		slots -= history_step_slots(history_steps->buffer[0]);
+	}
 }
 
 history_step_t *history_push(history_action_t action) {
@@ -920,6 +1014,7 @@ history_step_t *history_push(history_action_t action) {
 	while (history_steps->length > g_config->undo_steps + 1) {
 		free(array_shift(history_steps));
 	}
+	history_fit_undo_slots(); // STUDIO-PATCH(merge-group-undo)
 	return history_steps->buffer[history_steps->length - 1];
 }
 
@@ -979,6 +1074,9 @@ void history_order_layers(i32 prev_order) {
 }
 
 void history_merge_layers() {
+	if (history_merging_group) { // STUDIO-PATCH(merge-group-undo): recorded by history_merge_group
+		return;
+	}
 	history_copy_merging_layers();
 
 	history_step_t *step = history_push(HISTORY_ACTION_MERGE_LAYERS);
@@ -989,6 +1087,51 @@ void history_merge_layers() {
 	array_shift(history_steps); // Merge consumes 2 steps
 	history_undos--;
 	// TODO: use undo layer in app_merge_down to save memory
+}
+
+// STUDIO-PATCH(merge-group-undo): records Merge Group as one step, then merges. The steps of the merges inside it
+// pointed at the base layer (group masks counted below the merged layer) and nothing recorded the group, its masks
+// or the renamed result: undo deleted the base layer and brought back default named layers.
+void history_merge_group(slot_layer_t *group) {
+	slot_layer_t_array_t *all   = g_project->_->layers;
+	i32                   top   = array_index_of(all, group);
+	i32                   start = top;
+	while (start > 0 && slot_layer_get_containing_group(all->buffer[start - 1]) == group) {
+		start--;
+	}
+	slot_layer_t_array_t *layers = any_array_create_from_raw((void *[]){}, 0);
+	slot_layer_t         *saved  = malloc(sizeof(slot_layer_t) * (top - start + 1));
+	i32                   slots  = 0;
+	for (i32 i = start; i <= top; ++i) {
+		slot_layer_t *l = all->buffer[i];
+		any_array_push(layers, l);
+		saved[i - start] = *l;
+		if (!slot_layer_is_group(l)) {
+			slots++;
+		}
+	}
+
+	if (slots > g_config->undo_steps) {
+		// Not enough undo slots, and the steps before point at layers the merge deletes
+		history_reset();
+		console_info("Merge Group: more layers and masks than undo steps, history cleared");
+		free(saved);
+		array_free(layers);
+		free(layers);
+	}
+	else {
+		history_step_t tmp = {.merge_layers = layers, .merge_saved = saved};
+		history_copy_merge_group(&tmp);
+		history_step_t *step = history_push(HISTORY_ACTION_MERGE_GROUP);
+		step->layer          = start;
+		step->merge_layers   = layers;
+		step->merge_saved    = saved;
+		history_fit_undo_slots();
+	}
+
+	history_merging_group = true;
+	layers_merge_group(group);
+	history_merging_group = false;
 }
 
 void history_apply_mask() {

@@ -938,7 +938,8 @@ int   studio_mesh_set_parent(char *child, char *parent); // champ Parent de l'on
 char *studio_layer_masks(void);                      // masques d'objet des calques : "Layer 1=0 Layer 2=5 filter=0" (bancs)
 int   studio_layer_new_mask(int white);              // masque blanc (1) ou noir (0) sur le calque courant, devenu courant
 int   studio_layer_select(int i);                    // calque courant : le i-ième de la pile (0 en bas)
-int   studio_layer_op(char *op);                     // "merge_down", "merge_group", "apply_mask" (masque courant), "undo", "redo" (bancs ; le lot D2 en ajoute)
+int   studio_layer_op(char *op);                     // "clear", "merge_down", "merge_group" (par le menu), "apply_mask" (masque courant), "undo", "redo" (bancs ; le lot D2 en ajoute)
+char *studio_layer_tree(void);                       // pile de bas en haut, « nom<parent » : "Layer 1 | Layer 2<Group 3 | Group 3" (bancs)
 int   studio_layer_set_parent(int i, int group);     // met le calque i dans le groupe d'indice group (-1 : hors groupe), comme un glisser-déposer
 int   studio_layer_set_opacity(float opacity);       // opacité du calque ou du masque courant (0 à 1), comme son curseur Opacity, avec son pas d'historique
 int   studio_project_res(int px);                    // résolution Custom px × px, calques redimensionnés tout de suite
@@ -1437,6 +1438,7 @@ python3 .tests/arm_paths.py <projet.arm> [fichier...]   # chemins des fichiers d
 .tests/sets_app.sh [dossier]           # jeux de textures, nom des fichiers et UDIM dans l'app, avec les maillages de udim_gen.py ; PY=<python PySide6>
 .tests/atlas_order_app.sh [dossier]    # jeux de textures quand l'onglet Meshes trie, réapparente ou supprime des objets (patch atlas-objects-order)
 .tests/masks_app.sh [dossier]          # masques empilés (patch mask-multiply) : flatten, Apply Mask, Merge Down, Merge Group et export multiplient les masques comme la vue
+.tests/layers_undo_app.sh [dossier]    # Undo et Redo de Merge Group (patch merge-group-undo) : pile, noms, pixels, emplacements d'undo ; Merge Down
 python3 .tests/udim_gen.py [dossier]   # maillages de test (défaut .tests/meshes) : udim_cube.obj (une face par tuile, 1001-1003 et 1011-1013 ; matériaux body et cap), props.obj (crate, barrel, ball)
 ```
 
