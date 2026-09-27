@@ -1,0 +1,123 @@
+diff --git a/base/sources/iron.h b/base/sources/iron.h
+index b4876935..f03a9712 100644
+--- a/base/sources/iron.h
++++ b/base/sources/iron.h
+@@ -756,9 +756,16 @@ gpu_texture_t *gpu_create_render_target(i32 width, i32 height, i32 format) {
+ 	return render_target;
+ }
+ 
++// STUDIO-PATCH(ocio-import): pixels of a texture just decoded, before the upload; source is the file or extension
++// given to gpu_create_texture_from_encoded_bytes, NULL for raw bytes (see paint/plugins/external/PATCHES.md)
++void (*iron_texture_decoded)(void *pixels, i32 width, i32 height, i32 format, char *source) = NULL;
++
+ gpu_texture_t *gpu_create_texture_from_bytes(buffer_t *data, i32 width, i32 height, i32 format) {
+ 	gpu_texture_t *texture = (gpu_texture_t *)malloc(sizeof(gpu_texture_t));
+ 	texture->buffer        = NULL;
++	if (iron_texture_decoded != NULL) { // STUDIO-PATCH(ocio-import)
++		iron_texture_decoded(data->buffer, width, height, format, NULL);
++	}
+ 	gpu_texture_init_from_bytes(texture, data->buffer, width, height, (gpu_texture_format_t)format, true);
+ 	return texture;
+ }
+@@ -821,6 +828,9 @@ gpu_texture_t *gpu_create_texture_from_encoded_bytes(buffer_t *data, char *forma
+ 		texture_format = GPU_TEXTURE_FORMAT_RGBA32;
+ 	}
+ 
++	if (iron_texture_decoded != NULL && texture_data != NULL) { // STUDIO-PATCH(ocio-import)
++		iron_texture_decoded(texture_data, width, height, texture_format, format);
++	}
+ 	// double t = iron_time(); ////
+ 	gpu_texture_init_from_bytes(texture, texture_data, width, height, texture_format, true);
+ 	// iron_log("gpu_texture_init_from_bytes in %fs\n", iron_time() - t); ////
+diff --git a/paint/sources/io/export_arm.c b/paint/sources/io/export_arm.c
+index 4a9be6f0..e32a3041 100644
+--- a/paint/sources/io/export_arm.c
++++ b/paint/sources/io/export_arm.c
+@@ -403,6 +403,11 @@ void export_arm_run_project(char *path) {
+ 		export_arm_pack_sounds(g_project, g_project->_->sounds);
+ 	}
+ 
++#ifdef WITH_EXTERNAL // STUDIO-PATCH(ocio-import): the OCIO color space of each texture travels in the file, see external/PATCHES.md
++	void studio_texture_color_spaces_save(string_array_t *texture_files);
++	studio_texture_color_spaces_save(texture_files);
++#endif
++
+ 	buffer_t *buffer = util_encode_project(g_project);
+ 	iron_file_save_bytes(path, buffer, buffer->length + 1);
+ 	g_project->mesh_assets = mesh_assets_abs; // STUDIO-PATCH(arm-relative-paths)
+diff --git a/paint/sources/io/import_texture.c b/paint/sources/io/import_texture.c
+index f4fed04e..2fff8498 100644
+--- a/paint/sources/io/import_texture.c
++++ b/paint/sources/io/import_texture.c
+@@ -10,6 +10,10 @@ gpu_texture_t *import_texture_default_importer(char *path) {
+ 	return data_get_texture(path);
+ }
+ 
++#ifdef WITH_EXTERNAL // STUDIO-PATCH(ocio-import): fn(path), pixels decoded during the call converted to the working space
++gpu_texture_t *studio_texture_import(char *path, gpu_texture_t *(*fn)(char *path));
++#endif
++
+ void import_texture_run_on_next_frame(import_texture_data_t *itd) {
+ 	import_envmap_run(itd->path, itd->image);
+ 	free(itd);
+@@ -44,14 +48,22 @@ void import_texture_run(char *path, bool hdr_as_envmap) {
+ 	bool           cached = any_map_get(data_cached_textures, path) != NULL; // Already loaded or pink texture for missing file
+ 	gpu_texture_t *image;
+ 	if (importer == NULL || cached) {
++#ifdef WITH_EXTERNAL // STUDIO-PATCH(ocio-import): the pixels decoded for the texture go through OCIO, see external/PATCHES.md
++		image = studio_texture_import(path, import_texture_default_importer);
++#else
+ 		image = import_texture_default_importer(path);
++#endif
+ 	}
+ 	else if (!iron_file_exists(data_resolve_path(path))) { // STUDIO-PATCH(import-null-guards): the plugin importers dereference the blob
+ 		console_error(string("Could not open file %s.", path));
+ 		return;
+ 	}
+ 	else {
++#ifdef WITH_EXTERNAL // STUDIO-PATCH(ocio-import)
++		image = studio_texture_import(path, importer);
++#else
+ 		image = importer(path);
++#endif
+ 	}
+ 
+ 	if (image == NULL) {
+diff --git a/paint/sources/ui/tab_textures.c b/paint/sources/ui/tab_textures.c
+index f707bce3..2580ed01 100644
+--- a/paint/sources/ui/tab_textures.c
++++ b/paint/sources/ui/tab_textures.c
+@@ -8,6 +8,11 @@ i32            _tab_textures_draw_i;
+ bool           _tab_textures_draw_is_packed;
+ i32            tab_textures_drag_pos = -1;
+ 
++#ifdef WITH_EXTERNAL // STUDIO-PATCH(ocio-import): OCIO color space of the textures, see external/PATCHES.md
++char *studio_texture_tooltip(char *file, char *tooltip);
++void  studio_texture_color_space_box(asset_t *asset);
++#endif
++
+ void tab_textures_draw_set_as_envmap(void *_) {
+ 	import_envmap_run(_tab_textures_draw_asset->file, _tab_textures_draw_img);
+ }
+@@ -125,6 +130,11 @@ void tab_textures_draw_context_menu() {
+ 	if (ui_menu_button(tr("Reimport"), "", ICON_SYNC)) {
+ 		project_reimport_texture(_tab_textures_draw_asset);
+ 	}
++#ifdef WITH_EXTERNAL // STUDIO-PATCH(ocio-import)
++	if (ui_menu_button(tr("Color Space..."), "", ICON_PALETTE)) {
++		studio_texture_color_space_box(_tab_textures_draw_asset);
++	}
++#endif
+ 	if (ui_menu_button(tr("To Layer"), "", ICON_LAYER)) {
+ 		sys_notify_on_next_frame(&tab_textures_draw_to_layer, NULL);
+ 	}
+@@ -440,6 +450,9 @@ void tab_textures_draw(i32 *htab) {
+ 						if (img->format == GPU_TEXTURE_FORMAT_RGBA32_BC7) {
+ 							tooltip = string_tmp("%s %s", tooltip, tr("(compressed)"));
+ 						}
++#endif
++#ifdef WITH_EXTERNAL // STUDIO-PATCH(ocio-import)
++						tooltip = studio_texture_tooltip(asset->file, tooltip);
+ #endif
+ 						ui_tooltip(tooltip);
+ 					}

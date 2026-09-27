@@ -644,6 +644,10 @@ cannot read »), `.blend` (vérifie l'OBJ exporté par Blender), l'API de script
 - `import_texture_run()` fait la même vérification avant d'appeler un importeur de plugin (pas pour l'importeur
   par défaut ni pour une texture déjà en cache, ce qui garde les calques PSD, mis en cache sous un chemin fictif).
 
+Les appels d'importeur qui encadrent ce test dans `import_texture_run()` portent [ocio-import](#ocio-import) : le
+hunk de `import_texture.c` a été régénéré le 2026-09-27 avec ce contexte (état d'avant le patch reconstruit en
+retirant ses 4 lignes, puis `git diff --no-index`). Les autres fichiers du `.patch` viennent des commits du patch.
+
 **Test.** `.tests/import_app.sh` : fichiers absents (`obj fbx gltf glb psd tiff svg`) et `noread.obj`
 (`chmod 000`) → « Could not open file », rc 0 ; `bad.gltf`, `bad.glb`, `bad.fbx` (contenu `garbage`) → « Could not
 import file », rc 0 ; non-régression : `grid.obj`, `tri.gltf`, `tri.glb`, `quad.fbx` (FBX ASCII) donnent les
@@ -1047,3 +1051,140 @@ lignes : refaire l'injection juste avant les appels `export_arm_*_to_files(relat
 **Non couvert.** La copie est écrite depuis l'état en mémoire, juste après l'enregistrement du projet par le hook : un
 changement entre les deux (impossible pendant le publish, qui tient ArmorPaint) ne serait pas dans le fichier de
 travail.
+
+---
+
+## encode-image-overflow
+
+| | |
+|---|---|
+| Fichier | `base/sources/iron_image.c` (`_encode_image`, `_encode_image_func`) |
+| Commit studio | `6f789b6f` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-27) |
+| Trouvé | 2026-09-27, banc du lot A4 (`.tests/ocio_import_app.sh`, étape 3) : un `.arm` enregistré avec Pack Assets plantait à la réouverture (« MTLTextureDescriptor has width of zero ») |
+| Constaté depuis | `f4f90952` (2024-11-10, arrivée d'armorcore), toujours présent en `85f6cf1c` |
+
+**Bug.** `_encode_image()`, derrière `iron_encode_png()` et `iron_encode_jpg()`, donne à stb_image_write un tampon
+de `w * h * 4` octets, et son rappel `_encode_image_func()` y ajoute chaque morceau du fichier sans borne. Le fichier
+encodé dépasse souvent la taille des pixels : petite image (signature et chunks PNG, environ 70 octets pour les 4
+octets d'un pixel), image bruitée (un octet de filtre par rangée, deflate qui ne réduit rien), en-têtes JPEG. Le
+rappel écrit alors au-delà du bloc du tas. Appelants : Pack Assets (`export_arm_pack_assets`, qui redessine chaque
+texture du projet en RGBA 8 bits et l'encode en PNG, en JPEG pour un `.jpg`), la capture du viewport rangée dans
+l'onglet Textures (`viewport_save_texture`) et `util_texture_capture_output`. Sur le banc, les PNG du paquet sortaient
+corrompus : stb les refusait à la réouverture et une texture de largeur nulle partait vers Metal (plantage).
+Ailleurs, la corruption du tas peut rester muette.
+
+**Correctif.** Le rappel connaît la capacité du tampon (`_encode_capacity`, en `size_t` : une texture 16K bruitée
+dépasse 1 Go une fois encodée) et la double par `realloc` quand un morceau ne tient pas. Le tampon rendu reste
+`_encode_data` : les appelants le libèrent comme avant.
+
+Pour régénérer : `git diff 6f789b6f^ 6f789b6f -- base/sources/iron_image.c`.
+
+**Test.** `.tests/export.sh` : `image_test` encode du bruit en 1 × 1, 8 × 4, 16 × 16 et 64 × 64, relit chaque PNG
+avec libpng (pixels identiques) et vérifie les marqueurs de début et de fin du JPEG, sous ASan : sans le patch, ASan
+signale le débordement dans `_encode_image_func`. `.tests/ocio_import_app.sh`, étape 3 : le `.arm` enregistré avec
+Pack Assets se rouvre ailleurs, sans ses fichiers. Au 2026-09-27, tout passe.
+
+**Signes que l'upstream l'a corrigé.** `_encode_image_func()` borne ou agrandit son tampon, ou `_encode_image()`
+le dimensionne autrement que `w * h * 4` (`stbi_write_png_to_mem`, par exemple) : rejouer `image_test` sans le
+patch.
+
+**Non couvert.** Un `realloc` qui échoue n'est pas traité (le `malloc` upstream ne l'est pas non plus).
+`_encode_size` reste un `int` : au-delà de 2 Go de fichier, rien n'est borné (hors de portée d'une texture ≤ 16K
+RGBA 8 bits).
+
+---
+
+## ocio-import
+
+| | |
+|---|---|
+| Fichiers | `base/sources/iron.h` (`iron_texture_decoded`, `gpu_create_texture_from_bytes`, `gpu_create_texture_from_encoded_bytes`), `paint/sources/io/import_texture.c` (`import_texture_run`), `paint/sources/io/export_arm.c` (`export_arm_run_project`), `paint/sources/ui/tab_textures.c` (`tab_textures_draw`, `tab_textures_draw_context_menu`) |
+| Commit studio | `2e532915` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-27) |
+| Injection | `iron.h` : un pointeur de fonction nul par défaut et deux appels (10 lignes, sans dépendance à `external/`) ; le reste en 7 blocs sous `#ifdef WITH_EXTERNAL` (30 lignes) — l'app compile toujours sans `external/` |
+
+**Motif.** Le lot A4 interprète chaque texture importée dans son espace couleur source (sRGB, ACEScg, donnée…) et
+convertit ses pixels vers l'espace de travail OCIO. ArmorPaint décode les images dans
+`gpu_create_texture_from_encoded_bytes()` (PNG, JPEG, HDR, K… par iron) ou les reçoit décodées d'un importeur de
+plugin par `gpu_create_texture_from_bytes()` (EXR studio, PSD, TIFF), puis les envoie aussitôt au GPU : aucun plugin
+ne voit les pixels avant l'envoi, ni ne sait à quelle texture importée ils appartiennent.
+
+**Correctif.**
+- `iron.h` : `iron_texture_decoded`, pointeur de fonction nul par défaut, reçoit les pixels, la taille, le format et
+  la source (chemin ou extension passés à `gpu_create_texture_from_encoded_bytes()`, NULL pour des octets bruts)
+  juste avant `gpu_texture_init_from_bytes()`. Sans plugin, rien ne change.
+- `import_texture.c` : `import_texture_run()` passe l'importeur (celui d'iron ou d'un plugin) à
+  `studio_texture_import(path, fn)`, qui l'appelle dans une portée : les pixels décodés pendant l'appel sont ceux de
+  la texture `path`. Tous les imports de texture passent par là : import d'asset, de dossier, projet rouvert,
+  matériaux et brosses d'un `.arm`, Reimport, calques d'un PSD, captures.
+- `export_arm.c` : `studio_texture_color_spaces_save(texture_files)`, juste avant `util_encode_project()`, écrit
+  l'espace de chaque texture dans l'entrée `studio_color_spaces.json` du paquet d'assets du `.arm`.
+- `tab_textures.c` : l'infobulle d'une texture donne son espace et sa source ; « Color Space... » dans le menu
+  contextuel ouvre le choix de l'espace.
+
+Trois patches touchent `export_arm_run_project()` : [project-copy](#project-copy),
+[arm-relative-paths](#arm-relative-paths) et celui-ci (un hunk juste avant `util_encode_project()`), indépendants ;
+`import_texture_run()` porte aussi [import-null-guards](#import-null-guards). Pour régénérer celui-ci :
+`git diff 2e532915^ 2e532915 -- base/sources/iron.h paint/sources/io/import_texture.c paint/sources/io/export_arm.c
+paint/sources/ui/tab_textures.c` (ou le commit qui l'a refait).
+
+**Test.** `.tests/ocio_import_app.sh` : ArmorPaint en `--background`, pixels relus par `studio_texture_dump` et
+comparés à PyOpenColorIO par `ocio_import_check.py` : PNG, TIFF, PSD à plat et à calques en 8 bits, EXR float et
+half (file_rule), `.hdr`, donnée reconnue à son nom ; puis choix par texture, vignette du navigateur de fichiers,
+`.arm` rouvert, paquet d'assets sans les fichiers, `STUDIO_OCIO_IMPORT=0`. Au 2026-09-27, les 31 contrôles passent.
+Le plugin référence `iron_texture_decoded` : sans le patch, l'app ne se lie pas.
+
+**Signes que l'upstream l'a changé.** Un conflit dans `gpu_create_texture_from_bytes()` ou
+`gpu_create_texture_from_encoded_bytes()` (chargement des textures remanié : garder l'appel juste avant l'envoi au
+GPU, après le décodage) ; une autre signature d'importeur dans `import_texture_run()` ; une gestion couleur upstream
+des textures importées (espace par texture, OCIO) : comparer au lot A4 et retirer ce qui fait double emploi.
+
+**Non couvert.**
+- Une texture déjà dans le cache d'ArmorPaint n'est pas décodée à nouveau : une capture du viewport, par exemple,
+  garde ses pixels. Une texture décodée hors import (vignette du navigateur de fichiers) n'est pas convertie ; un
+  import qui la trouve en cache la décode à nouveau.
+- Les textures des matériaux ou brosses importés d'un autre `.arm` sont résolues comme un import : les choix
+  enregistrés dans cet autre `.arm` ne sont pas lus.
+
+---
+
+## image-texture-color-space
+
+| | |
+|---|---|
+| Fichier | `paint/sources/nodes_material/image_texture_node.c` (`parser_material_texture_store`) |
+| Commit studio | `92962b40` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-27) |
+| Trouvé | 2026-09-27, lot A4 (espaces des textures importées face à l'option du nœud), confirmé par le banc |
+| Constaté depuis | `7c993830` (2023-02-08, `MaterialParser.hx`), toujours présent en `85f6cf1c` |
+| Injection | 2 exposants échangés ; le mode Auto en 2 blocs sous `#ifdef WITH_EXTERNAL` (8 lignes, dépend du lot A4) |
+
+**Bug.** Le nœud Image Texture a une option d'espace couleur (Auto, Linear, sRGB, DirectX Normal Map). Dans
+`parser_material_texture_store()`, chaque branche fait l'inverse de son commentaire : Linear sur la couleur de base
+(« Linear to sRGB ») applique `pow(x, 2.2)`, et sRGB sur une autre entrée (« sRGB to linear ») `pow(x, 1/2.2)`. Or
+ArmorPaint garde la couleur de base encodée gamma 2.2 (décodée au rendu) et les autres canaux linéaires : un gris
+linéaire 0,5 en Linear sur la couleur de base donnait 55/255 au lieu de 186/255 (décodé deux fois), une rugosité
+sRGB 0,5 donnait 186/255 au lieu de 55/255.
+
+**Correctif.** Les exposants sont échangés : Linear sur la couleur de base encode (`pow(x, 1/2.2)`), sRGB ailleurs
+décode (`pow(x, 2.2)`). Avec `WITH_EXTERNAL`, Auto sur une texture qui garde des couleurs linéaires (flottante,
+d'un espace couleur, convertie par le lot A4 : `studio_texture_is_linear()`) vaut Linear : une texture EXR de
+couleur de base n'a plus besoin de l'option.
+
+Changement de comportement : un projet qui règle Linear ou sRGB sur un nœud Image Texture rend désormais la
+conversion annoncée ; un réglage choisi pour compenser l'inversion est à revoir.
+
+Pour régénérer : `git diff 92962b40^ 92962b40 -- paint/sources/nodes_material/image_texture_node.c`.
+
+**Test.** `.tests/ocio_import_app.sh`, section 5 : un gris linéaire 0,5 (`.hdr`) en couleur de base (Linear, puis
+Auto) et en rugosité (sRGB), calque de remplissage, export des valeurs d'ArmorPaint telles quelles (EXR 32 bits,
+espace raw) mesuré sur les texels couverts par les UV : 186/255 en couleur de base, 55 ou 56/255 en rugosité. Au
+2026-09-27, tout passe ; sans le patch, les trois contrôles échouent (55, 186 et 128/255).
+
+**Signes que l'upstream l'a corrigé.** Les exposants des deux branches échangés en amont, ou l'option d'espace
+remaniée : rejouer la section 5 sans le patch.
+
+**Non couvert.** Seule la conversion gamma 2.2 d'ArmorPaint est corrigée : l'option ne passe pas par OCIO (pour une
+texture importée, c'est l'espace choisi par texture, lot A4, qui convertit). Sans le lot A4 (`STUDIO_OCIO_IMPORT=0`
+ou build sans `external/`), Auto ne convertit jamais, comme l'upstream.

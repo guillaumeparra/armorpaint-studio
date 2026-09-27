@@ -1,0 +1,36 @@
+diff --git a/paint/sources/nodes_material/image_texture_node.c b/paint/sources/nodes_material/image_texture_node.c
+index 3a769c7c..c887c2d6 100644
+--- a/paint/sources/nodes_material/image_texture_node.c
++++ b/paint/sources/nodes_material/image_texture_node.c
+@@ -15,6 +15,10 @@ bind_tex_t *parser_material_make_texture(ui_node_t *image_node, char *tex_name)
+ 	return parser_material_make_bind_tex(tex_name, filepath);
+ }
+ 
++#ifdef WITH_EXTERNAL // STUDIO-PATCH(image-texture-color-space): the imported texture keeps linear colors (OCIO), see external/PATCHES.md
++bool studio_texture_is_linear(char *file);
++#endif
++
+ char *parser_material_texture_store(ui_node_t *node, bind_tex_t *tex, char *tex_name, i32 color_space) {
+ 	any_array_push(parser_material_con->data->bind_textures, tex);
+ 	node_shader_context_add_elem(parser_material_kong->context, "tex", "short2norm");
+@@ -67,12 +71,18 @@ char *parser_material_texture_store(ui_node_t *node, bind_tex_t *tex, char *tex_
+ 		}
+ 	}
+ 	if (parser_material_transform_color_space) {
++#ifdef WITH_EXTERNAL // STUDIO-PATCH(image-texture-color-space): Auto on a linear texture (float, color space) is Linear
++		if (color_space == COLOR_SPACE_AUTO && studio_texture_is_linear(tex->file)) {
++			color_space = COLOR_SPACE_LINEAR;
++		}
++#endif
+ 		// Base color socket auto-converts from sRGB to linear
++		// STUDIO-PATCH(image-texture-color-space): exponents swapped, each branch did the opposite of its comment
+ 		if (color_space == COLOR_SPACE_LINEAR && parser_material_parsing_basecolor) { // Linear to sRGB
+-			parser_material_write(parser_material_kong, string_tmp("%s.rgb = pow(%s.rgb, float3(2.2, 2.2, 2.2));", tex_store, tex_store));
++			parser_material_write(parser_material_kong, string_tmp("%s.rgb = pow(%s.rgb, float3(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));", tex_store, tex_store));
+ 		}
+ 		else if (color_space == COLOR_SPACE_SRGB && !parser_material_parsing_basecolor) { // sRGB to linear
+-			parser_material_write(parser_material_kong, string_tmp("%s.rgb = pow(%s.rgb, float3(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));", tex_store, tex_store));
++			parser_material_write(parser_material_kong, string_tmp("%s.rgb = pow(%s.rgb, float3(2.2, 2.2, 2.2));", tex_store, tex_store));
+ 		}
+ 		else if (color_space == COLOR_SPACE_DIRECTX_NORMAL_MAP) { // DirectX normal map to OpenGL normal map
+ 			parser_material_write(parser_material_kong, string_tmp("%s.y = 1.0 - %s.y;", tex_store, tex_store));

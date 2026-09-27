@@ -61,17 +61,17 @@ index e2ff76d0..1b39ede6 100644
  	data_delete_blob(path);
  }
 diff --git a/paint/sources/io/import_texture.c b/paint/sources/io/import_texture.c
-index b38f9800..f4fed04e 100644
+index b665a616..2fff8498 100644
 --- a/paint/sources/io/import_texture.c
 +++ b/paint/sources/io/import_texture.c
-@@ -46,6 +46,10 @@ void import_texture_run(char *path, bool hdr_as_envmap) {
- 	if (importer == NULL || cached) {
+@@ -54,6 +54,10 @@ void import_texture_run(char *path, bool hdr_as_envmap) {
  		image = import_texture_default_importer(path);
+ #endif
  	}
 +	else if (!iron_file_exists(data_resolve_path(path))) { // STUDIO-PATCH(import-null-guards): the plugin importers dereference the blob
 +		console_error(string("Could not open file %s.", path));
 +		return;
 +	}
  	else {
- 		image = importer(path);
- 	}
+ #ifdef WITH_EXTERNAL // STUDIO-PATCH(ocio-import)
+ 		image = studio_texture_import(path, importer);

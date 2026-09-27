@@ -1,0 +1,31 @@
+diff --git a/base/sources/iron_image.c b/base/sources/iron_image.c
+index 83c6a6c9..3046facb 100644
+--- a/base/sources/iron_image.c
++++ b/base/sources/iron_image.c
+@@ -78,7 +78,14 @@ void iron_write_png(char *path, buffer_t *bytes, i32 w, i32 h, i32 format) {
+ 
+ unsigned char *_encode_data;
+ int            _encode_size;
++size_t         _encode_capacity; // STUDIO-PATCH(encode-image-overflow)
+ void           _encode_image_func(void *context, void *data, int size) {
++    // STUDIO-PATCH(encode-image-overflow): the file can outgrow the w * h * 4 bytes it was given (small or noisy
++    // image, jpg headers), see paint/plugins/external/PATCHES.md. size_t: a noisy 16K image passes 1 GiB.
++    if ((size_t)_encode_size + size > _encode_capacity) {
++        _encode_capacity = ((size_t)_encode_size + size) * 2;
++        _encode_data     = (unsigned char *)realloc(_encode_data, _encode_capacity);
++    }
+     memcpy(_encode_data + _encode_size, data, size);
+     _encode_size += size;
+ }
+@@ -92,8 +99,9 @@ buffer_t *_encode_image(buffer_t *bytes, i32 w, i32 h, i32 format, i32 quality)
+ 		pixels[i * 4 + 2] = c;
+ 	}
+ #endif
+-	_encode_data = (unsigned char *)malloc(w * h * 4);
+-	_encode_size = 0;
++	_encode_data     = (unsigned char *)malloc(w * h * 4);
++	_encode_size     = 0;
++	_encode_capacity = w * h * 4; // STUDIO-PATCH(encode-image-overflow)
+ 	format == 0 ? stbi_write_jpg_to_func(&_encode_image_func, NULL, w, h, 4, bytes->buffer, quality)
+ 	            : stbi_write_png_to_func(&_encode_image_func, NULL, w, h, 4, bytes->buffer, w * 4);
+ 	buffer_t *buffer = malloc(sizeof(buffer_t));
