@@ -1,8 +1,8 @@
 diff --git a/paint/sources/util/util_layer.c b/paint/sources/util/util_layer.c
-index 215a18b9c..d70cdd188 100644
+index b05a61e..716a445 100644
 --- a/paint/sources/util/util_layer.c
 +++ b/paint/sources/util/util_layer.c
-@@ -846,15 +846,49 @@ void layers_duplicate_layer(slot_layer_t *l) {
+@@ -846,15 +846,55 @@ void layers_duplicate_layer(slot_layer_t *l) {
  	}
  }
  
@@ -21,26 +21,32 @@ index 215a18b9c..d70cdd188 100644
 +	}
 +}
 +
-+// STUDIO-PATCH(mask-multiply): the opacity of a mask put in its pixels, lerp(1, mask, opacity), then set to 1
++// STUDIO-PATCH(mask-multiply): the opacity of a mask put in its pixels, lerp(1, mask, opacity), then set to 1; on every
++// tile of a tiled mask (util_udim.c)
 +static void layers_bake_mask_opacity(slot_layer_t *m) {
 +	layers_make_temp_img();
-+	draw_begin(layers_temp_image, false, 0);
-+	draw_set_pipeline(pipes_copy);
-+	draw_image(m->texpaint, 0, 0);
-+	draw_set_pipeline(NULL);
-+	draw_end();
++	i32 udim_n = util_udim_loop_begin(util_udim_tile_layer(m, true));
++	for (i32 udim_k = 0; udim_k < udim_n; ++udim_k) {
++		util_udim_loop_tile(udim_k);
++		draw_begin(layers_temp_image, false, 0);
++		draw_set_pipeline(pipes_copy);
++		draw_image(m->texpaint, 0, 0);
++		draw_set_pipeline(NULL);
++		draw_end();
 +
-+	render_target_t *empty_rt = any_map_get(render_path_render_targets, "empty_white");
-+	_gpu_begin(m->texpaint, NULL, NULL, GPU_CLEAR_NONE, 0, 0.0);
-+	gpu_set_pipeline(pipes_merge_mask);
-+	gpu_set_texture(pipes_tex0_merge_mask, layers_temp_image);
-+	gpu_set_texture(pipes_texa_merge_mask, empty_rt->_image);
-+	gpu_set_float(pipes_opac_merge_mask, m->mask_opacity);
-+	gpu_set_int(pipes_blending_merge_mask, BLEND_TYPE_MIX);
-+	gpu_set_vertex_buffer(const_data_screen_aligned_vb);
-+	gpu_set_index_buffer(const_data_screen_aligned_ib);
-+	gpu_draw();
-+	gpu_end();
++		render_target_t *empty_rt = any_map_get(render_path_render_targets, "empty_white");
++		_gpu_begin(m->texpaint, NULL, NULL, GPU_CLEAR_NONE, 0, 0.0);
++		gpu_set_pipeline(pipes_merge_mask);
++		gpu_set_texture(pipes_tex0_merge_mask, layers_temp_image);
++		gpu_set_texture(pipes_texa_merge_mask, empty_rt->_image);
++		gpu_set_float(pipes_opac_merge_mask, m->mask_opacity);
++		gpu_set_int(pipes_blending_merge_mask, BLEND_TYPE_MIX);
++		gpu_set_vertex_buffer(const_data_screen_aligned_vb);
++		gpu_set_index_buffer(const_data_screen_aligned_ib);
++		gpu_draw();
++		gpu_end();
++	}
++	util_udim_loop_end();
 +	m->mask_opacity = 1.0;
 +}
 +
@@ -57,7 +63,7 @@ index 215a18b9c..d70cdd188 100644
  		g_context->layer_preview_dirty = true;
  	}
  }
-@@ -880,6 +914,11 @@ void layers_merge_down() {
+@@ -880,6 +920,11 @@ void layers_merge_down() {
  		context_set_layer(l0);
  	}
  
@@ -69,7 +75,7 @@ index 215a18b9c..d70cdd188 100644
  	layers_merge_layer(l0, l1, false);
  	slot_layer_delete(l1);
  	context_set_layer(l0);
-@@ -906,11 +945,7 @@ slot_layer_t *layers_merge_group(slot_layer_t *l) {
+@@ -906,11 +951,7 @@ slot_layer_t *layers_merge_group(slot_layer_t *l) {
  	// Now apply the group masks
  	slot_layer_t_array_t *masks = slot_layer_get_masks(l, true);
  	if (masks != NULL) {
@@ -82,7 +88,7 @@ index 215a18b9c..d70cdd188 100644
  	}
  
  	children->buffer[0]->parent = NULL;
-@@ -963,7 +998,9 @@ void layers_merge_layer(slot_layer_t *l0, slot_layer_t *l1, bool use_mask) {
+@@ -966,7 +1007,9 @@ void layers_merge_layer(slot_layer_t *l0, slot_layer_t *l1, bool use_mask) {
  		gpu_set_texture(pipes_tex0_merge_mask, l1->texpaint);
  		gpu_set_texture(pipes_texa_merge_mask, layers_temp_image);
  		gpu_set_float(pipes_opac_merge_mask, slot_layer_get_opacity(l1));

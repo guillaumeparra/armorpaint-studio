@@ -252,21 +252,28 @@ void make_material_bake_node_preview(ui_node_t *node, ui_node_canvas_t *group, u
 		parser_material_start_node       = NULL;
 		parser_material_start_group      = NULL;
 		parser_material_start_parents    = NULL;
-		g_context->pdirty                = 1;
-		render_path_paint_use_live_layer(true);
-		render_path_paint_commands_paint(false);
-		render_path_paint_dilate(true, false);
-		render_path_paint_use_live_layer(false);
-		g_context->pdirty = 0;
+		// STUDIO-PATCH(udim-tiles): a tiled layer, the curvature of each tile in its tile of the preview (util_udim.h)
+		i32 udim_n = util_udim_loop_begin(util_udim_tile_preview(image));
+		for (i32 udim_k = 0; udim_k < udim_n; ++udim_k) {
+			util_udim_loop_tile(udim_k);
+			util_udim_tile_preview(image);
+			g_context->pdirty = 1;
+			render_path_paint_use_live_layer(true);
+			render_path_paint_commands_paint(false);
+			render_path_paint_dilate(true, false);
+			render_path_paint_use_live_layer(false);
+			g_context->pdirty = 0;
+
+			any_map_t       *rts           = render_path_render_targets;
+			render_target_t *texpaint_live = any_map_get(rts, "texpaint_live");
+			draw_begin(image, false, 0);
+			draw_image(texpaint_live->_image, 0, 0);
+			draw_end();
+		}
+		util_udim_loop_end();
 
 		g_context->tool      = _tool;
 		g_context->bake_type = _bake_type;
-
-		any_map_t       *rts           = render_path_render_targets;
-		render_target_t *texpaint_live = any_map_get(rts, "texpaint_live");
-		draw_begin(image, false, 0);
-		draw_image(texpaint_live->_image, 0, 0);
-		draw_end();
 	}
 }
 

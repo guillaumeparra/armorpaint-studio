@@ -204,6 +204,12 @@ bool util_mesh_udim_active() {
 	return util_mesh_udim_tile_count > 1;
 }
 
+// STUDIO-PATCH(udim-tiles): the table of tiles, sorted, for the tile stores of util_udim.c (lot D2); a single tile too
+i32 util_mesh_udim_tile_table(i32 **tiles) {
+	*tiles = util_mesh_udim_tiles;
+	return util_mesh_udim_tile_count;
+}
+
 i32 util_mesh_udim_slot(i32 tile) {
 	for (i32 i = 0; i < util_mesh_udim_tile_count; ++i) {
 		if (util_mesh_udim_tiles[i] == tile) {

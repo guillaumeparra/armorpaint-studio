@@ -624,6 +624,14 @@ typedef struct swatch_color {
 	f32 subsurface;
 } swatch_color_t;
 
+// STUDIO-PATCH(udim-tiles): the content of a tile of a layer (lot D2e), see paint/sources/util/util_udim.h
+typedef struct layer_tile_data {
+	i32            tile;
+	struct buffer *texpaint;
+	struct buffer *texpaint_nor;
+	struct buffer *texpaint_pack;
+} layer_tile_data_t;
+
 typedef struct layer_data {
 	char             *name;
 	i32               res; // Width pixels
@@ -662,6 +670,8 @@ typedef struct layer_data {
 	bool              path_curved;
 	i32               path_material;
 	bool              path_text;
+	// STUDIO-PATCH(udim-tiles): the tiles of a tiled layer, NULL otherwise; the last key, upstream reads past it
+	struct layer_tile_data_t_array *tiles;
 } layer_data_t;
 
 typedef struct timeline_layer_keyframe_data {
@@ -921,6 +931,13 @@ typedef struct layer_data_t_array {
 	int            length;
 	int            capacity;
 } layer_data_t_array_t;
+
+// STUDIO-PATCH(udim-tiles): the tiles of a layer (lot D2e)
+typedef struct layer_tile_data_t_array {
+	layer_tile_data_t **buffer;
+	int                 length;
+	int                 capacity;
+} layer_tile_data_t_array_t;
 
 typedef struct timeline_layer_keyframe_data_t_array {
 	timeline_layer_keyframe_data_t **buffer;

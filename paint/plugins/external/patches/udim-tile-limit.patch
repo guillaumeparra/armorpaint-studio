@@ -2,7 +2,7 @@ diff --git a/paint/sources/io/export_texture.c b/paint/sources/io/export_texture
 index 91298774..221e8ba7 100644
 --- a/paint/sources/io/export_texture.c
 +++ b/paint/sources/io/export_texture.c
-@@ -251,6 +251,14 @@ static void export_texture_run_layers(char *path, slot_layer_t_array_t *layers,
+@@ -289,6 +289,14 @@ static void export_texture_run_layers(char *path, slot_layer_t_array_t *layers,
  		i32 udim_tile = util_mesh_udim_tile(object_name);
  		if (udim_tile >= 0) {
  			udim_slot = util_mesh_udim_slot(udim_tile);
@@ -17,7 +17,7 @@ index 91298774..221e8ba7 100644
  		}
  		else if (export_selected) {
  			udim_slot = layers_udim_tile_slot(layers->buffer[0]);
-@@ -301,6 +309,10 @@ static void export_texture_run_layers(char *path, slot_layer_t_array_t *layers,
+@@ -350,6 +358,10 @@ static void export_texture_run_layers(char *path, slot_layer_t_array_t *layers,
  			mask = pipes_temp_mask_image;
  		}
  
@@ -25,9 +25,9 @@ index 91298774..221e8ba7 100644
 +		if (!bake_material && udim_slot < 0 && !export_selected && layers_udim_tile_slot(l1) == -2) {
 +			continue;
 +		}
- 		// Shared layers of udim tiles are cropped out of the atlas, tile layers go into the atlas when exporting it whole
- 		if (!bake_material && udim_slot >= 0 && util_mesh_udim_layer(l1)) {
- 			l1 = layers_udim_remap(l1, l1masks != NULL ? &mask : NULL, udim_slot, true);
+ 		// STUDIO-PATCH(udim-tiles): a tiled layer is read on the tile of the context (a tile exported alone), or composed
+ 		// from its tiles when exporting the whole atlas
+ 		if (!bake_material && util_udim_layer_tiled(l1)) {
 diff --git a/paint/sources/uniforms.c b/paint/sources/uniforms.c
 index ac01b16a..e9dd5b1a 100644
 --- a/paint/sources/uniforms.c
@@ -43,10 +43,10 @@ index ac01b16a..e9dd5b1a 100644
  	}
  	else if (string_equals(link, "_decal_layer_loc")) {
 diff --git a/paint/sources/util/util_layer.c b/paint/sources/util/util_layer.c
-index f2919622..215a18b9 100644
+index b35c0e5..1f23b01 100644
 --- a/paint/sources/util/util_layer.c
 +++ b/paint/sources/util/util_layer.c
-@@ -1112,13 +1112,14 @@ slot_layer_t *layers_udim_remap(slot_layer_t *l, gpu_texture_t **mask, i32 slot,
+@@ -1117,13 +1117,14 @@ slot_layer_t *layers_udim_remap(slot_layer_t *l, gpu_texture_t **mask, i32 slot,
  }
  
  // Atlas slot of a layer assigned to a single udim tile object, -1 otherwise
@@ -62,10 +62,10 @@ index f2919622..215a18b9 100644
  }
  
  slot_layer_t *layers_flatten(bool height_to_normal, slot_layer_t_array_t *layers) {
-@@ -1166,6 +1167,9 @@ slot_layer_t *layers_flatten(bool height_to_normal, slot_layer_t_array_t *layers
- 
+@@ -1172,6 +1173,9 @@ slot_layer_t *layers_flatten(bool height_to_normal, slot_layer_t_array_t *layers
  		// Flattened layers are in shared atlas space
- 		i32 tile_slot = layers_udim_tile_slot(l1);
+ 		// STUDIO-PATCH(udim-tiles): a tiled layer is flattened on the tile of the context, not remapped to a cell
+ 		i32 tile_slot = util_udim_layer_tiled(l1) ? -1 : layers_udim_tile_slot(l1);
 +		if (tile_slot == -2) { // STUDIO-PATCH(udim-tile-limit): the layer of a tile without a slot has no cell in the atlas
 +			continue;
 +		}

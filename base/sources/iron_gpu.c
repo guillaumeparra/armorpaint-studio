@@ -33,7 +33,14 @@ void gpu_init(int depth_buffer_bits, bool vsync) {
 	gpu_constant_buffer_lock(&constant_buffer, 0, GPU_CONSTANT_BUFFER_SIZE);
 }
 
+// STUDIO-PATCH(udim-tiles): render targets about to be drawn to, for the tile stores of paint/sources/util/util_udim.c
+// (see paint/plugins/external/PATCHES.md)
+void (*gpu_target_beginning)(gpu_texture_t **targets, int count) = NULL;
+
 void gpu_begin(gpu_texture_t **targets, int count, gpu_texture_t *depth_buffer, gpu_clear_t flags, unsigned color, float depth) {
+	if (gpu_target_beginning != NULL && targets != NULL && !gpu_in_use) { // STUDIO-PATCH(udim-tiles)
+		gpu_target_beginning(targets, count);
+	}
 	if (gpu_in_use && !gpu_thrown) {
 		gpu_thrown = true;
 		iron_log("End before you begin");

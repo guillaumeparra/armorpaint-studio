@@ -1,9 +1,9 @@
 diff --git a/paint/sources/render/make_texcoord.c b/paint/sources/render/make_texcoord.c
-index 2d3afcc0..1cb80562 100644
+index 1332ecf..7d72658 100644
 --- a/paint/sources/render/make_texcoord.c
 +++ b/paint/sources/render/make_texcoord.c
-@@ -131,14 +131,21 @@ void make_texcoord_run(node_shader_t *kong, bool is_atlas) {
- 			node_shader_write_vert(kong, string_tmp("output.tex_coord = input.tex1 * %s;", scale));
+@@ -141,14 +141,21 @@ void make_texcoord_run(node_shader_t *kong, bool is_atlas) {
+ 			}
  		}
  		else if (!is_atlas && util_mesh_udim_layer(g_context->layer)) {
 -			// Materials repeat per tile, bake reads layer textures in atlas space

@@ -870,19 +870,22 @@ rassemblé d'un objet du fichier à l'autre) et un jeu de textures par matériau
 triangle à cheval sur deux tuiles est coupé le long de la frontière.
 Un fichier dont une uv sort des tuiles 1001-1990 (uv négative, u ≥ 10) ou qui a plus de 64 tuiles est refusé avec un
 message, et le projet garde son maillage. Un objet sans uv est importé sans tuile, avec un message : les calques UDIM
-ne le peignent pas. ArmorPaint peint toutes les tuiles dans chaque texture de calque, rangées en grille (côté : racine
-carrée du nombre de tuiles arrondie au-dessus, 8 au plus, soit 64 tuiles) : une tuile a la résolution du projet divisée
-par ce côté (projet 4096, 6 tuiles → grille 3 × 3 → 1365 pixels par tuile). Après l'import, la barre d'état le dit,
-avec la résolution de projet qu'il faut pour 2048 et 4096 pixels par tuile et la mémoire d'un calque
-(`studio_udim.c` ; dans la console seule si l'import a affiché un avertissement). Per UDIM Tile découpe la tuile et la
-remet à la résolution de la map : les fichiers ont la taille demandée (`<resolution>`), pas plus de détail. En
-Visible, un maillage UDIM donne la grille entière (avertissement du préflight). Au-delà de 64 tuiles (objets
-`nom.1xxx` ajoutés ou renommés), les suivantes ne sont ni peintes ni exportées : message, et le préflight bloque
-l'export studio (patch udim-tile-limit).
+ne le peignent pas. Chaque tuile a ses propres textures de calque, à la résolution du projet (lot D2) : la mémoire
+d'un calque est multipliée par le nombre de tuiles. Après l'import, la barre d'état le dit (« UDIM: 6 tiles, each with
+its own 4096 px textures: 2.4 GB per 16 bit layer. », `studio_udim.c` ; dans la console seule si l'import a affiché un
+avertissement). Per UDIM Tile écrit chaque tuile à sa résolution, sans recadrage ni ré-agrandissement. En Visible, un
+maillage UDIM donne une grille des tuiles (côté : racine carrée du nombre de tuiles arrondie au-dessus, 8 au plus),
+chaque tuile réduite dans sa case (avertissement du préflight). Le `.arm` garde les tuiles de chaque calque ; un
+ArmorPaint officiel l'ouvre et y lit cette grille, avec sa perte ; un projet d'avant D2 (grille) est découpé dans ses
+tuiles à l'ouverture. Le path tracer et les bakes raytracés (Occlusion, Lightmap, Bent Normal, Thickness) passent eux
+aussi par la grille, où une tuile a la résolution de sa case (projet 4096, 6 tuiles → grille 3 × 3 → 1365 pixels par
+tuile) : un bake raytracé est ensuite agrandi dans chaque tuile. Au-delà de 64 tuiles (objets `nom.1xxx` ajoutés ou
+renommés), les suivantes ne sont ni peintes ni exportées : message, et le préflight bloque l'export studio (patch
+udim-tile-limit).
 
 Les matériaux lisent les uv UDIM du fichier : un bruit procédural ou un dégradé est continu d'une tuile à sa voisine,
-comme dans le DCC, sur un calque partagé comme sur le calque d'une tuile (patch udim-material-uv ; en vue 2D, ils
-gardent l'espace de la case). Per UDIM Tile avec des jeux de textures : les maps de chaque jeu pour ses tuiles
+comme dans le DCC, sur un calque de toutes les tuiles comme sur le calque d'une tuile (patch udim-material-uv ; en vue
+2D, ceux de la tuile choisie dans le menu de la vue). Per UDIM Tile avec des jeux de textures : les maps de chaque jeu pour ses tuiles
 (`<fichier>_<jeu>_<canal>.<tuile>` à l'export upstream, `<atlas>` et `<UDIM>` dans un preset studio ; patch
 udim-export-sets). Renommer un objet dans l'onglet Meshes garde sa tuile : le champ ne montre que le nom devant
 `.1011`, et `torso` tapé pour `skin.1011` donne `torso.1011` (patch udim-tile-name).
@@ -935,16 +938,29 @@ char *studio_object_rename(int index, char *name);   // comme l'onglet Meshes : 
 int   studio_import_mesh(char *path, int split);     // remplace le maillage ; split : 0 objet, 1 matériau, 2 tuile UDIM, 3 matériau et tuile UDIM ; fini au retour
 int   studio_meshes_sort(void);                      // Edit > Sort de l'onglet Meshes : objets triés par nom
 int   studio_mesh_set_parent(char *child, char *parent); // champ Parent de l'onglet Meshes ; "" : aucun ; la liste est réordonnée
+int   studio_append_mesh(char *path, int split);     // ajoute un maillage à ceux du projet (Replace Existing décoché), calques gardés
 char *studio_layer_masks(void);                      // masques d'objet des calques : "Layer 1=0 Layer 2=5 filter=0" (bancs)
 int   studio_layer_new_mask(int white);              // masque blanc (1) ou noir (0) sur le calque courant, devenu courant
 int   studio_layer_select(int i);                    // calque courant : le i-ième de la pile (0 en bas)
-int   studio_layer_op(char *op);                     // "clear", "merge_down", "merge_group" (par le menu), "apply_mask" (masque courant), "undo", "redo" (bancs ; le lot D2 en ajoute)
+int   studio_layer_op(char *op);                     // "duplicate", "delete", "clear", "invert" (masque), "merge_down", "merge_group" (par le menu), "apply_mask" (masque courant), "undo", "redo", "sync" (bancs)
 char *studio_layer_tree(void);                       // pile de bas en haut, « nom<parent » : "Layer 1 | Layer 2<Group 3 | Group 3" (bancs)
 int   studio_layer_set_parent(int i, int group);     // met le calque i dans le groupe d'indice group (-1 : hors groupe), comme un glisser-déposer
 int   studio_layer_set_opacity(float opacity);       // opacité du calque ou du masque courant (0 à 1), comme son curseur Opacity, avec son pas d'historique
+int   studio_mesh_override(int object, int material); // onglet Meshes : matériau glissé sur le maillage (-1 : aucun), que le flatten dessine par-dessus les calques
+int   studio_colorid_mask(char *path, int rgb);      // outil ColorID, To Mask : carte d'id path, couleur piquée 0xRRGGBB ; indice du masque créé sur le calque courant
+int   studio_mask_export(int i, char *dir, char *name); // menu Export du masque i : dir/name.png, un fichier <name>.<tuile>.png par tuile d'un masque à tuiles ; 1 si fait
 int   studio_project_res(int px);                    // résolution Custom px × px, calques redimensionnés tout de suite
-char *studio_udim_pixel(int i, int channel, int tile, int x, int y); // texel « r g b a » (0 à 1) du calque i ; channel 0 base, 1 nor, 2 pack ; 9, 10, 11 base, nor, pack du flatten ; tile -1 (les tuiles et les autres canaux viennent avec le lot D2) ; « - » sinon
-int   studio_udim_fill(int i, int channel, int tile, float r, float g, float b, float a); // vide la texture channel du calque i à cette couleur (tile -1)
+char *studio_world_screen(float x, float y, float z); // position à l'écran (0..1) d'un point du monde, « x y » ; « - » derrière la caméra
+char *studio_rt_pixel(char *target, float x, float y, float z); // pixel « r g b a » d'une cible de rendu (gbuffer1...) là où le point se projette
+char *studio_udim_stats(void);                       // tuiles UDIM (lot D2) : « tile=1001 table=... stores=N partial=N contents=N » (bancs)
+char *studio_udim_layer(int i);                      // textures du calque i par tuile, « base=[...] nor=[...] pack=[...] » ; i < 0 : emplacement d'undo -1-i
+char *studio_udim_pixel(int i, int channel, int tile, int x, int y); // texel « r g b a » (0 à 1) d'une tuile du calque i ; channel 0 base, 1 nor, 2 pack ; 3, 4, 5 cartes UV, des triangles et de dilatation du calque courant ; 6 texture du nœud Bake Texture d'id i ; 7 i-ème aperçu de nœud du matériau ; 8 base de l'emplacement d'undo i ; 9, 10, 11 base, nor, pack du flatten de la tuile ; 12, 13, 14 ceux du flatten du raytrace (tuiles dans leurs cellules) ; « - » si la tuile n'est pas tenue
+int   studio_paint_option(char *name, int on);       // "camera_align", "ortho", "xray", "sym_x", "sym_y", "sym_z" ; "fill_type" prend la valeur (0 objet, 1 face, 2 angle, 3 îlot UV) ; 1 si fait (la symétrie est peinte par la frame, pas par script_paint_world)
+char *studio_udim_pick(char *what, float x, float y, float z); // pipettes UDIM au point du monde : "cursor" tuile sous le pinceau, "islands" carte des îlots UV, "picked" tuile, couleur et uv de la dernière pipette
+int   studio_clone_source(float xs, float ys, float zs, float xd, float yd, float zd); // source du clone vue depuis la destination, comme le Alt-clic ; 1 si les deux points sont devant la caméra
+int   studio_bake(ui_node_t *node, int type, int high_poly); // bouton Bake d'un nœud Bake Texture (type : bake_type_t) ; id du nœud, -1 si rien n'est lancé ; à lancer depuis update()
+char *studio_bake_state(void);                       // "baking", puis "done" une fois la texture rendue au nœud
+int   studio_udim_fill(int i, int channel, int tile, float r, float g, float b, float a); // vide une tuile du calque i à cette couleur
 char *studio_dialog_title(void);                     // titre de la boîte ouverte (« Unwrap Mesh »...), "" sans boîte
 char *studio_status_message(void);                   // message de la barre d'état, "" s'il est effacé
 void  studio_export_window_show(void);               // ouvre la fenêtre d'export, ou la ramène devant
@@ -1417,7 +1433,8 @@ int   studio_ocio_import_reconvert(void);        // recharge et reconvertit les 
 .tests/proc.sh [dossier de travail]    # processus (C1)
 .tests/obj.sh [dossier de travail]     # import OBJ (patches obj-global-indices, obj-float-exponent, udim-import) ; FUZZ=<n> pour le nombre de mutations
 .tests/fbx.sh [dossier de travail]     # import FBX (patch fbx-split) : splits = upstream, UDIM, matériaux, fuzz ; FUZZ=<n>
-.tests/udim_app.sh [dossier]           # UDIM dans l'app (lot D0) : import OBJ/FBX, refus, ajout, 70 tuiles (atlas, peinture, export), conseil de résolution, layer() par tuile
+.tests/udim_app.sh [dossier]           # UDIM dans l'app (lot D0) : import OBJ/FBX, refus, ajout, 70 tuiles (plafond des calques, peinture, export), conseil de résolution, layer() par tuile
+.tests/udim_tiles_app.sh [dossier]     # jeu de textures par tuile (lot D2, patch udim-tiles) : opérations de calque, undo, table qui change (D2a) ; peinture à la couture, undo par pas, ortho, xray, symétrie, cartes, pipettes, remplissages, clone, bakes par tuile et high poly (D2b, patch bake-derivative) ; flatten, fusions, masques multipliés, Merge Down d'un masque à opacité, groupes et undo de Merge Group, surcharges de matériau, ColorID → masque par tuile (D2c) ; export par tuile identique au bit près à un projet d'une tuile, Visible en grille, par objet, Selected, masque exporté par tuile (D2d) ; .arm : tuiles sauvées, blob en grille pour l'upstream, aller-retour au bit près, migration de l'ère atlas (D2e) ; raytrace : flatten en grille, path trace, bakes Lightmap et Occlusion rendus à chaque tuile (D2f)
 .tests/sg.sh [dossier de travail]     # ShotGrid hors app : sidecar (C2), noms des exports (B3), moteur (C3), publish (C4), mode dégradé et file d'attente (C5) ; Toolkit de .shotgrid/
 .tests/publish_app.sh [dossier]        # publish ShotGrid (C4) dans l'app, site simulé : op publish, fenêtre Publish (Qt offscreen), op publish en --background ; Versions de review ; copie publiée rouverte sans le dossier de travail ; PY=<python PySide6>
 .tests/sg_context_app.sh [dossier]     # contexte et mode dégradé ShotGrid (C5) dans l'app, site simulé : contexte gardé dans le .arm, site coupé (mode fichier, retour trouvé au repos), coupure en plein publish (file rejouée), journal d'audit, sonde en ligne et journal envoyé au site

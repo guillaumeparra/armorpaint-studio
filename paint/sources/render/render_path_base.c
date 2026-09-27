@@ -122,6 +122,7 @@ void render_path_base_commands(void (*draw_commands)(void)) {
 		return;
 	}
 
+	util_udim_sync(); // STUDIO-PATCH(udim-tiles): layers tiled by the rule, tiles following the table
 	render_path_base_begin();
 	render_path_paint_begin();
 	render_path_base_draw_split(draw_commands);
@@ -390,7 +391,7 @@ void render_path_base_draw_gbuffer() {
 	    2);
 	render_path_set_target("gbuffer0", additional, "main", GPU_CLEAR_NONE, 0, 0.0);
 	render_path_paint_bind_layers();
-	render_path_draw_meshes("mesh");
+	util_udim_draw_meshes("mesh"); // STUDIO-PATCH(udim-tiles): each object with its tile
 	render_path_paint_unbind_layers();
 	if (make_mesh_layer_pass_count > 1) {
 		render_path_base_make_gbuffer_copy_textures();
@@ -409,7 +410,7 @@ void render_path_base_draw_gbuffer() {
 			render_path_bind_target(string_tmp("gbuffer1%s", pong), "gbuffer1");
 			render_path_bind_target(string_tmp("gbuffer2%s", pong), "gbuffer2");
 			render_path_paint_bind_layers();
-			render_path_draw_meshes(string_tmp("mesh%d", i));
+			util_udim_draw_meshes(string_tmp("mesh%d", i)); // STUDIO-PATCH(udim-tiles)
 			render_path_paint_unbind_layers();
 		}
 		if (make_mesh_layer_pass_count % 2 == 0) {

@@ -861,26 +861,32 @@ static void layers_apply_mask_stack(slot_layer_t_array_t *masks) {
 	}
 }
 
-// STUDIO-PATCH(mask-multiply): the opacity of a mask put in its pixels, lerp(1, mask, opacity), then set to 1
+// STUDIO-PATCH(mask-multiply): the opacity of a mask put in its pixels, lerp(1, mask, opacity), then set to 1; on every
+// tile of a tiled mask (util_udim.c)
 static void layers_bake_mask_opacity(slot_layer_t *m) {
 	layers_make_temp_img();
-	draw_begin(layers_temp_image, false, 0);
-	draw_set_pipeline(pipes_copy);
-	draw_image(m->texpaint, 0, 0);
-	draw_set_pipeline(NULL);
-	draw_end();
+	i32 udim_n = util_udim_loop_begin(util_udim_tile_layer(m, true));
+	for (i32 udim_k = 0; udim_k < udim_n; ++udim_k) {
+		util_udim_loop_tile(udim_k);
+		draw_begin(layers_temp_image, false, 0);
+		draw_set_pipeline(pipes_copy);
+		draw_image(m->texpaint, 0, 0);
+		draw_set_pipeline(NULL);
+		draw_end();
 
-	render_target_t *empty_rt = any_map_get(render_path_render_targets, "empty_white");
-	_gpu_begin(m->texpaint, NULL, NULL, GPU_CLEAR_NONE, 0, 0.0);
-	gpu_set_pipeline(pipes_merge_mask);
-	gpu_set_texture(pipes_tex0_merge_mask, layers_temp_image);
-	gpu_set_texture(pipes_texa_merge_mask, empty_rt->_image);
-	gpu_set_float(pipes_opac_merge_mask, m->mask_opacity);
-	gpu_set_int(pipes_blending_merge_mask, BLEND_TYPE_MIX);
-	gpu_set_vertex_buffer(const_data_screen_aligned_vb);
-	gpu_set_index_buffer(const_data_screen_aligned_ib);
-	gpu_draw();
-	gpu_end();
+		render_target_t *empty_rt = any_map_get(render_path_render_targets, "empty_white");
+		_gpu_begin(m->texpaint, NULL, NULL, GPU_CLEAR_NONE, 0, 0.0);
+		gpu_set_pipeline(pipes_merge_mask);
+		gpu_set_texture(pipes_tex0_merge_mask, layers_temp_image);
+		gpu_set_texture(pipes_texa_merge_mask, empty_rt->_image);
+		gpu_set_float(pipes_opac_merge_mask, m->mask_opacity);
+		gpu_set_int(pipes_blending_merge_mask, BLEND_TYPE_MIX);
+		gpu_set_vertex_buffer(const_data_screen_aligned_vb);
+		gpu_set_index_buffer(const_data_screen_aligned_ib);
+		gpu_draw();
+		gpu_end();
+	}
+	util_udim_loop_end();
 	m->mask_opacity = 1.0;
 }
 
@@ -959,6 +965,9 @@ slot_layer_t *layers_merge_group(slot_layer_t *l) {
 
 void layers_merge_layer(slot_layer_t *l0, slot_layer_t *l1, bool use_mask) {
 	if (!l1->visible || slot_layer_is_group(l1)) {
+		return;
+	}
+	if (util_udim_merge_layer(l0, l1, use_mask)) { // STUDIO-PATCH(udim-tiles): tiled layer, merged tile by tile (calls back here)
 		return;
 	}
 
@@ -1098,7 +1107,9 @@ void layers_draw_mesh_materials() {
 	render_path_set_target("expa", additional, NULL, GPU_CLEAR_NONE, 0, 0.0);
 	render_path_bind_target("main", "gbufferD");
 	render_path_bind_target("texpaint_blend1", "paintmask");
-	render_path_draw_meshes("atlas");
+	if (!util_udim_draw_mesh_materials("atlas")) { // STUDIO-PATCH(udim-tiles): tiled layers, the objects of the tile of the context
+		render_path_draw_meshes("atlas");
+	}
 }
 
 static gpu_texture_t *layers_udim_a    = NULL;
@@ -1203,13 +1214,15 @@ slot_layer_t *layers_flatten(bool height_to_normal, slot_layer_t_array_t *layers
 		}
 
 		// Flattened layers are in shared atlas space
-		i32 tile_slot = layers_udim_tile_slot(l1);
+		// STUDIO-PATCH(udim-tiles): a tiled layer is flattened on the tile of the context, not remapped to a cell
+		i32 tile_slot = util_udim_layer_tiled(l1) ? -1 : layers_udim_tile_slot(l1);
 		if (tile_slot == -2) { // STUDIO-PATCH(udim-tile-limit): the layer of a tile without a slot has no cell in the atlas
 			continue;
 		}
 		if (tile_slot >= 0) {
 			l1 = layers_udim_remap(l1, l1masks != NULL ? &mask : NULL, tile_slot, false);
 		}
+		l1 = util_udim_flatten_layer(l1, l1masks != NULL ? &mask : NULL); // STUDIO-PATCH(udim-tiles): the raytracer's atlas
 
 		if (l1->paint_base) {
 			draw_begin(layers_temp_image, false, 0); // Copy to temp

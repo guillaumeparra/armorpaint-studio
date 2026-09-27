@@ -204,7 +204,8 @@ node_shader_context_t *make_paint_run_context(material_t *data, char *context_id
 	char *tex_pack_link = accum ? "_texpaint_pack_ref" : "_texpaint_pack_undo";
 
 	char *tuv  = g_context->layer->uv_map == 1 ? "input.tex1" : "input.tex";
-	bool  udim = !is_atlas && util_mesh_udim_layer(g_context->layer);
+	// STUDIO-PATCH(udim-tiles): a tiled layer is painted in the local uvs of the objects of each tile (util_udim.h)
+	bool  udim = !is_atlas && util_mesh_udim_layer(g_context->layer) && !util_udim_layer_should_tile(g_context->layer);
 	if (is_atlas || udim) {
 		node_shader_add_constant(kong, "float3 atlas_transform", "_atlas_transform");
 		node_shader_write_vert(kong, string_tmp("float2 atlas_uv = %s * constants.atlas_transform.z + constants.atlas_transform.xy;", tuv));

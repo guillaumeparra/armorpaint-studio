@@ -1,0 +1,933 @@
+diff --git a/base/sources/iron.h b/base/sources/iron.h
+index f03a9712d..b428265db 100644
+--- a/base/sources/iron.h
++++ b/base/sources/iron.h
+@@ -839,7 +839,14 @@ gpu_texture_t *gpu_create_texture_from_encoded_bytes(buffer_t *data, char *forma
+ 	return texture;
+ }
+ 
++// STUDIO-PATCH(udim-tiles): a texture about to be deleted, for the tile stores of paint/sources/util/util_udim.c
++// (see paint/plugins/external/PATCHES.md)
++void (*gpu_texture_deleting)(gpu_texture_t *texture) = NULL;
++
+ void gpu_delete_texture(gpu_texture_t *texture) {
++	if (gpu_texture_deleting != NULL) { // STUDIO-PATCH(udim-tiles)
++		gpu_texture_deleting(texture);
++	}
+ 	gpu_texture_destroy(texture);
+ 	if (texture->buffer != NULL) { // Cached by gpu_get_texture_pixels
+ 		free(texture->buffer->buffer);
+diff --git a/base/sources/iron_gpu.c b/base/sources/iron_gpu.c
+index fd2b003d8..a6056aecf 100644
+--- a/base/sources/iron_gpu.c
++++ b/base/sources/iron_gpu.c
+@@ -33,7 +33,14 @@ void gpu_init(int depth_buffer_bits, bool vsync) {
+ 	gpu_constant_buffer_lock(&constant_buffer, 0, GPU_CONSTANT_BUFFER_SIZE);
+ }
+ 
++// STUDIO-PATCH(udim-tiles): render targets about to be drawn to, for the tile stores of paint/sources/util/util_udim.c
++// (see paint/plugins/external/PATCHES.md)
++void (*gpu_target_beginning)(gpu_texture_t **targets, int count) = NULL;
++
+ void gpu_begin(gpu_texture_t **targets, int count, gpu_texture_t *depth_buffer, gpu_clear_t flags, unsigned color, float depth) {
++	if (gpu_target_beginning != NULL && targets != NULL && !gpu_in_use) { // STUDIO-PATCH(udim-tiles)
++		gpu_target_beginning(targets, count);
++	}
+ 	if (gpu_in_use && !gpu_thrown) {
+ 		gpu_thrown = true;
+ 		iron_log("End before you begin");
+diff --git a/base/sources/iron_gpu.h b/base/sources/iron_gpu.h
+index 35362ac9d..c358f5a04 100644
+--- a/base/sources/iron_gpu.h
++++ b/base/sources/iron_gpu.h
+@@ -254,6 +254,7 @@ uint32_t gpu_vertex_struct_size(gpu_vertex_structure_t *s);
+ uint32_t gpu_texture_format_size(gpu_texture_format_t format);
+ 
+ extern bool            gpu_in_use;
++extern void (*gpu_target_beginning)(gpu_texture_t **targets, int count); // STUDIO-PATCH(udim-tiles)
+ extern uint32_t        gpu_buffer_versions;
+ extern gpu_texture_t  *current_textures[GPU_MAX_TEXTURES];
+ extern gpu_texture_t  *current_render_targets[8];
+diff --git a/paint/sources/history.c b/paint/sources/history.c
+index c28c0a38e..2c5aea94f 100644
+--- a/paint/sources/history.c
++++ b/paint/sources/history.c
+@@ -606,6 +606,9 @@ slot_layer_t *history_undo_slot(i32 i) {
+ }
+ 
+ void history_copy_to_undo(i32 from_id, i32 to_id, bool is_mask) {
++	if (util_udim_copy_to_undo(from_id, to_id, is_mask)) { // STUDIO-PATCH(udim-tiles): tiled layer, saved tile by tile
++		return;
++	}
+ 	char *to_id_s   = i32_to_string(to_id);
+ 	char *from_id_s = i32_to_string(from_id);
+ 	if (history_undo_layers != NULL && to_id < history_undo_layers->length) {
+@@ -1027,7 +1030,9 @@ void history_edit_nodes(ui_node_canvas_t *canvas, i32 canvas_type, i32 canvas_gr
+ 
+ void history_paint() {
+ 	bool is_mask = slot_layer_is_mask(g_context->layer);
+-	history_copy_to_undo(g_context->layer->id, history_undo_i, is_mask);
++	if (!util_udim_paint_undo(g_context->layer, history_undo_i, is_mask)) { // STUDIO-PATCH(udim-tiles): tiles saved when first drawn to
++		history_copy_to_undo(g_context->layer->id, history_undo_i, is_mask);
++	}
+ 
+ 	history_push_undo    = false;
+ 	history_step_t *step = history_push(HISTORY_ACTION_PAINT);
+diff --git a/paint/sources/nodes_material/bake_texture_node.c b/paint/sources/nodes_material/bake_texture_node.c
+index d3a6873b5..a228affa4 100644
+--- a/paint/sources/nodes_material/bake_texture_node.c
++++ b/paint/sources/nodes_material/bake_texture_node.c
+@@ -6,6 +6,9 @@ static render_target_t *_bake_texture_node_rt;
+ static int              _bake_texture_node_bits;
+ 
+ static void bake_texture_node_clear(gpu_texture_t *t) {
++	if (util_udim_clear(t, 0xff000000)) { // STUDIO-PATCH(udim-tiles): the bake of a tiled layer, every tile
++		return;
++	}
+ 	draw_begin(t, true, 0xff000000);
+ 	draw_end();
+ }
+@@ -24,6 +27,7 @@ static void bake_texture_node_check_result(ui_node_t *node) {
+ 		gpu_texture_t   *_image  = rt->_image;
+ 		rt->format               = "RGBA32";
+ 		rt->_image               = gpu_create_render_target(rt->width, rt->height, GPU_TEXTURE_FORMAT_RGBA32);
++		util_udim_tile_like(rt->_image, _image); // STUDIO-PATCH(udim-tiles): the bake of a tiled layer, every tile
+ 		draw_begin(rt->_image, false, 0);
+ 		draw_scaled_image(_image, 0, 0, _image->width, _image->height);
+ 		draw_end();
+@@ -252,6 +256,14 @@ static char *bake_texture_node_vector(ui_node_t *node, ui_node_socket_t *socket)
+ 	return string_tmp("%s.rgb", texstore);
+ }
+ 
++// STUDIO-PATCH(udim-tiles): the Bake button of a node, for the scripts of the benches (studio_bake,
++// paint/plugins/external/studio_atlas.c)
++void bake_texture_node_bake(ui_node_t *node, i32 bake_type) {
++	bake_texture_node_run(node, bake_type,
++	                      bake_type == BAKE_TYPE_OCCLUSION || bake_type == BAKE_TYPE_LIGHTMAP || bake_type == BAKE_TYPE_BENT_NORMAL ||
++	                          bake_type == BAKE_TYPE_THICKNESS);
++}
++
+ void bake_texture_node_init() {
+ 	ui_node_t *bake_texture_node_def = ALLOC_INIT(ui_node_t, {.id      = 0,
+ 	                                                          .name    = _tr("Bake Texture"),
+diff --git a/paint/sources/render/make_clone.c b/paint/sources/render/make_clone.c
+index 6297be904..be88377ae 100644
+--- a/paint/sources/render/make_clone.c
++++ b/paint/sources/render/make_clone.c
+@@ -8,6 +8,10 @@ void make_clone_run(node_shader_t *kong) {
+ 	                             "constants.clone_delta.y) * constants.gbuffer_size.y));");
+ 	node_shader_write_frag(kong, "float4 tex_coord_inp4 = gbuffer2[tex_coord_coord];");
+ 	node_shader_write_frag(kong, "float2 tex_coord_inp = tex_coord_inp4.ba;");
++	if (util_udim_layer_should_tile(g_context->layer)) { // STUDIO-PATCH(udim-tiles): the source on another tile is not bound, nothing painted
++		node_shader_add_constant(kong, "float udim_tile_code", "_udim_tile_code");
++		node_shader_write_frag(kong, "if (tex_coord_inp4.r != constants.udim_tile_code) { discard; }");
++	}
+ 
+ 	node_shader_write_frag(kong, "float4 texpaint_undo_sample = sample_lod(texpaint_undo, sampler_linear, tex_coord_inp, 0.0);");
+ 	node_shader_write_frag(kong, "float4 texpaint_pack_undo_sample = sample_lod(texpaint_pack_undo, sampler_linear, tex_coord_inp, 0.0);");
+diff --git a/paint/sources/render/make_material.c b/paint/sources/render/make_material.c
+index 05784437e..3c5c5929d 100644
+--- a/paint/sources/render/make_material.c
++++ b/paint/sources/render/make_material.c
+@@ -252,21 +252,28 @@ void make_material_bake_node_preview(ui_node_t *node, ui_node_canvas_t *group, u
+ 		parser_material_start_node       = NULL;
+ 		parser_material_start_group      = NULL;
+ 		parser_material_start_parents    = NULL;
+-		g_context->pdirty                = 1;
+-		render_path_paint_use_live_layer(true);
+-		render_path_paint_commands_paint(false);
+-		render_path_paint_dilate(true, false);
+-		render_path_paint_use_live_layer(false);
+-		g_context->pdirty = 0;
++		// STUDIO-PATCH(udim-tiles): a tiled layer, the curvature of each tile in its tile of the preview (util_udim.h)
++		i32 udim_n = util_udim_loop_begin(util_udim_tile_preview(image));
++		for (i32 udim_k = 0; udim_k < udim_n; ++udim_k) {
++			util_udim_loop_tile(udim_k);
++			util_udim_tile_preview(image);
++			g_context->pdirty = 1;
++			render_path_paint_use_live_layer(true);
++			render_path_paint_commands_paint(false);
++			render_path_paint_dilate(true, false);
++			render_path_paint_use_live_layer(false);
++			g_context->pdirty = 0;
++
++			any_map_t       *rts           = render_path_render_targets;
++			render_target_t *texpaint_live = any_map_get(rts, "texpaint_live");
++			draw_begin(image, false, 0);
++			draw_image(texpaint_live->_image, 0, 0);
++			draw_end();
++		}
++		util_udim_loop_end();
+ 
+ 		g_context->tool      = _tool;
+ 		g_context->bake_type = _bake_type;
+-
+-		any_map_t       *rts           = render_path_render_targets;
+-		render_target_t *texpaint_live = any_map_get(rts, "texpaint_live");
+-		draw_begin(image, false, 0);
+-		draw_image(texpaint_live->_image, 0, 0);
+-		draw_end();
+ 	}
+ }
+ 
+diff --git a/paint/sources/render/make_mesh.c b/paint/sources/render/make_mesh.c
+index 96b98472f..a53a70acf 100644
+--- a/paint/sources/render/make_mesh.c
++++ b/paint/sources/render/make_mesh.c
+@@ -139,14 +139,8 @@ node_shader_context_t *make_mesh_run(material_t *data, i32 layer_pass) {
+ 		node_shader_write_attrib_frag(kong, "float2 tex_coord1 = input.tex_coord1;");
+ 	}
+ 
+-	// Shared layers of udim tiles live in atlas space
+-	if (util_mesh_udim_active()) {
+-		node_shader_add_out(kong, "float2 tex_coord_atlas");
+-		node_shader_add_constant(kong, "float3 atlas_transform", "_atlas_transform");
+-		node_shader_write_vert(kong, "output.tex_coord_atlas = input.tex * constants.atlas_transform.z + constants.atlas_transform.xy;");
+-		node_shader_write_attrib_frag(kong, "float2 tex_coord_atlas = input.tex_coord_atlas;");
+-	}
+-	char *tex_coord_layer = util_mesh_udim_layer(g_context->layer) ? "tex_coord_atlas" : "tex_coord";
++	// STUDIO-PATCH(udim-tiles): the udim layers have a texture per tile, each object drawn with its tile (util_udim.h)
++	char *tex_coord_layer = "tex_coord";
+ 
+ 	kong->frag_out = "float4[3]";
+ 	kong->frag_n   = true;
+@@ -316,7 +310,7 @@ node_shader_context_t *make_mesh_run(material_t *data, i32 layer_pass) {
+ 				}
+ 			}
+ 
+-			char *tex_coord = l->uv_map == 1 ? "tex_coord1" : util_mesh_udim_layer(l) ? "tex_coord_atlas" : "tex_coord";
++			char *tex_coord = l->uv_map == 1 ? "tex_coord1" : "tex_coord"; // STUDIO-PATCH(udim-tiles)
+ 			node_shader_add_texture(kong, string_tmp("texpaint%s", i32_to_string(l->id)), NULL);
+ 			node_shader_write_frag(kong, string_tmp("texpaint_sample = sample_lod(texpaint%s, sampler_linear, %s, 0.0);", i32_to_string(l->id), tex_coord));
+ 			node_shader_write_frag(kong, "texpaint_opac = texpaint_sample.a;");
+@@ -663,7 +657,9 @@ node_shader_context_t *make_mesh_run(material_t *data, i32 layer_pass) {
+ 		node_shader_write_frag(kong, "output[0] = float4(n.xy, roughness, pack_f32_i16(metallic, uint(float(int(matid * 255.0)) % float(3))));");
+ 	}
+ 
+-	node_shader_write_frag(kong, string_tmp("output[2] = float4(0.0, 0.0, %s.xy);", tex_coord_layer));
++	// STUDIO-PATCH(udim-tiles): the tile of the object, read under the brush by the pickers (util_udim.h)
++	node_shader_add_constant(kong, "float udim_tile_code", "_udim_tile_code");
++	node_shader_write_frag(kong, string_tmp("output[2] = float4(constants.udim_tile_code, 0.0, %s.xy);", tex_coord_layer));
+ 
+ 	parser_material_finalize(con_mesh);
+ 
+diff --git a/paint/sources/render/make_paint.c b/paint/sources/render/make_paint.c
+index e9848e69c..28479d968 100644
+--- a/paint/sources/render/make_paint.c
++++ b/paint/sources/render/make_paint.c
+@@ -204,7 +204,8 @@ node_shader_context_t *make_paint_run_context(material_t *data, char *context_id
+ 	char *tex_pack_link = accum ? "_texpaint_pack_ref" : "_texpaint_pack_undo";
+ 
+ 	char *tuv  = g_context->layer->uv_map == 1 ? "input.tex1" : "input.tex";
+-	bool  udim = !is_atlas && util_mesh_udim_layer(g_context->layer);
++	// STUDIO-PATCH(udim-tiles): a tiled layer is painted in the local uvs of the objects of each tile (util_udim.h)
++	bool  udim = !is_atlas && util_mesh_udim_layer(g_context->layer) && !util_udim_layer_should_tile(g_context->layer);
+ 	if (is_atlas || udim) {
+ 		node_shader_add_constant(kong, "float3 atlas_transform", "_atlas_transform");
+ 		node_shader_write_vert(kong, string_tmp("float2 atlas_uv = %s * constants.atlas_transform.z + constants.atlas_transform.xy;", tuv));
+diff --git a/paint/sources/render/make_texcoord.c b/paint/sources/render/make_texcoord.c
+index 1cb805621..7d72658db 100644
+--- a/paint/sources/render/make_texcoord.c
++++ b/paint/sources/render/make_texcoord.c
+@@ -130,6 +130,16 @@ void make_texcoord_run(node_shader_t *kong, bool is_atlas) {
+ 		if (g_context->layer->uv_map == 1) {
+ 			node_shader_write_vert(kong, string_tmp("output.tex_coord = input.tex1 * %s;", scale));
+ 		}
++		else if (!is_atlas && util_udim_layer_should_tile(g_context->layer)) {
++			// STUDIO-PATCH(udim-tiles): texture per tile, materials in the UDIM space; bake in the uvs of the tile
++			if (g_context->tool == TOOL_TYPE_BAKE) {
++				node_shader_write_vert(kong, string_tmp("output.tex_coord = input.tex * %s;", scale));
++			}
++			else {
++				node_shader_add_constant(kong, "float2 udim_tile", "_udim_tile");
++				node_shader_write_vert(kong, string_tmp("output.tex_coord = (input.tex + constants.udim_tile) * %s;", scale));
++			}
++		}
+ 		else if (!is_atlas && util_mesh_udim_layer(g_context->layer)) {
+ 			// STUDIO-PATCH(udim-material-uv): materials in the UDIM space, continuous from a tile to its neighbours (upstream
+ 			// repeated them per tile); bake reads layer textures in atlas space
+diff --git a/paint/sources/render/render_path_base.c b/paint/sources/render/render_path_base.c
+index b3942f801..4142c28e9 100644
+--- a/paint/sources/render/render_path_base.c
++++ b/paint/sources/render/render_path_base.c
+@@ -122,6 +122,7 @@ void render_path_base_commands(void (*draw_commands)(void)) {
+ 		return;
+ 	}
+ 
++	util_udim_sync(); // STUDIO-PATCH(udim-tiles): layers tiled by the rule, tiles following the table
+ 	render_path_base_begin();
+ 	render_path_paint_begin();
+ 	render_path_base_draw_split(draw_commands);
+@@ -390,7 +391,7 @@ void render_path_base_draw_gbuffer() {
+ 	    2);
+ 	render_path_set_target("gbuffer0", additional, "main", GPU_CLEAR_NONE, 0, 0.0);
+ 	render_path_paint_bind_layers();
+-	render_path_draw_meshes("mesh");
++	util_udim_draw_meshes("mesh"); // STUDIO-PATCH(udim-tiles): each object with its tile
+ 	render_path_paint_unbind_layers();
+ 	if (make_mesh_layer_pass_count > 1) {
+ 		render_path_base_make_gbuffer_copy_textures();
+@@ -409,7 +410,7 @@ void render_path_base_draw_gbuffer() {
+ 			render_path_bind_target(string_tmp("gbuffer1%s", pong), "gbuffer1");
+ 			render_path_bind_target(string_tmp("gbuffer2%s", pong), "gbuffer2");
+ 			render_path_paint_bind_layers();
+-			render_path_draw_meshes(string_tmp("mesh%d", i));
++			util_udim_draw_meshes(string_tmp("mesh%d", i)); // STUDIO-PATCH(udim-tiles)
+ 			render_path_paint_unbind_layers();
+ 		}
+ 		if (make_mesh_layer_pass_count % 2 == 0) {
+diff --git a/paint/sources/render/render_path_paint.c b/paint/sources/render/render_path_paint.c
+index 014dae6..e9b0c57 100644
+--- a/paint/sources/render/render_path_paint.c
++++ b/paint/sources/render/render_path_paint.c
+@@ -244,6 +244,8 @@ void render_path_paint_commands_paint(bool dilation) {
+ 		ui_header_handle->redraws = 2;
+ 	}
+ 	else if (g_context->tool == TOOL_TYPE_PICKER || g_context->tool == TOOL_TYPE_MATERIAL) {
++		// STUDIO-PATCH(udim-tiles): the tile under the brush, shown for the layer or mask picker of a tiled layer
++		i32 udim_saved = util_udim_pick_begin(!g_context->pick_pos_nor_tex);
+ 		if (g_context->pick_pos_nor_tex) {
+ 			if (g_context->paint2d) {
+ 				string_array_t *additional = any_array_create_from_raw(
+@@ -303,7 +305,7 @@ void render_path_paint_commands_paint(bool dilation) {
+ 				    3);
+ 				render_path_set_target("texpaint_picker", additional, NULL, GPU_CLEAR_NONE, 0, 0.0);
+ 				render_path_bind_target("gbuffer2", "gbuffer2");
+-				bool use_live_layer = g_context->tool == TOOL_TYPE_MATERIAL;
++				bool use_live_layer = g_context->tool == TOOL_TYPE_MATERIAL && !util_udim_layer_tiled(g_context->layer); // STUDIO-PATCH(udim-tiles)
+ 				if (use_live_layer) {
+ 					render_path_paint_use_live_layer(true);
+ 				}
+@@ -315,6 +317,7 @@ void render_path_paint_commands_paint(bool dilation) {
+ 					render_path_paint_use_live_layer(false);
+ 				}
+ 			}
++			util_udim_set_tile(udim_saved); // STUDIO-PATCH(udim-tiles)
+ 			ui_header_handle->redraws         = 2;
+ 			ui_base_hwnds->buffer[2]->redraws = 2;
+ 
+@@ -457,6 +460,8 @@ void render_path_paint_commands_paint(bool dilation) {
+ 			render_path_base_draw_gbuffer();
+ 		}
+ 	}
++	else if (util_udim_paint_tiles(dilation)) { // STUDIO-PATCH(udim-tiles): tiled layer, painted tile by tile (calls back here)
++	}
+ 	else {
+ 		char *texpaint = string_tmp("texpaint%d", tid);
+ 		if (g_context->tool == TOOL_TYPE_BAKE && g_context->brush_time == sys_delta()) {
+@@ -644,7 +649,7 @@ void render_path_paint_commands_live_brush() {
+ 		return;
+ 	}
+ 
+-	if (render_path_paint_live_layer_locked) {
++	if (render_path_paint_live_layer_locked || util_udim_layer_tiled(g_context->layer)) { // STUDIO-PATCH(udim-tiles): no live layer (D2)
+ 		return;
+ 	}
+ 
+@@ -1015,6 +1020,7 @@ void render_path_paint_draw() {
+ 
+ 	if (g_context->brush_blend_dirty) {
+ 		g_context->brush_blend_dirty = false;
++		util_udim_blend_reset(); // STUDIO-PATCH(udim-tiles): blend of each tile painted freed
+ 		render_path_set_target("texpaint_blend0", NULL, NULL, GPU_CLEAR_COLOR, 0x00000000, 0.0);
+ 		render_path_set_target("texpaint_blend1", NULL, NULL, GPU_CLEAR_COLOR, 0x00000000, 0.0);
+ 		render_path_end();
+@@ -1155,7 +1161,7 @@ void render_path_paint_restore_plane_mesh() {
+ void render_path_paint_bind_layers() {
+ 	bool is_live          = g_config->brush_live && render_path_paint_live_layer_drawn > 0;
+ 	bool is_material_tool = g_context->tool == TOOL_TYPE_MATERIAL;
+-	if (is_live || is_material_tool) {
++	if ((is_live || is_material_tool) && !util_udim_layer_tiled(g_context->layer)) { // STUDIO-PATCH(udim-tiles): no live layer (D2)
+ 		render_path_paint_use_live_layer(true);
+ 	}
+ 
+@@ -1185,12 +1191,15 @@ void render_path_paint_bind_layers() {
+ void render_path_paint_unbind_layers() {
+ 	bool is_live          = g_config->brush_live && render_path_paint_live_layer_drawn > 0;
+ 	bool is_material_tool = g_context->tool == TOOL_TYPE_MATERIAL;
+-	if (is_live || is_material_tool) {
++	if ((is_live || is_material_tool) && !util_udim_layer_tiled(g_context->layer)) { // STUDIO-PATCH(udim-tiles)
+ 		render_path_paint_use_live_layer(false);
+ 	}
+ }
+ 
+ void render_path_paint_dilate(bool base, bool nor_pack) {
++	if (util_udim_dilate(base, nor_pack)) { // STUDIO-PATCH(udim-tiles): tiled layer, the tiles painted one by one
++		return;
++	}
+ 	if (g_config->dilate_radius > 0 && !g_context->paint2d) {
+ 		util_uv_cache_dilate_map();
+ 		layers_make_temp_img();
+diff --git a/paint/sources/render/render_path_raytrace.c b/paint/sources/render/render_path_raytrace.c
+index ddf6046c0..028539650 100644
+--- a/paint/sources/render/render_path_raytrace.c
++++ b/paint/sources/render/render_path_raytrace.c
+@@ -437,7 +437,7 @@ void render_path_raytrace_commands(bool use_live_layer) {
+ 			render_path_raytrace_build_env_cdf(scene_world->envmap);
+ 		}
+ 
+-		slot_layer_t *l = layers_flatten(true, NULL);
++		slot_layer_t *l = util_udim_flatten_atlas(true); // STUDIO-PATCH(udim-tiles): tiled layers composed into their cells
+ 		gpu_raytrace_set_textures(l->texpaint, l->texpaint_nor, l->texpaint_pack, saved_envmap, bnoise_sobol, bnoise_scramble, bnoise_rank,
+ 		                          render_path_raytrace_env_cdf);
+ 	}
+@@ -456,7 +456,7 @@ void render_path_raytrace_commands(bool use_live_layer) {
+ 				layer->texpaint_pack = render_path_paint_live_layer->texpaint_pack;
+ 			}
+ 		}
+-		layers_flatten(true, NULL);
++		util_udim_flatten_atlas(true); // STUDIO-PATCH(udim-tiles): tiled layers composed into their cells
+ 		if (is_live) {
+ 			layer->texpaint      = _texpaint;
+ 			layer->texpaint_nor  = _texpaint_nor;
+diff --git a/paint/sources/render/render_path_raytrace_bake.c b/paint/sources/render/render_path_raytrace_bake.c
+index 93a642603..85340d9c5 100644
+--- a/paint/sources/render/render_path_raytrace_bake.c
++++ b/paint/sources/render/render_path_raytrace_bake.c
+@@ -115,7 +115,7 @@ bool render_path_raytrace_bake_commands(void (*parse_paint_material)(bool)) {
+ 		if (g_context->bake_type == BAKE_TYPE_LIGHTMAP) {
+ 			gpu_texture_t *_texpaint   = g_context->layer->texpaint;
+ 			g_context->layer->texpaint = bake_texture_node_texpaint;
+-			slot_layer_t *flat         = layers_flatten(true, NULL);
++			slot_layer_t *flat         = util_udim_flatten_atlas(true); // STUDIO-PATCH(udim-tiles): tiled layers composed into their cells
+ 			tex2                       = flat->texpaint;
+ 			g_context->layer->texpaint = _texpaint;
+ 		}
+@@ -149,9 +149,11 @@ bool render_path_raytrace_bake_commands(void (*parse_paint_material)(bool)) {
+ 
+ 		i32   id          = g_context->layer->id;
+ 		char *texpaint_id = string("texpaint%d", id);
+-		render_path_set_target(texpaint_id, NULL, NULL, GPU_CLEAR_NONE, 0, 0.0);
+-		render_path_bind_target("baketex2", "tex");
+-		render_path_draw_shader("Scene/copy_pass/copy_pass");
++		if (!util_udim_bake_copy(texpaint_id, "baketex2")) { // STUDIO-PATCH(udim-tiles): tiled layer, each tile from its cell
++			render_path_set_target(texpaint_id, NULL, NULL, GPU_CLEAR_NONE, 0, 0.0);
++			render_path_bind_target("baketex2", "tex");
++			render_path_draw_shader("Scene/copy_pass/copy_pass");
++		}
+ 
+ #ifdef IRON_METAL
+ 		i32 samples_per_frame = 4;
+diff --git a/paint/sources/slots/slot_layer.c b/paint/sources/slots/slot_layer.c
+index c7c5fad2a..b7d3df10c 100644
+--- a/paint/sources/slots/slot_layer.c
++++ b/paint/sources/slots/slot_layer.c
+@@ -195,6 +195,9 @@ void slot_layer_unload(slot_layer_t *raw) {
+ }
+ 
+ void slot_layer_swap(slot_layer_t *raw, slot_layer_t *other) {
++	if (util_udim_swap_layers(raw, other)) { // STUDIO-PATCH(udim-tiles): tiled layer and undo slot, swapped tile by tile
++		return;
++	}
+ 	if ((slot_layer_is_layer(raw) || slot_layer_is_mask(raw)) && (slot_layer_is_layer(other) || slot_layer_is_mask(other))) {
+ 		render_target_t *rt0     = any_map_get(render_path_render_targets, string("texpaint%s", raw->ext));
+ 		render_target_t *rt1     = any_map_get(render_path_render_targets, string("texpaint%s", other->ext));
+@@ -238,23 +241,30 @@ void slot_layer_swap(slot_layer_t *raw, slot_layer_t *other) {
+ }
+ 
+ void slot_layer_clear(slot_layer_t *raw, i32 base_color, gpu_texture_t *base_image, f32 occlusion, f32 roughness, f32 metallic) {
+-	// Base
+-	_gpu_begin(raw->texpaint, NULL, NULL, GPU_CLEAR_COLOR, base_color, 0.0);
+-	gpu_end();
+-	if (base_image != NULL) {
+-		draw_begin(raw->texpaint, false, 0);
+-		draw_scaled_image(base_image, 0, 0, raw->texpaint->width, raw->texpaint->height);
+-		draw_end();
+-	}
++	// STUDIO-PATCH(udim-tiles): every tile, see paint/sources/util/util_udim.h
++	i32 udim_n = util_udim_loop_begin(util_udim_tile_layer(raw, false));
++	for (i32 udim_k = 0; udim_k < udim_n; ++udim_k) {
++		util_udim_loop_tile(udim_k);
+ 
+-	if (slot_layer_is_layer(raw)) {
+-		// Nor
+-		_gpu_begin(raw->texpaint_nor, NULL, NULL, GPU_CLEAR_COLOR, color_from_floats(0.5, 0.5, 1.0, 0.0), 0.0);
+-		gpu_end();
+-		// Occ, rough, met
+-		_gpu_begin(raw->texpaint_pack, NULL, NULL, GPU_CLEAR_COLOR, color_from_floats(occlusion, roughness, metallic, 0.0), 0.0);
++		// Base
++		_gpu_begin(raw->texpaint, NULL, NULL, GPU_CLEAR_COLOR, base_color, 0.0);
+ 		gpu_end();
++		if (base_image != NULL) {
++			draw_begin(raw->texpaint, false, 0);
++			draw_scaled_image(base_image, 0, 0, raw->texpaint->width, raw->texpaint->height);
++			draw_end();
++		}
++
++		if (slot_layer_is_layer(raw)) {
++			// Nor
++			_gpu_begin(raw->texpaint_nor, NULL, NULL, GPU_CLEAR_COLOR, color_from_floats(0.5, 0.5, 1.0, 0.0), 0.0);
++			gpu_end();
++			// Occ, rough, met
++			_gpu_begin(raw->texpaint_pack, NULL, NULL, GPU_CLEAR_COLOR, color_from_floats(occlusion, roughness, metallic, 0.0), 0.0);
++			gpu_end();
++		}
+ 	}
++	util_udim_loop_end();
+ 
+ 	g_context->layer_preview_dirty = true;
+ 	g_context->ddirty              = 3;
+@@ -262,22 +272,29 @@ void slot_layer_clear(slot_layer_t *raw, i32 base_color, gpu_texture_t *base_ima
+ }
+ 
+ void slot_layer_invert_mask(slot_layer_t *raw) {
+-	gpu_texture_t *inverted = gpu_create_render_target(raw->texpaint->width, raw->texpaint->height, GPU_TEXTURE_FORMAT_RGBA32);
+-	draw_begin(inverted, false, 0);
+-	draw_set_pipeline(pipes_invert_mask);
+-	draw_image(raw->texpaint, 0, 0);
+-	draw_set_pipeline(NULL);
+-	draw_end();
+-	gpu_texture_t *_texpaint = raw->texpaint;
+-	gpu_delete_texture(_texpaint);
+-	render_target_t *rt = any_map_get(render_path_render_targets, string("texpaint%d", raw->id));
+-	raw->texpaint = rt->_image     = inverted;
++	// STUDIO-PATCH(udim-tiles): every tile, the inverted texture put in place of the old one (the view keeps its pointer),
++	// see paint/sources/util/util_udim.h
++	i32 udim_n = util_udim_loop_begin(util_udim_tile_layer(raw, true));
++	for (i32 udim_k = 0; udim_k < udim_n; ++udim_k) {
++		util_udim_loop_tile(udim_k);
++		gpu_texture_t *inverted = gpu_create_render_target(raw->texpaint->width, raw->texpaint->height, GPU_TEXTURE_FORMAT_RGBA32);
++		draw_begin(inverted, false, 0);
++		draw_set_pipeline(pipes_invert_mask);
++		draw_image(raw->texpaint, 0, 0);
++		draw_set_pipeline(NULL);
++		draw_end();
++		util_udim_replace(raw->texpaint, inverted);
++	}
++	util_udim_loop_end();
+ 	g_context->layer_preview_dirty = true;
+ 	g_context->ddirty              = 3;
+ 	g_context->rtdirty             = 1;
+ }
+ 
+ void layers_apply_mask(slot_layer_t *l, slot_layer_t *m) {
++	if (util_udim_apply_mask(l, m)) { // STUDIO-PATCH(udim-tiles): tiled layer, mask applied tile by tile (calls back here)
++		return;
++	}
+ 	if (!slot_layer_is_layer(l) || !slot_layer_is_mask(m)) {
+ 		return;
+ 	}
+@@ -330,36 +347,43 @@ slot_layer_t *slot_layer_duplicate(slot_layer_t *raw) {
+ 	array_insert(layers, i, l);
+ 	tab_stages_add_layer(l->name);
+ 
+-	if (slot_layer_is_layer(raw)) {
+-		draw_begin(l->texpaint, false, 0);
+-		draw_set_pipeline(pipes_copy);
+-		draw_image(raw->texpaint, 0, 0);
+-		draw_set_pipeline(NULL);
+-		draw_end();
++	// STUDIO-PATCH(udim-tiles): every tile, see paint/sources/util/util_udim.h
++	i32 udim_n = util_udim_loop_begin(util_udim_layer_tiled(raw) && util_udim_tile_layer(l, false));
++	for (i32 udim_k = 0; udim_k < udim_n; ++udim_k) {
++		util_udim_loop_tile(udim_k);
+ 
+-		if (l->texpaint_nor != NULL) {
+-			draw_begin(l->texpaint_nor, false, 0);
++		if (slot_layer_is_layer(raw)) {
++			draw_begin(l->texpaint, false, 0);
+ 			draw_set_pipeline(pipes_copy);
+-			draw_image(raw->texpaint_nor, 0, 0);
++			draw_image(raw->texpaint, 0, 0);
+ 			draw_set_pipeline(NULL);
+ 			draw_end();
+-		}
+ 
+-		if (l->texpaint_pack != NULL) {
+-			draw_begin(l->texpaint_pack, false, 0);
+-			draw_set_pipeline(pipes_copy);
+-			draw_image(raw->texpaint_pack, 0, 0);
++			if (l->texpaint_nor != NULL) {
++				draw_begin(l->texpaint_nor, false, 0);
++				draw_set_pipeline(pipes_copy);
++				draw_image(raw->texpaint_nor, 0, 0);
++				draw_set_pipeline(NULL);
++				draw_end();
++			}
++
++			if (l->texpaint_pack != NULL) {
++				draw_begin(l->texpaint_pack, false, 0);
++				draw_set_pipeline(pipes_copy);
++				draw_image(raw->texpaint_pack, 0, 0);
++				draw_set_pipeline(NULL);
++				draw_end();
++			}
++		}
++		else if (slot_layer_is_mask(raw)) {
++			draw_begin(l->texpaint, false, 0);
++			draw_set_pipeline(pipes_copy8);
++			draw_image(raw->texpaint, 0, 0);
+ 			draw_set_pipeline(NULL);
+ 			draw_end();
+ 		}
+ 	}
+-	else if (slot_layer_is_mask(raw)) {
+-		draw_begin(l->texpaint, false, 0);
+-		draw_set_pipeline(pipes_copy8);
+-		draw_image(raw->texpaint, 0, 0);
+-		draw_set_pipeline(NULL);
+-		draw_end();
+-	}
++	util_udim_loop_end();
+ 
+ 	if (l->texpaint_preview != NULL) {
+ 		draw_begin(l->texpaint_preview, true, 0x00000000);
+@@ -409,7 +433,9 @@ void slot_layer_resize_and_set_bits(slot_layer_t *raw) {
+ 	i32        res_y = config_get_texture_res_y();
+ 	any_map_t *rts   = render_path_render_targets;
+ 
+-	if (slot_layer_is_layer(raw)) {
++	if (util_udim_resize_layer(raw, res_x, res_y)) { // STUDIO-PATCH(udim-tiles): tiled layer, every tile resized in place
++	}
++	else if (slot_layer_is_layer(raw)) {
+ 		gpu_texture_format_t format = base_bits == TEXTURE_BITS_BITS8    ? GPU_TEXTURE_FORMAT_RGBA32
+ 		                              : base_bits == TEXTURE_BITS_BITS16 ? GPU_TEXTURE_FORMAT_RGBA64
+ 		                                                                 : GPU_TEXTURE_FORMAT_RGBA128;
+diff --git a/paint/sources/io/export_texture.c b/paint/sources/io/export_texture.c
+index 8c1533303..c33f44fd6 100644
+--- a/paint/sources/io/export_texture.c
++++ b/paint/sources/io/export_texture.c
+@@ -302,6 +302,9 @@ static void export_texture_run_layers(char *path, slot_layer_t_array_t *layers,
+ 			udim_slot = layers_udim_tile_slot(layers->buffer[0]);
+ 		}
+ 	}
++	// STUDIO-PATCH(udim-tiles): a tile exported alone is set in the context, the tiled layers read there at their
++	// resolution (put back by util_udim_export_end() in export_texture_run())
++	util_udim_export_tile(object_name, export_selected ? layers->buffer[0] : NULL);
+ 
+ 	// Clear export layer
+ 	_gpu_begin(layers_expa, NULL, NULL, GPU_CLEAR_COLOR, color_from_floats(0.0, 0.0, 0.0, 0.0), 0.0);
+@@ -359,8 +362,15 @@ static void export_texture_run_layers(char *path, slot_layer_t_array_t *layers,
+ 		if (!bake_material && udim_slot < 0 && !export_selected && layers_udim_tile_slot(l1) == -2) {
+ 			continue;
+ 		}
++		// STUDIO-PATCH(udim-tiles): a tiled layer is read on the tile of the context (a tile exported alone), or composed
++		// from its tiles when exporting the whole atlas
++		if (!bake_material && util_udim_layer_tiled(l1)) {
++			if (udim_slot < 0) {
++				l1 = util_udim_atlas_layer(l1, l1masks != NULL ? &mask : NULL);
++			}
++		}
+ 		// Shared layers of udim tiles are cropped out of the atlas, tile layers go into the atlas when exporting it whole
+-		if (!bake_material && udim_slot >= 0 && util_mesh_udim_layer(l1)) {
++		else if (!bake_material && udim_slot >= 0 && util_mesh_udim_layer(l1)) {
+ 			l1 = layers_udim_remap(l1, l1masks != NULL ? &mask : NULL, udim_slot, true);
+ 		}
+ 		else if (!bake_material && udim_slot < 0 && layers_udim_tile_slot(l1) >= 0) {
+@@ -836,6 +846,7 @@ void export_texture_run(char *path, bool bake_material) {
+ 		}
+ 	}
+ 
++	util_udim_export_end(); // STUDIO-PATCH(udim-tiles): the tile of the context put back
+ #ifdef WITH_EXTERNAL // STUDIO-PATCH(studio-export): files renamed into place and manifest written, or export failed
+ 	bool studio_export_end(void);
+ 	if (!studio_export_end()) {
+diff --git a/paint/sources/ui/tab_layers.c b/paint/sources/ui/tab_layers.c
+index 356cdc448..785e80b45 100644
+--- a/paint/sources/ui/tab_layers.c
++++ b/paint/sources/ui/tab_layers.c
+@@ -526,6 +526,10 @@ void tab_layers_draw_layer_context_menu_export_on_file_picked(char *path) {
+ 	if (!ends_with(f, ".png")) {
+ 		f = string("%s.png", f);
+ 	}
++	// STUDIO-PATCH(udim-tiles): a tiled mask, a file per tile ("<name>.<tile>.png"), see paint/sources/util/util_udim.h
++	if (util_udim_export_mask(l, string("%s%s%s", path, PATH_SEP, f))) {
++		return;
++	}
+ 	iron_write_png(string("%s%s%s", path, PATH_SEP, f), gpu_get_texture_pixels(l->texpaint), l->texpaint->width, l->texpaint->height, 3); // RRR1
+ }
+ 
+diff --git a/paint/sources/ui/ui_header.c b/paint/sources/ui/ui_header.c
+index 482855a9c..6b43c79b0 100644
+--- a/paint/sources/ui/ui_header.c
++++ b/paint/sources/ui/ui_header.c
+@@ -100,15 +100,22 @@ void ui_header_draw_tool_properties_color_picker_base() {
+ }
+ 
+ void ui_header_draw_tool_properties_to_mask(slot_layer_t *m) {
+-	_gpu_begin(m->texpaint, NULL, NULL, GPU_CLEAR_NONE, 0, 0.0);
+-	gpu_set_pipeline(pipes_colorid_to_mask);
+-	render_target_t *rt = any_map_get(render_path_render_targets, "texpaint_colorid");
+-	gpu_set_texture(pipes_texpaint_colorid, rt->_image);
+-	gpu_set_texture(pipes_tex_colorid, project_get_image(g_project->_->assets->buffer[g_context->colorid]));
+-	gpu_set_vertex_buffer(const_data_screen_aligned_vb);
+-	gpu_set_index_buffer(const_data_screen_aligned_ib);
+-	gpu_draw();
+-	gpu_end();
++	// STUDIO-PATCH(udim-tiles): every tile, the color id map read in the uv of each tile (as the ColorID brush does),
++	// see paint/sources/util/util_udim.h
++	i32 udim_n = util_udim_loop_begin(util_udim_tile_layer(m, false));
++	for (i32 udim_k = 0; udim_k < udim_n; ++udim_k) {
++		util_udim_loop_tile(udim_k);
++		_gpu_begin(m->texpaint, NULL, NULL, GPU_CLEAR_NONE, 0, 0.0);
++		gpu_set_pipeline(pipes_colorid_to_mask);
++		render_target_t *rt = any_map_get(render_path_render_targets, "texpaint_colorid");
++		gpu_set_texture(pipes_texpaint_colorid, rt->_image);
++		gpu_set_texture(pipes_tex_colorid, project_get_image(g_project->_->assets->buffer[g_context->colorid]));
++		gpu_set_vertex_buffer(const_data_screen_aligned_vb);
++		gpu_set_index_buffer(const_data_screen_aligned_ib);
++		gpu_draw();
++		gpu_end();
++	}
++	util_udim_loop_end();
+ 	g_context->colorid_picked      = false;
+ 	ui_toolbar_handle->redraws     = 1;
+ 	ui_header_handle->redraws      = 1;
+diff --git a/paint/sources/ui/ui_view2d.c b/paint/sources/ui/ui_view2d.c
+index db07e5282..3bdc6e550 100644
+--- a/paint/sources/ui/ui_view2d.c
++++ b/paint/sources/ui/ui_view2d.c
+@@ -757,6 +757,11 @@ void ui_view2d_update(void *_) {
+ 				g_ui->_x += ew + 3;
+ 				g_ui->_y = 2 + start_y;
+ 			}
++
++			if (util_udim_view2d_tile()) { // STUDIO-PATCH(udim-tiles): tile of a tiled layer (util_udim.h)
++				g_ui->_x += ew + 3;
++				g_ui->_y = 2 + start_y;
++			}
+ 		}
+ 
+ 		if (ui_view2d_type == VIEW_2D_TYPE_SOUND) {
+@@ -801,7 +806,8 @@ void ui_view2d_update(void *_) {
+ 		g_ui->_y = 2 + start_y;
+ 
+ 		// Picked position
+-		if (g_context->tool == TOOL_TYPE_PICKER && (ui_view2d_type == VIEW_2D_TYPE_LAYER || ui_view2d_type == VIEW_2D_TYPE_ASSET)) {
++		if (g_context->tool == TOOL_TYPE_PICKER && (ui_view2d_type == VIEW_2D_TYPE_LAYER || ui_view2d_type == VIEW_2D_TYPE_ASSET) &&
++		    (!util_udim_layer_tiled(g_context->layer) || util_udim_picked_tile() == util_udim_tile())) { // STUDIO-PATCH(udim-tiles): picked there
+ 			gpu_texture_t *cursor_img = resource_get("cursor.k");
+ 			f32            hsize      = 16 * UI_SCALE();
+ 			f32            size       = hsize * 2;
+diff --git a/paint/sources/uniforms.c b/paint/sources/uniforms.c
+index 000b47330..0981ab3e8 100644
+--- a/paint/sources/uniforms.c
++++ b/paint/sources/uniforms.c
+@@ -91,6 +91,9 @@ f32 uniforms_ext_f32_link(object_t *object, shader_data_t *mat, char *link) {
+ 		f32  val  = (fill ? g_context->layer->scale : g_context->brush_scale) * g_context->brush_nodes_scale;
+ 		return val;
+ 	}
++	else if (string_equals(link, "_udim_tile_code")) { // STUDIO-PATCH(udim-tiles): the tile of the object drawn, for the pickers
++		return util_udim_tile_code(object);
++	}
+ 	else if (string_equals(link, "_atlas_stride")) {
+ 		return util_mesh_udim_active() ? util_mesh_atlas_stride() : 1.0;
+ 	}
+diff --git a/paint/sources/util/util_layer.c b/paint/sources/util/util_layer.c
+index c56ad89..716a445 100644
+--- a/paint/sources/util/util_layer.c
++++ b/paint/sources/util/util_layer.c
+@@ -967,6 +967,9 @@ void layers_merge_layer(slot_layer_t *l0, slot_layer_t *l1, bool use_mask) {
+ 	if (!l1->visible || slot_layer_is_group(l1)) {
+ 		return;
+ 	}
++	if (util_udim_merge_layer(l0, l1, use_mask)) { // STUDIO-PATCH(udim-tiles): tiled layer, merged tile by tile (calls back here)
++		return;
++	}
+ 
+ 	layers_make_temp_img();
+ 
+@@ -1104,7 +1107,9 @@ void layers_draw_mesh_materials() {
+ 	render_path_set_target("expa", additional, NULL, GPU_CLEAR_NONE, 0, 0.0);
+ 	render_path_bind_target("main", "gbufferD");
+ 	render_path_bind_target("texpaint_blend1", "paintmask");
+-	render_path_draw_meshes("atlas");
++	if (!util_udim_draw_mesh_materials("atlas")) { // STUDIO-PATCH(udim-tiles): tiled layers, the objects of the tile of the context
++		render_path_draw_meshes("atlas");
++	}
+ }
+ 
+ static gpu_texture_t *layers_udim_a    = NULL;
+@@ -1209,13 +1214,15 @@ slot_layer_t *layers_flatten(bool height_to_normal, slot_layer_t_array_t *layers
+ 		}
+ 
+ 		// Flattened layers are in shared atlas space
+-		i32 tile_slot = layers_udim_tile_slot(l1);
++		// STUDIO-PATCH(udim-tiles): a tiled layer is flattened on the tile of the context, not remapped to a cell
++		i32 tile_slot = util_udim_layer_tiled(l1) ? -1 : layers_udim_tile_slot(l1);
+ 		if (tile_slot == -2) { // STUDIO-PATCH(udim-tile-limit): the layer of a tile without a slot has no cell in the atlas
+ 			continue;
+ 		}
+ 		if (tile_slot >= 0) {
+ 			l1 = layers_udim_remap(l1, l1masks != NULL ? &mask : NULL, tile_slot, false);
+ 		}
++		l1 = util_udim_flatten_layer(l1, l1masks != NULL ? &mask : NULL); // STUDIO-PATCH(udim-tiles): the raytracer's atlas
+ 
+ 		if (l1->paint_base) {
+ 			draw_begin(layers_temp_image, false, 0); // Copy to temp
+diff --git a/paint/sources/util/util_mesh.c b/paint/sources/util/util_mesh.c
+index 669245e75..a17edc26e 100644
+--- a/paint/sources/util/util_mesh.c
++++ b/paint/sources/util/util_mesh.c
+@@ -204,6 +204,12 @@ bool util_mesh_udim_active() {
+ 	return util_mesh_udim_tile_count > 1;
+ }
+ 
++// STUDIO-PATCH(udim-tiles): the table of tiles, sorted, for the tile stores of util_udim.c (lot D2); a single tile too
++i32 util_mesh_udim_tile_table(i32 **tiles) {
++	*tiles = util_mesh_udim_tiles;
++	return util_mesh_udim_tile_count;
++}
++
+ i32 util_mesh_udim_slot(i32 tile) {
+ 	for (i32 i = 0; i < util_mesh_udim_tile_count; ++i) {
+ 		if (util_mesh_udim_tiles[i] == tile) {
+diff --git a/paint/sources/util/util_uv.c b/paint/sources/util/util_uv.c
+index c9d168cf3..33fcabf42 100644
+--- a/paint/sources/util/util_uv.c
++++ b/paint/sources/util/util_uv.c
+@@ -5,6 +5,9 @@ buffer_t       *util_uv_dilate_bytes = NULL;
+ gpu_pipeline_t *util_uv_pipe_dilate  = NULL;
+ 
+ void util_uv_cache_uv_map() {
++	if (util_udim_cache_uv_map()) { // STUDIO-PATCH(udim-tiles): tiled layer, a map per tile
++		return;
++	}
+ 	if (util_uv_uvmap != NULL && (util_uv_uvmap->width != config_get_texture_res_x() || util_uv_uvmap->height != config_get_texture_res_y())) {
+ 		gpu_delete_texture(util_uv_uvmap);
+ 		util_uv_uvmap        = NULL;
+@@ -49,6 +52,9 @@ void util_uv_cache_uv_map() {
+ }
+ 
+ void util_uv_cache_triangle_map() {
++	if (util_udim_cache_triangle_map()) { // STUDIO-PATCH(udim-tiles): tiled layer, the map of the tile of the context
++		return;
++	}
+ 	if (util_uv_trianglemap != NULL &&
+ 	    (util_uv_trianglemap->width != config_get_texture_res_x() || util_uv_trianglemap->height != config_get_texture_res_y())) {
+ 		gpu_delete_texture(util_uv_trianglemap);
+@@ -89,6 +95,9 @@ void util_uv_cache_triangle_map() {
+ }
+ 
+ void util_uv_cache_dilate_map() {
++	if (util_udim_cache_dilate_map()) { // STUDIO-PATCH(udim-tiles): tiled layer, the map of the tile of the context
++		return;
++	}
+ 	if (util_uv_dilatemap != NULL && (util_uv_dilatemap->width != config_get_texture_res_x() || util_uv_dilatemap->height != config_get_texture_res_y())) {
+ 		gpu_delete_texture(util_uv_dilatemap);
+ 		util_uv_dilatemap        = NULL;
+@@ -160,6 +169,7 @@ void _util_uv_check(i32 cx, i32 cy, i32 w, i32 h, i32 r, buffer_t *view, i32_arr
+ }
+ 
+ void util_uv_cache_uv_island_map() {
++	i32 udim_saved = util_udim_island_begin(); // STUDIO-PATCH(udim-tiles): tiled layer, the islands of the tile under the brush
+ 	util_uv_cache_dilate_map();
+ 	if (util_uv_dilate_bytes == NULL) {
+ 		util_uv_dilate_bytes = gpu_get_texture_pixels(util_uv_dilatemap);
+@@ -200,4 +210,5 @@ void util_uv_cache_uv_island_map() {
+ 	free(coords_x);
+ 	array_free(coords_y);
+ 	free(coords_y);
++	util_udim_set_tile(udim_saved); // STUDIO-PATCH(udim-tiles)
+ }
+diff --git a/paint/sources/io/export_arm.c b/paint/sources/io/export_arm.c
+index a94348b08..78233e3ce 100644
+--- a/paint/sources/io/export_arm.c
++++ b/paint/sources/io/export_arm.c
+@@ -275,6 +275,9 @@ void export_arm_run_project(char *path) {
+ 		                              .path_curved        = l->path_curved,
+ 		                              .path_text          = l->path_text,
+ 		                              .path_material      = l->path_material != NULL ? array_index_of(g_project->_->materials, l->path_material) : -1});
++		// STUDIO-PATCH(udim-tiles): a tiled layer saves its tiles, its textures the atlas composite (or the tile of its
++		// object for a layer limited to one) for upstream ArmorPaint, see paint/sources/util/util_udim.h
++		util_udim_arm_save_layer(l, d);
+ 		any_array_push(ld, d);
+ 	}
+ 
+@@ -421,6 +424,7 @@ void export_arm_run_project(char *path) {
+ 		export_arm_free_buffer(d->texpaint_nor);
+ 		export_arm_free_buffer(d->texpaint_pack);
+ 		export_arm_free_buffer(d->texpaint_sculpt);
++		util_udim_arm_free_layer(d); // STUDIO-PATCH(udim-tiles): the tiles of a layer
+ 		if (d->decal_mat != NULL) {
+ 			array_free(d->decal_mat);
+ 			free(d->decal_mat);
+diff --git a/paint/sources/io/import_arm.c b/paint/sources/io/import_arm.c
+index 1813b387a..983d0316d 100644
+--- a/paint/sources/io/import_arm.c
++++ b/paint/sources/io/import_arm.c
+@@ -1026,6 +1026,10 @@ void import_arm_run_project(char *path) {
+ 		g_context->merged_object->base->visible = true;
+ 	}
+ 
++	// STUDIO-PATCH(udim-tiles): the tiles of the layers, or those of a project of the atlas era cut from its cells, once
++	// the tile table is built (merged mesh), see paint/sources/util/util_udim.h
++	util_udim_arm_load(g_project->layer_datas);
++
+ 	sys_notify_on_next_frame(&import_arm_run_project_on_next_frame, NULL);
+ 
+ 	base_update_workflow();
+diff --git a/paint/sources/types.h b/paint/sources/types.h
+index 2728f06e9..ccf29b87b 100644
+--- a/paint/sources/types.h
++++ b/paint/sources/types.h
+@@ -624,6 +624,14 @@ typedef struct swatch_color {
+ 	f32 subsurface;
+ } swatch_color_t;
+ 
++// STUDIO-PATCH(udim-tiles): the content of a tile of a layer (lot D2e), see paint/sources/util/util_udim.h
++typedef struct layer_tile_data {
++	i32            tile;
++	struct buffer *texpaint;
++	struct buffer *texpaint_nor;
++	struct buffer *texpaint_pack;
++} layer_tile_data_t;
++
+ typedef struct layer_data {
+ 	char             *name;
+ 	i32               res; // Width pixels
+@@ -662,6 +670,8 @@ typedef struct layer_data {
+ 	bool              path_curved;
+ 	i32               path_material;
+ 	bool              path_text;
++	// STUDIO-PATCH(udim-tiles): the tiles of a tiled layer, NULL otherwise; the last key, upstream reads past it
++	struct layer_tile_data_t_array *tiles;
+ } layer_data_t;
+ 
+ typedef struct timeline_layer_keyframe_data {
+@@ -922,6 +932,13 @@ typedef struct layer_data_t_array {
+ 	int            capacity;
+ } layer_data_t_array_t;
+ 
++// STUDIO-PATCH(udim-tiles): the tiles of a layer (lot D2e)
++typedef struct layer_tile_data_t_array {
++	layer_tile_data_t **buffer;
++	int                 length;
++	int                 capacity;
++} layer_tile_data_t_array_t;
++
+ typedef struct timeline_layer_keyframe_data_t_array {
+ 	timeline_layer_keyframe_data_t **buffer;
+ 	int                              length;
+diff --git a/paint/sources/util/util_encode.c b/paint/sources/util/util_encode.c
+index 06df490ff..aa74a2033 100644
+--- a/paint/sources/util/util_encode.c
++++ b/paint/sources/util/util_encode.c
+@@ -138,6 +138,8 @@ i32 util_encode_layer_data_size(layer_data_t_array_t *datas) {
+ 		if (tp_sculpt != NULL) {
+ 			size += tp_sculpt->length;
+ 		}
++
++		size += util_udim_tiles_size(datas->buffer[i]->tiles); // STUDIO-PATCH(udim-tiles): the tiles of a layer (lot D2e)
+ 	}
+ 	return size;
+ }
+@@ -362,7 +364,7 @@ buffer_t *util_encode_project(project_t *raw) {
+ 	if (raw->layer_datas != NULL) {
+ 		armpack_encode_array(raw->layer_datas->length);
+ 		for (i32 i = 0; i < raw->layer_datas->length; ++i) {
+-			armpack_encode_map(37);
++			armpack_encode_map(38); // STUDIO-PATCH(udim-tiles): 37 upstream, and the tiles
+ 			armpack_encode_string("name");
+ 			armpack_encode_string(raw->layer_datas->buffer[i]->name);
+ 			armpack_encode_string("res");
+@@ -437,6 +439,9 @@ buffer_t *util_encode_project(project_t *raw) {
+ 			armpack_encode_i32(raw->layer_datas->buffer[i]->path_material);
+ 			armpack_encode_string("path_text");
+ 			armpack_encode_bool(raw->layer_datas->buffer[i]->path_text);
++			// STUDIO-PATCH(udim-tiles): the tiles of a layer (lot D2e), the last key: upstream decodes the keys in order
++			armpack_encode_string("tiles");
++			util_udim_encode_tiles(raw->layer_datas->buffer[i]->tiles);
+ 		}
+ 	}
+ 	else {

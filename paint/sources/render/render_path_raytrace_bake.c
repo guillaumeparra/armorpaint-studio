@@ -115,7 +115,7 @@ bool render_path_raytrace_bake_commands(void (*parse_paint_material)(bool)) {
 		if (g_context->bake_type == BAKE_TYPE_LIGHTMAP) {
 			gpu_texture_t *_texpaint   = g_context->layer->texpaint;
 			g_context->layer->texpaint = bake_texture_node_texpaint;
-			slot_layer_t *flat         = layers_flatten(true, NULL);
+			slot_layer_t *flat         = util_udim_flatten_atlas(true); // STUDIO-PATCH(udim-tiles): tiled layers composed into their cells
 			tex2                       = flat->texpaint;
 			g_context->layer->texpaint = _texpaint;
 		}
@@ -149,9 +149,11 @@ bool render_path_raytrace_bake_commands(void (*parse_paint_material)(bool)) {
 
 		i32   id          = g_context->layer->id;
 		char *texpaint_id = string("texpaint%d", id);
-		render_path_set_target(texpaint_id, NULL, NULL, GPU_CLEAR_NONE, 0, 0.0);
-		render_path_bind_target("baketex2", "tex");
-		render_path_draw_shader("Scene/copy_pass/copy_pass");
+		if (!util_udim_bake_copy(texpaint_id, "baketex2")) { // STUDIO-PATCH(udim-tiles): tiled layer, each tile from its cell
+			render_path_set_target(texpaint_id, NULL, NULL, GPU_CLEAR_NONE, 0, 0.0);
+			render_path_bind_target("baketex2", "tex");
+			render_path_draw_shader("Scene/copy_pass/copy_pass");
+		}
 
 #ifdef IRON_METAL
 		i32 samples_per_frame = 4;

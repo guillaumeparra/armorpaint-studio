@@ -839,7 +839,14 @@ gpu_texture_t *gpu_create_texture_from_encoded_bytes(buffer_t *data, char *forma
 	return texture;
 }
 
+// STUDIO-PATCH(udim-tiles): a texture about to be deleted, for the tile stores of paint/sources/util/util_udim.c
+// (see paint/plugins/external/PATCHES.md)
+void (*gpu_texture_deleting)(gpu_texture_t *texture) = NULL;
+
 void gpu_delete_texture(gpu_texture_t *texture) {
+	if (gpu_texture_deleting != NULL) { // STUDIO-PATCH(udim-tiles)
+		gpu_texture_deleting(texture);
+	}
 	gpu_texture_destroy(texture);
 	if (texture->buffer != NULL) { // Cached by gpu_get_texture_pixels
 		free(texture->buffer->buffer);

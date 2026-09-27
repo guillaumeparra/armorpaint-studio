@@ -437,7 +437,7 @@ void render_path_raytrace_commands(bool use_live_layer) {
 			render_path_raytrace_build_env_cdf(scene_world->envmap);
 		}
 
-		slot_layer_t *l = layers_flatten(true, NULL);
+		slot_layer_t *l = util_udim_flatten_atlas(true); // STUDIO-PATCH(udim-tiles): tiled layers composed into their cells
 		gpu_raytrace_set_textures(l->texpaint, l->texpaint_nor, l->texpaint_pack, saved_envmap, bnoise_sobol, bnoise_scramble, bnoise_rank,
 		                          render_path_raytrace_env_cdf);
 	}
@@ -456,7 +456,7 @@ void render_path_raytrace_commands(bool use_live_layer) {
 				layer->texpaint_pack = render_path_paint_live_layer->texpaint_pack;
 			}
 		}
-		layers_flatten(true, NULL);
+		util_udim_flatten_atlas(true); // STUDIO-PATCH(udim-tiles): tiled layers composed into their cells
 		if (is_live) {
 			layer->texpaint      = _texpaint;
 			layer->texpaint_nor  = _texpaint_nor;

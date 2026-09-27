@@ -275,6 +275,9 @@ void export_arm_run_project(char *path) {
 		                              .path_curved        = l->path_curved,
 		                              .path_text          = l->path_text,
 		                              .path_material      = l->path_material != NULL ? array_index_of(g_project->_->materials, l->path_material) : -1});
+		// STUDIO-PATCH(udim-tiles): a tiled layer saves its tiles, its textures the atlas composite (or the tile of its
+		// object for a layer limited to one) for upstream ArmorPaint, see paint/sources/util/util_udim.h
+		util_udim_arm_save_layer(l, d);
 		any_array_push(ld, d);
 	}
 
@@ -421,6 +424,7 @@ void export_arm_run_project(char *path) {
 		export_arm_free_buffer(d->texpaint_nor);
 		export_arm_free_buffer(d->texpaint_pack);
 		export_arm_free_buffer(d->texpaint_sculpt);
+		util_udim_arm_free_layer(d); // STUDIO-PATCH(udim-tiles): the tiles of a layer
 		if (d->decal_mat != NULL) {
 			array_free(d->decal_mat);
 			free(d->decal_mat);

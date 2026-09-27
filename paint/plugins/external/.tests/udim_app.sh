@@ -3,21 +3,22 @@
 # udim-material-uv, udim-export-sets et udim-tile-name, udim-import et fbx-split par matériau et par tuile (lot D1) :
 #   1. import OBJ et FBX « Split By: UDIM Tile » : un objet par nœud et par tuile (body.1001...), triangle à cheval
 #      coupé ; un nœud sans uv en tête du fichier est importé sans tuile, après les autres : pas de dépliage proposé
-#      (il aurait écrasé les uv UDIM de toutes les tuiles) ; hors de l'atlas des calques, avec un message ;
+#      (il aurait écrasé les uv UDIM de toutes les tuiles) ; les calques UDIM ne le peignent pas, avec un message ;
 #   2. fichier refusé (uv négatives, plus de 64 tuiles) : message, le projet garde son maillage ;
 #   3. le même fichier ajouté : body.001.1001 (l'upstream renommait body.1001 en body.1003, une autre tuile) ;
-#   4. 70 tuiles (import par objet de p.1001 ... p.1070) : message ; les 64 premières dans l'atlas, chacune dans sa case,
-#      p.1065 à p.1070 hors de l'atlas ; peindre p.1065 ne touche aucune tuile (l'upstream peignait dans la case de la
-#      1064), peindre p.1063 peint la 1063 ; export par tuile : 1001 à 1064 et un message par tuile écartée ; preset
-#      studio bloqué par le préflight ;
-#   5. conseil de résolution après un import UDIM (tuiles, grille, pixels par tuile, projet pour 2048 et 4096 px par
-#      tuile) : dans la barre d'état si elle est libre ; sinon dans la console seule, l'avertissement (cap sans tuile) ou
-#      l'erreur (70 tuiles) de l'import reste affiché.
+#   4. 70 tuiles (import par objet de p.1001 ... p.1070) : message ; les calques tiennent les 64 premières (lot D2),
+#      chacune avec sa case dans les uv du maillage fusionné (le proxy du raytrace, lot D2f), p.1065 à p.1070 sans
+#      case ; peindre p.1065 ne touche aucune tuile (l'upstream peignait dans la case de la 1064), peindre p.1063 peint
+#      la 1063 ; export par tuile : 1001 à 1064 et un message par tuile écartée ; preset studio bloqué par le
+#      préflight ;
+#   5. conseil de résolution après un import UDIM (tuiles, résolution des textures de chaque tuile, mémoire d'un
+#      calque) : dans la barre d'état si elle est libre ; sinon dans la console seule, l'avertissement (cap sans tuile)
+#      ou l'erreur (70 tuiles) de l'import reste affiché.
 #   6. uv matériau dans l'espace UDIM (patch udim-material-uv, lot D1) : un bruit procédural sur les uv, rempli sur cinq
-#      tuiles pleines (1001 à 1004, 1011), est continu d'une tuile à sa voisine, à droite (1003 | 1004, cases de l'atlas
-#      non voisines) et en haut (1001 / 1011) ; témoins : tuiles non voisines, écart entre colonnes d'une même tuile ; un
-#      calque limité à la tuile 1004 reçoit le même bruit que le calque partagé (l'upstream répétait le matériau par
-#      tuile, et le calque d'une tuile avait ses propres uv).
+#      tuiles pleines (1001 à 1004, 1011), est continu d'une tuile à sa voisine, à droite (1003 | 1004) et en haut
+#      (1001 / 1011) ; témoins : tuiles non voisines, écart entre colonnes d'une même tuile ; un calque limité à la
+#      tuile 1004 reçoit le même bruit que le calque de toutes les tuiles (l'upstream répétait le matériau par tuile, et
+#      le calque d'une tuile avait ses propres uv).
 #   7. découpage par matériau et par tuile (lot D1, OBJ et FBX) : un objet par matériau et par tuile (skin.1001...),
 #      rassemblé d'un objet du fichier à l'autre (Maya répète usemtl dans chaque objet), triangle à cheval coupé ; les
 #      positions des parts d'échelles différentes recalées (relues par un export OBJ du maillage : chaque sommet à la
@@ -26,20 +27,20 @@
 #   8. export par jeu de textures et par tuile (patch udim-export-sets, lot D1) : les maps de chaque jeu pour chacune de
 #      ses tuiles seulement (skin 1001, 1002, 1011 ; cloth 1002), le jeu dans le nom ; un calque limité au jeu skin
 #      (rouge) dans les fichiers de skin seuls, un calque limité au jeu cloth (bleu) dans cloth.1002 seul, même là où
-#      leurs uv se chevauchent dans la 1002 ; un calque partagé dans tous, la même case pour les deux jeux de la 1002 ;
-#      un calque limité à skin.1001 dans skin.1001 seul, et pas de fichier pour cloth, sans calque (comme l'export
-#      Visible) ; preset studio avec <atlas> ; par objet, un calque limité à un jeu donne un fichier à chaque objet du
-#      jeu, et l'export du calque sélectionné porte le nom du jeu (l'upstream lisait ces masques de jeu hors du tableau
-#      des objets).
+#      leurs uv se chevauchent dans la 1002 ; un calque de toutes les tuiles dans tous, la même tuile pour les deux jeux
+#      de la 1002 ; un calque limité à skin.1001 dans skin.1001 seul, et pas de fichier pour cloth, sans calque (comme
+#      l'export Visible) ; preset studio avec <atlas> ; par objet, un calque limité à un jeu donne un fichier à chaque
+#      objet du jeu, et l'export du calque sélectionné porte le nom du jeu (l'upstream lisait ces masques de jeu hors du
+#      tableau des objets).
 #   9. renommer une tuile (patch udim-tile-name, lot D1, comme l'onglet Meshes) : skin.1011 renommé torso donne
 #      torso.1011 ; un suffixe tapé d'une autre tuile est ignoré, avec un message (cloth.1002 renommé robe.1005 donne
 #      robe.1002) ; un nom vide laisse le nom ; un objet sans tuile n'en gagne pas (cap renommé cap.1005 reste cap) ;
 #      projet sauvé puis rouvert : mêmes tuiles, mêmes jeux, le calque limité à torso.1011 exporté dans skin.1011 seul
 #      (l'upstream renommait skin.1011 en torso, un objet sans tuile : la 1011 disparaissait de l'export).
-#  10. canaux d'un calque dans un preset studio (layer('<nom>'), lot B4) : découpés par tuile comme la pile — le calque
-#      partagé seul (bruit) donne dans chaque tuile les pixels de la pile aplatie, et dans la 1004 ceux du banc 6 ; un
-#      calque limité à strip.1004 est dans la 1004 seule (vide ailleurs) ; grille entière (Visible) : dans sa case,
-#      égal à la pile ; par objet, strip.1004 découpé comme la tuile 1004.
+#  10. canaux d'un calque dans un preset studio (layer('<nom>'), lot B4), lus par tuile comme la pile (lot D2d) — le
+#      calque de toutes les tuiles seul (bruit) donne dans chaque tuile les pixels de la pile aplatie, et dans la 1004
+#      ceux du banc 6 ; un calque limité à strip.1004 est dans la 1004 seule (vide ailleurs) ; grille entière
+#      (Visible) : dans sa case du composite, égal à la pile ; par objet, strip.1004 comme la tuile 1004.
 #
 #   sh .tests/udim_app.sh [dossier de travail]
 #   APP=<binaire ArmorPaint> pour un autre build (défaut : build Release de paint/).
@@ -161,20 +162,17 @@ script() {
 line() { sed -n "s/^$2 //p" "$W/$1.out"; }
 names() { line "$1" "$2" | python3 -c "import json,sys; print(' '.join(o['name'] for o in json.load(sys.stdin)['objects']))"; }
 
-# Conseil de résolution dans $W/$1.log pour $2 tuiles en grille $3 × $3, cohérent avec la résolution qu'il annonce (le
-# texte exact est vérifié par export_test.c) ; l'affiche.
+# Conseil de résolution dans $W/$1.log pour $2 tuiles, la mémoire cohérente avec la résolution qu'il annonce (le texte
+# exact est vérifié par export_test.c) ; l'affiche.
 hint() {
-	python3 - "$W/$1.log" "$2" "$3" <<'EOF'
+	python3 - "$W/$1.log" "$2" <<'EOF'
 import re, sys
-log, tiles, stride = open(sys.argv[1]).read(), int(sys.argv[2]), int(sys.argv[3])
-m = re.search(r"^UDIM: %d tiles, %dx%d grid in the (\d+) px layers: (\d+) px per tile\.(.*)$" % (tiles, stride, stride), log, re.M)
+log, tiles = open(sys.argv[1]).read(), int(sys.argv[2])
+m = re.search(r"^UDIM: %d tiles, each with its own (\d+) px textures: ([\d.]+) (MB|GB) per (8|16|32) bit layer\.$" % tiles, log, re.M)
 assert m, "no hint"
-res, per, rest = int(m.group(1)), int(m.group(2)), m.group(3)
-assert per == res // stride, (res, per)
-for target in (2048, 4096):
-    need = target * stride
-    want = " For %d px per tile: " % target + ("project at %d px (" % need if need <= 16384 else "out of reach, %d px at most" % (16384 // stride))
-    assert (want in rest) == (per < target), (want, rest)
+res, size, unit, bits = int(m.group(1)), float(m.group(2)), m.group(3), int(m.group(4))
+want = tiles * res * res * 4 * bits // 8 * 3 / (1e9 if unit == "GB" else 1e6)
+assert abs(size - want) <= (0.05 if unit == "GB" else 0.5), (size, want)
 print(m.group(0))
 EOF
 }
@@ -286,7 +284,7 @@ EOF
 check "OBJ : body.1001 body.1002 body.1011, cap sans tuile" '[ "$(names obj atlases)" = "body.1001 body.1002 body.1011 cap" ]'
 check "OBJ : un triangle coupé, cap signalé" 'grep -q "UDIM import: 4 objects in 3 tiles, 1 triangles cut along the tile borders." "$W/obj.log" && grep -q "UDIM import: 1 objects without uvs imported without a tile, first \"cap\"." "$W/obj.log"'
 check "OBJ : cap sans uv en tête du fichier, pas de dépliage proposé" '[ "$(line obj box)" = "[]" ]'
-check "OBJ : cap hors de l'atlas, signalé ; les tuiles dans l'atlas" '[ "$(line obj uv | grep -c " 0/")" = 3 ] && line obj uv | grep -q "^cap -32767 -32767 -32767 -32767 12/12$" && grep -q "UDIM: 1 objects without a tile, first \"cap\": the udim layers do not paint them." "$W/obj.log"'
+check "OBJ : cap sans case dans le maillage fusionné, signalé ; les tuiles chacune dans la sienne" '[ "$(line obj uv | grep -c " 0/")" = 3 ] && line obj uv | grep -q "^cap -32767 -32767 -32767 -32767 12/12$" && grep -q "UDIM: 1 objects without a tile, first \"cap\": the udim layers do not paint them." "$W/obj.log"'
 check "OBJ refusé (uv négatives) : message, maillage gardé" 'grep -q "UDIM import refused: uvs outside the tiles 1001-1990 in \"body\" (1 triangles, first uv -0.5 0.2)." "$W/obj.log" && [ "$(names obj neg)" = "$(names obj atlases)" ]'
 check "OBJ refusé (70 tuiles) : message, maillage gardé" 'grep -q "UDIM import refused: 70 tiles, the layers hold 64 at most." "$W/obj.log" && [ "$(names obj many)" = "$(names obj atlases)" ]'
 check "ajout du même fichier : la tuile reste en suffixe (body.001.1001)" '[ "$(names obj append)" = "body.1001 body.1002 body.1011 cap body.001.1001 body.001.1002 body.001.1011 cap.001" ]'
@@ -305,7 +303,7 @@ check "FBX : body.1001 body.1002 body.1011, cap sans tuile, un triangle coupé" 
 check "FBX : cap sans uv en tête du fichier, pas de dépliage proposé" '[ "$(line fbx box)" = "[]" ]'
 check "FBX refusé (uv négatives) : son message reste, maillage gardé" 'grep -q "UDIM import refused: uvs outside the tiles 1001-1990 in \"body\" (1 triangles, first uv -0.5 0.2)." "$W/fbx.log" && ! grep -q "Could not import file" "$W/fbx.log" && [ "$(names fbx neg)" = "$(names fbx atlases)" ]'
 
-echo "== 70 tuiles : plafond de l'atlas (64)"
+echo "== 70 tuiles : plafond des calques (64)"
 mkdir -p "$W/out_1065" "$W/out_1063"
 script tiles1065 <<EOF
 $DUMP
@@ -328,8 +326,8 @@ int main() {
 	return 0;
 }
 EOF
-check "message : 70 tuiles, 64 dans l'atlas, à partir de 1065" 'grep -q "UDIM: 70 tiles, the layers hold 64: the tiles from 1065 on are not painted nor exported." "$W/tiles1065.log"'
-check "atlas : p.1001 ... p.1064 chacune dans sa case, p.1065 ... p.1070 hors de l'atlas" 'line tiles1065 uv | python3 -c "
+check "message : 70 tuiles, les calques en tiennent 64, à partir de 1065" 'grep -q "UDIM: 70 tiles, the layers hold 64: the tiles from 1065 on are not painted nor exported." "$W/tiles1065.log"'
+check "maillage fusionné (proxy du raytrace) : p.1001 ... p.1064 chacune dans sa case, p.1065 ... p.1070 sans case" 'line tiles1065 uv | python3 -c "
 import sys
 rows = [l.split() for l in sys.stdin]
 assert [r[0] for r in rows] == [\"p.%d\" % t for t in range(1001, 1071)], [r[0] for r in rows][:3]
@@ -368,9 +366,9 @@ int main() {
 	return 0;
 }
 EOF
-check "4 tuiles sans message de l'import : conseil dans la barre d'état" 'h=$(hint hint 4 2) && [ "$(line hint status)" = "[$h]" ]'
-check "cap sans tuile : l'avertissement reste dans la barre d'état, le conseil dans la console" 'hint obj 3 2 > /dev/null && line obj status | grep -q "^\[UDIM: 1 objects without a tile, first \"cap\""'
-check "70 tuiles : l'erreur reste dans la barre d'état, le conseil (64 tuiles) dans la console" 'hint tiles1065 64 8 > /dev/null && line tiles1065 status | grep -q "^\[UDIM: 70 tiles, the layers hold 64"'
+check "4 tuiles sans message de l'import : conseil dans la barre d'état" 'h=$(hint hint 4) && [ "$(line hint status)" = "[$h]" ]'
+check "cap sans tuile : l'avertissement reste dans la barre d'état, le conseil dans la console" 'hint obj 3 > /dev/null && line obj status | grep -q "^\[UDIM: 1 objects without a tile, first \"cap\""'
+check "70 tuiles : l'erreur reste dans la barre d'état, le conseil (64 tuiles) dans la console" 'hint tiles1065 64 > /dev/null && line tiles1065 status | grep -q "^\[UDIM: 70 tiles, the layers hold 64"'
 
 echo "== uv matériau dans l'espace UDIM"
 # Bruit sur les uv (UV Map > Noise Texture > couleur de base), rempli dans le calque courant ; export par tuile.
@@ -431,7 +429,7 @@ print("right %.2f %.2f %.2f" % (gap(edge, col(im[1004], K)), gap(edge, col(im[10
 # Haut de 1001 (v = 1) contre bas de 1011 (v = 1), témoins : bas de 1002 (v = 0, u + 1), ligne D plus bas
 edge = row(im[1001], K)
 print("up %.2f %.2f %.2f" % (gap(edge, row(im[1011], h - 1 - K)), gap(edge, row(im[1001], K + D)), gap(edge, row(im[1002], h - 1 - K))))
-# Calque limité à 1004 contre le calque partagé, témoin : 1003 partagée
+# Calque limité à 1004 contre le calque de toutes les tuiles, témoin : sa 1003
 one = load(single, 1004)
 full = lambda i: list(i.getdata())[::7]
 print("single %.2f %.2f" % (gap(full(one), full(im[1004])), gap(full(one), full(im[1003]))))
@@ -441,9 +439,9 @@ cat "$W/seams.out"
 # moins 5 fois plus (le banc voit une coupure) et plus de 10.
 seam() { line seams "$1" | awk '{ exit !($1 <= 2 * $2 + 2 && $3 >= 5 * $1 && $3 > 10) }'; }
 same() { line seams "$1" | awk '{ exit !($1 < 3 && $2 > 10) }'; }
-check "bruit continu de 1003 à 1004 (cases de l'atlas non voisines), témoin 1001 coupé" 'seam right'
+check "bruit continu de 1003 à 1004, témoin 1001 coupé" 'seam right'
 check "bruit continu de 1001 à 1011 (en haut), témoin 1002 coupé" 'seam up'
-check "calque limité à 1004 : le même bruit que le calque partagé, témoin 1003 différent" 'same single'
+check "calque limité à 1004 : le même bruit que le calque de toutes les tuiles, témoin 1003 différent" 'same single'
 
 echo "== découpage par matériau et par tuile"
 script mats <<EOF
@@ -645,7 +643,7 @@ check "projet rouvert : les noms, leurs jeux et leurs tuiles gardés" '[ "$(line
 check "export par tuile après réouverture : la 1011 toujours là, le calque de torso.1011 dans skin.1011 seul (cloth sans calque, sans fichier)" '[ "$(line renamedfiles files)" = "skin.1001 skin.1002 skin.1011 15" ] && [ "$(line renamedfiles reds)" = "skin.1001:0 skin.1002:0 skin.1011:1" ]'
 
 echo "== canaux d'un calque (layer) par tuile"
-# Calque partagé : le bruit ; calque limité à strip.1004 : (0.25, 0.5, 0.75) opaque, au-dessus.
+# Calque de toutes les tuiles : le bruit ; calque limité à strip.1004 : (0.25, 0.5, 0.75) opaque, au-dessus.
 mkdir -p "$W/upresets"
 cat > "$W/upresets/ulayers.json" <<'EOF'
 {
@@ -750,8 +748,8 @@ print("ok " + " ".join(ok))
 EOF
 cat "$W/ulayerscheck.out"
 check "calque ajouté, limité à strip.1004, renommé ; trois exports" '[ "$(line ulayers new) $(line ulayers set) $(line ulayers rename) $(line ulayers tiles) $(line ulayers visible) $(line ulayers object)" = "1 1 1 1 1 1" ]'
-check "layer() par tuile : calque partagé découpé, calque de la tuile dans la sienne seule" 'grep -q "^ok tiles" "$W/ulayerscheck.out"'
-check "layer() grille entière : le calque de la tuile dans sa case" 'grep -q "^ok tiles visible" "$W/ulayerscheck.out"'
+check "layer() par tuile : calque de toutes les tuiles lu par tuile, calque de la tuile dans la sienne seule" 'grep -q "^ok tiles" "$W/ulayerscheck.out"'
+check "layer() grille entière : le calque de la tuile dans sa case du composite" 'grep -q "^ok tiles visible" "$W/ulayerscheck.out"'
 check "layer() par objet : strip.1004 comme la tuile 1004" 'grep -q "^ok tiles visible object" "$W/ulayerscheck.out"'
 
 [ $FAIL -eq 0 ] && echo "== OK" || echo "== FAIL"

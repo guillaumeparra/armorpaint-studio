@@ -24,6 +24,7 @@ extern project_t *g_project;
 extern int        plugins_split_by; // paint/plugins/plugins.c : découpage lu par l'import FBX
 extern bool       ui_box_show;
 extern char      *ui_box_title;
+extern bool       import_mesh_append;
 extern char      *console_message;
 extern float      console_message_timer;
 extern i32        base_bits;
@@ -45,6 +46,7 @@ slot_layer_t     *layers_new_group(void);
 void              history_new_group(void);
 extern f32        layers_default_rough;
 void              import_mesh_run(char *path, bool clear_layers, bool replace_existing, bool keep_camera);
+void              import_mesh_finish_import(void *_);
 i32               util_mesh_udim_tile(char *name);
 bool              util_mesh_udim_active(void);
 i32               util_mesh_atlas_stride(void);
@@ -55,11 +57,38 @@ void              console_log(char *s);
 char             *tab_meshes_rename_object(i32 i, char *typed);
 void              tab_meshes_sort_by_name(void);
 void              tab_meshes_sort_hierarchy(void);
+char             *util_udim_stats(void);
+char             *util_udim_view_stats(gpu_texture_t *view);
+void              util_udim_set_tile(i32 tile);
+i32               util_udim_tile(void);
+void              util_udim_sync(void);
+slot_layer_t     *util_udim_flatten_atlas(bool height_to_normal);
 buffer_t         *gpu_get_texture_pixels(gpu_texture_t *image);
+void              history_duplicate_layer(void);
+void              layers_duplicate_layer(slot_layer_t *l);
+void              tab_layers_delete_layer(slot_layer_t *l);
+void              history_clear_layer(void);
+void              history_invert_mask(void);
+void              slot_layer_invert_mask(slot_layer_t *raw);
 void              history_undo(void);
 void              history_redo(void);
+void              viewport_update_camera_type(i32 camera_type);
+void              make_material_parse_paint_material(bool bake_previews);
+void              render_path_base_draw_gbuffer(void);
+void              util_uv_cache_uv_island_map(void);
+i32               util_udim_cursor_tile(void);
+i32               util_udim_picked_tile(void);
+extern bool       util_uv_uvislandmap_cached;
+extern gpu_texture_t *util_uv_uvmap;
+extern gpu_texture_t *util_uv_trianglemap;
+extern gpu_texture_t *util_uv_dilatemap;
+void              util_uv_cache_uv_map(void);
+void              util_uv_cache_triangle_map(void);
+void              util_uv_cache_dilate_map(void);
+extern any_array_t *history_undo_layers;
 i32               color_from_floats(f32 r, f32 g, f32 b, f32 a);
 void              _gpu_begin(gpu_texture_t *render_target, any_array_t *additional, gpu_texture_t *depth_buffer, gpu_clear_t flags, unsigned color, float depth);
+void              bake_texture_node_bake(ui_node_t *node, i32 bake_type);
 void              history_merge_layers(void);
 void              history_apply_mask(void);
 void              history_layer_opacity(void);
@@ -70,9 +99,16 @@ void              slot_layer_apply_mask(slot_layer_t *raw);
 void              slot_layer_to_paint_layer(slot_layer_t *raw);
 bool              slot_layer_is_group(slot_layer_t *raw);
 void              make_material_parse_mesh_material(void);
-void              history_clear_layer(void);
+extern bool       bake_texture_node_baking;
+extern bool       render_path_paint_baking;
+extern any_map_t *render_path_render_targets;
+void              tab_meshes_set_linked_override(mesh_object_t *o, i32 mat_index);
+void              ui_header_draw_tool_properties_import(char *path);
+void              ui_header_draw_tool_properties_to_mask(slot_layer_t *m);
 extern slot_layer_t *tab_layers_l;
-void              tab_layers_draw_layer_context_menu_merge_group(void *_);
+extern char        *ui_files_filename;
+void                tab_layers_draw_layer_context_menu_export_on_file_picked(char *path);
+void                tab_layers_draw_layer_context_menu_merge_group(void *_);
 
 #define DEFAULT_NAME "Atlas 1"
 #define MAX_NAME     64
@@ -347,8 +383,8 @@ bool studio_atlas_limit_layer(int atlas) {
 
 // ---- Fin d'un import UDIM : jeux de textures par matériau, conseil de résolution -------------------------------------
 
-// Pixels de chaque tuile et projet conseillé (studio_udim_hint). Dans la barre d'état si elle est libre, dans la
-// console seule sinon.
+// Résolution des textures de chaque tuile et mémoire d'un calque (studio_udim_hint). Dans la barre d'état si elle est
+// libre, dans la console seule sinon.
 static void udim_import_hint(void) {
 	if (!util_mesh_udim_active()) {
 		return;
@@ -362,10 +398,9 @@ static void udim_import_hint(void) {
 			tiles++;
 		}
 	}
-	int stride = util_mesh_atlas_stride();
-	int bits   = base_bits == TEXTURE_BITS_BITS8 ? 8 : base_bits == TEXTURE_BITS_BITS16 ? 16 : 32;
-	// Au-delà de stride × stride tuiles (64), les autres n'ont pas de case : util_mesh.c le dit déjà (udim-tile-limit)
-	char *hint = studio_udim_hint(tiles < stride * stride ? tiles : stride * stride, stride, config_get_texture_res_x(), config_get_texture_res_y(), bits);
+	int bits = base_bits == TEXTURE_BITS_BITS8 ? 8 : base_bits == TEXTURE_BITS_BITS16 ? 16 : 32;
+	// Au-delà de 64 tuiles, les calques ne tiennent pas les autres : util_mesh.c le dit déjà (udim-tile-limit)
+	char *hint = studio_udim_hint(tiles < 64 ? tiles : 64, config_get_texture_res_x(), config_get_texture_res_y(), bits);
 	if (hint == NULL) {
 		return;
 	}
@@ -473,11 +508,11 @@ void studio_run_next_frames(int from) {
 // Importe un maillage à la place de celui du projet (calques vidés), découpé comme le « Split By » de la boîte
 // d'import : 0 par objet, 1 par matériau, 2 par tuile UDIM, 3 par matériau et par tuile UDIM (un jeu de textures par
 // matériau). Pour les scripts batch et les bancs.
-static minic_val_t mn_studio_import_mesh(minic_val_t *a, int n) {
+static int studio_import(minic_val_t *a, int n, bool append) {
 	char *path  = minic_arg_p(a, n, 0);
 	int   split = (int)minic_arg_i(a, n, 1);
 	if (path == NULL || split < SPLIT_TYPE_OBJECT || split > SPLIT_TYPE_MATERIAL_UDIM) {
-		return minic_val_int(0);
+		return 0;
 	}
 	g_context->split_by = (split_type_t)split;
 	plugins_split_by    = split;
@@ -489,13 +524,29 @@ static minic_val_t mn_studio_import_mesh(minic_val_t *a, int n) {
 	// La fin de l'import (calques remis à zéro, objets triés par nom et fusionnés) attend l'image suivante : faite ici,
 	// pour que la suite du script (jeux de textures, masques de calque) voie les objets dans leur ordre final.
 	i32 before = (i32)_sys_on_next_frames->length;
-	import_mesh_run(path, true, true, false);
+	i32 first  = (i32)g_project->_->paint_objects->length;
+	import_mesh_run(path, !append, !append, append);
 	studio_run_next_frames(before);
+	if (append) { // Comme le bouton Append de la boîte d'import : la fin de l'import n'est pas programmée
+		if ((i32)g_project->_->paint_objects->length > first) {
+			import_mesh_finish_import(NULL);
+		}
+		import_mesh_append = false;
+	}
 	if (in_use) {
 		draw_begin(current, false, 0);
 	}
 	g_context->ddirty = 2;
-	return minic_val_int(1);
+	return 1;
+}
+
+static minic_val_t mn_studio_import_mesh(minic_val_t *a, int n) {
+	return minic_val_int(studio_import(a, n, false));
+}
+
+// Ajoute un maillage à ceux du projet (calques gardés), comme l'import avec « Replace Existing » décoché.
+static minic_val_t mn_studio_append_mesh(minic_val_t *a, int n) {
+	return minic_val_int(studio_import(a, n, true));
 }
 
 // Titre de la boîte de dialogue ouverte, "" sans boîte : un script batch voit qu'ArmorPaint attend quelqu'un (dépliage
@@ -672,6 +723,143 @@ static minic_val_t mn_studio_layer_masks(minic_val_t *a, int n) {
 	return minic_val_ptr(s);
 }
 
+// Position à l'écran (0..1, comme script_paint) d'un point du monde, « x y » ; « - » derrière la caméra. Pour les
+// bancs : viser une tuile précise, le maillage importé gardant ses coordonnées.
+static minic_val_t mn_studio_world_screen(minic_val_t *a, int n) {
+	vec4_t clip = vec4_apply_mat4((vec4_t){(f32)minic_arg_f(a, n, 0), (f32)minic_arg_f(a, n, 1), (f32)minic_arg_f(a, n, 2), 1.0f},
+	                              scene_camera->vp);
+	if (clip.w <= 0.0f) {
+		return minic_val_ptr(string_copy("-"));
+	}
+	return minic_val_ptr(string("%f %f", (clip.x / clip.w + 1.0f) * 0.5f, (-clip.y / clip.w + 1.0f) * 0.5f));
+}
+
+// Option de peinture que context_t ne donne pas aux scripts : "camera_align" (pinceau aligné sur la caméra), "ortho"
+// (caméra orthographique), "xray", "sym_x", "sym_y", "sym_z" (symétrie, peinte par la frame : render_path_paint_draw,
+// pas par script_paint_world) ; "fill_type" prend la valeur (0 objet, 1 face, 2 angle, 3 îlot UV). Le matériau de
+// peinture est recompilé. 1 si fait.
+static minic_val_t mn_studio_paint_option(minic_val_t *a, int n) {
+	char *name = minic_arg_p(a, n, 0);
+	bool  on   = minic_arg_i(a, n, 1) != 0;
+	if (name == NULL) {
+		return minic_val_int(0);
+	}
+	if (strcmp(name, "camera_align") == 0) {
+		g_context->brush_camera_align = on;
+	}
+	else if (strcmp(name, "ortho") == 0) {
+		g_context->camera_type = on ? CAMERA_TYPE_ORTHOGRAPHIC : CAMERA_TYPE_PERSPECTIVE;
+		viewport_update_camera_type(g_context->camera_type);
+		camera_object_build_mat(scene_camera); // vp, rebuilt by the next frame otherwise
+	}
+	else if (strcmp(name, "xray") == 0) {
+		g_context->xray = on;
+	}
+	else if (strcmp(name, "sym_x") == 0) {
+		g_context->sym_x = on;
+	}
+	else if (strcmp(name, "sym_y") == 0) {
+		g_context->sym_y = on;
+	}
+	else if (strcmp(name, "sym_z") == 0) {
+		g_context->sym_z = on;
+	}
+	else if (strcmp(name, "fill_type") == 0) {
+		g_context->fill_type = (i32)minic_arg_i(a, n, 1);
+	}
+	else {
+		return minic_val_int(0);
+	}
+	make_material_parse_paint_material(true);
+	g_context->ddirty = 2;
+	return minic_val_int(1);
+}
+
+// Pipettes UDIM au point du monde (x, y, z), gbuffer redessiné : "cursor" donne la tuile sous le pinceau (-1 sans),
+// "islands" calcule la carte des îlots UV comme l'image suivante d'un remplissage UV Island, "picked" rend la tuile de
+// la dernière pipette, la couleur et l'uv lues.
+static minic_val_t mn_studio_udim_pick(minic_val_t *a, int n) {
+	char *op = minic_arg_p(a, n, 0);
+	if (op == NULL) {
+		return minic_val_ptr(string_copy("-"));
+	}
+	if (strcmp(op, "picked") == 0) {
+		i32 c = g_context->picked_color->base;
+		return minic_val_ptr(string("tile=%d rgb=%d %d %d uv=%.3f %.3f", util_udim_picked_tile(), (c >> 16) & 0xff, (c >> 8) & 0xff, c & 0xff,
+		                            g_context->uvx_picked, g_context->uvy_picked));
+	}
+	vec4_t clip = vec4_apply_mat4((vec4_t){(f32)minic_arg_f(a, n, 1), (f32)minic_arg_f(a, n, 2), (f32)minic_arg_f(a, n, 3), 1.0f}, scene_camera->vp);
+	if (clip.w <= 0.0f) {
+		return minic_val_ptr(string_copy("-"));
+	}
+	gpu_texture_t *current = _draw_current;
+	bool           in_use  = gpu_in_use;
+	if (in_use) {
+		draw_end();
+	}
+	g_context->paint_vec.x = (clip.x / clip.w + 1.0f) * 0.5f;
+	g_context->paint_vec.y = (-clip.y / clip.w + 1.0f) * 0.5f;
+	render_path_base_draw_gbuffer();
+	char *out = string_copy("-");
+	if (strcmp(op, "cursor") == 0) {
+		out = string("%d", util_udim_cursor_tile());
+	}
+	else if (strcmp(op, "islands") == 0) {
+		util_uv_cache_uv_island_map();
+		out = string("tile=%d", util_udim_picked_tile());
+	}
+	if (in_use) {
+		draw_begin(current, false, 0);
+	}
+	return minic_val_ptr(out);
+}
+
+// Source du clone : le point du monde (xs, ys, zs) vu depuis la destination (xd, yd, zd), comme le Alt-clic de l'outil
+// Clone. 1 si les deux points sont devant la caméra.
+static minic_val_t mn_studio_clone_source(minic_val_t *a, int n) {
+	f32 sx[2];
+	f32 sy[2];
+	for (int k = 0; k < 2; ++k) {
+		vec4_t clip = vec4_apply_mat4(
+		    (vec4_t){(f32)minic_arg_f(a, n, k * 3), (f32)minic_arg_f(a, n, k * 3 + 1), (f32)minic_arg_f(a, n, k * 3 + 2), 1.0f}, scene_camera->vp);
+		if (clip.w <= 0.0f) {
+			return minic_val_int(0);
+		}
+		sx[k] = (clip.x / clip.w + 1.0f) * 0.5f;
+		sy[k] = (-clip.y / clip.w + 1.0f) * 0.5f;
+	}
+	g_context->clone_delta_x = sx[0] - sx[1];
+	g_context->clone_delta_y = sy[0] - sy[1];
+	return minic_val_int(1);
+}
+
+// Bouton Bake du nœud Bake Texture (type : enum bake_type_t ; high_poly : indice de l'objet high poly), comme dans
+// l'éditeur de nœuds ; le bake court sur les images suivantes, studio_bake_state() dit quand il est fini. L'id du nœud
+// (sa texture : studio_udim_pixel(id, 6, ...)), -1 si rien n'est lancé.
+static minic_val_t mn_studio_bake(minic_val_t *a, int n) {
+	ui_node_t *node = minic_arg_p(a, n, 0);
+	if (node == NULL || strcmp(node->type, "TEX_BAKE") != 0) {
+		return minic_val_int(-1);
+	}
+	g_context->bake_high_poly = (i32)minic_arg_i(a, n, 2);
+	bool in_use               = gpu_in_use;
+	if (!in_use) { // Le nœud change la profondeur des calques dans une passe (bouton de l'interface)
+		draw_begin(NULL, false, 0);
+	}
+	bake_texture_node_bake(node, (i32)minic_arg_i(a, n, 1));
+	if (!in_use) {
+		draw_end();
+	}
+	return minic_val_int(node->id);
+}
+
+// État du bake du nœud : "done" une fois la texture rendue au nœud, "baking" avant.
+static minic_val_t mn_studio_bake_state(minic_val_t *a, int n) {
+	(void)a;
+	(void)n;
+	return minic_val_ptr(string_copy(bake_texture_node_baking || render_path_paint_baking || g_context->pdirty > 0 ? "baking" : "done"));
+}
+
 // Résolution du projet : Custom, px × px, calques redimensionnés tout de suite (le menu Resolution de l'onglet Layers
 // attend l'image suivante). Pour les bancs : des projets UDIM légers. 1 si fait.
 static minic_val_t mn_studio_project_res(minic_val_t *a, int n) {
@@ -699,6 +887,35 @@ static minic_val_t mn_studio_project_res(minic_val_t *a, int n) {
 	return minic_val_int(1);
 }
 
+// Tuiles UDIM (lot D2) : table, tuile du contexte, magasins. Pour les bancs.
+static minic_val_t mn_studio_udim_stats(minic_val_t *a, int n) {
+	(void)a, (void)n;
+	return minic_val_ptr(util_udim_stats());
+}
+
+static char *udim_views(slot_layer_t *l) {
+	return string("base=[%s] nor=[%s] pack=[%s]", util_udim_view_stats(l->texpaint), util_udim_view_stats(l->texpaint_nor),
+	              util_udim_view_stats(l->texpaint_pack));
+}
+
+// Textures du calque i (indice dans g_project->_->layers), ou de l'emplacement d'undo -1 - i : une ligne par texture,
+// « single WxH » ou « cur=<tuile du contexte> partial=<0|1> tiles=<tuiles> WxH ».
+static minic_val_t mn_studio_udim_layer(minic_val_t *a, int n) {
+	int i = (int)minic_arg_i(a, n, 0);
+	if (i < 0) {
+		i = -1 - i;
+		if (history_undo_layers == NULL || i >= (int)history_undo_layers->length) {
+			return minic_val_ptr(string_copy("-"));
+		}
+		return minic_val_ptr(udim_views(history_undo_layers->buffer[i]));
+	}
+	slot_layer_t_array_t *layers = g_project->_->layers;
+	if (i >= (int)layers->length) {
+		return minic_val_ptr(string_copy("-"));
+	}
+	return minic_val_ptr(udim_views(layers->buffer[i]));
+}
+
 static float half_to_float(uint16_t h) {
 	uint32_t sign = (uint32_t)(h & 0x8000) << 16, exp = (h >> 10) & 0x1f, mant = h & 0x3ff, bits;
 	if (exp == 0) {
@@ -722,9 +939,12 @@ static char *pixel_text(gpu_texture_t *t, float *c) {
 	return string("%.3f %.3f %.3f %.3f", c[0], c[1], c[2], c[3]);
 }
 
-// Pixel (x, y) de la texture channel (0 base, 1 nor, 2 pack) du calque i, « r g b a » de 0 à 1 ; « - » hors bornes.
-// Channel 9, 10, 11 : base, nor et pack de la pile aplatie (layers_flatten, i ignoré). tile : -1 (tuile du contexte ;
-// les textures par tuile et les autres canaux viennent avec le lot D2, même signature).
+// Pixel (x, y) de la texture channel (0 base, 1 nor, 2 pack) du calque i sur la tuile tile (-1 : tuile du contexte),
+// « r g b a » de 0 à 1 ; « - » hors bornes. Channel 3, 4, 5 : cartes UV, des triangles et de dilatation du calque
+// courant, construites au besoin (i ignoré). Channel 6 : texture du nœud Bake Texture d'id i. Channel 7 : i-ème aperçu
+// de nœud du matériau (Curvature Texture...). Channel 8 : base de l'emplacement d'undo i. Channel 9, 10, 11 : base,
+// nor et pack de la pile aplatie (layers_flatten, i ignoré). Channel 12, 13, 14 : de même pour le raytrace
+// (util_udim_flatten_atlas : chaque calque à tuiles dans les cases de l'atlas).
 static minic_val_t mn_studio_udim_pixel(minic_val_t *a, int n) {
 	int                   i       = (int)minic_arg_i(a, n, 0);
 	int                   channel = (int)minic_arg_i(a, n, 1);
@@ -732,7 +952,7 @@ static minic_val_t mn_studio_udim_pixel(minic_val_t *a, int n) {
 	int                   x       = (int)minic_arg_i(a, n, 3);
 	int                   y       = (int)minic_arg_i(a, n, 4);
 	slot_layer_t_array_t *layers  = g_project->_->layers;
-	if (tile != -1 || (channel <= 2 && (i < 0 || i >= (int)layers->length)) || channel < 0 || (channel > 2 && channel < 9) || channel > 11) {
+	if ((channel <= 2 && (i < 0 || i >= (int)layers->length)) || channel < 0 || channel > 14) {
 		return minic_val_ptr(string_copy("-"));
 	}
 	gpu_texture_t *current = _draw_current;
@@ -740,15 +960,46 @@ static minic_val_t mn_studio_udim_pixel(minic_val_t *a, int n) {
 	if (in_use) {
 		draw_end();
 	}
+	i32 saved = util_udim_tile();
+	if (tile >= 0) {
+		util_udim_set_tile(tile);
+	}
 	gpu_texture_t *t = NULL;
 	if (channel <= 2) {
 		slot_layer_t *l = layers->buffer[i];
 		t               = channel == 0 ? l->texpaint : channel == 1 ? l->texpaint_nor : l->texpaint_pack;
 	}
-	else {
-		slot_layer_t *f = layers_flatten(false, NULL);
-		t               = channel == 9 ? f->texpaint : channel == 10 ? f->texpaint_nor : f->texpaint_pack;
+	else if (channel == 3) {
+		util_uv_cache_uv_map();
+		t = util_uv_uvmap;
+	}
+	else if (channel == 4) {
+		util_uv_cache_triangle_map();
+		t = util_uv_trianglemap;
+	}
+	else if (channel == 6) {
+		render_target_t *rt = any_map_get(render_path_render_targets, string("bake_texture_node_%d", i));
+		t                   = rt != NULL ? rt->_image : NULL;
+	}
+	else if (channel == 8) {
+		t = i >= 0 && i < (int)history_undo_layers->length ? ((slot_layer_t *)history_undo_layers->buffer[i])->texpaint : NULL;
+	}
+	else if (channel >= 9) {
+		slot_layer_t *f = channel >= 12 ? util_udim_flatten_atlas(false) : layers_flatten(false, NULL);
+		t               = channel % 3 == 0 ? f->texpaint : channel % 3 == 1 ? f->texpaint_nor : f->texpaint_pack;
 		free(f);
+	}
+	else if (channel == 7) {
+		string_array_t *keys = g_context->node_previews != NULL ? (string_array_t *)map_keys(g_context->node_previews) : NULL;
+		t                    = keys != NULL && i >= 0 && i < (int)keys->length ? any_map_get(g_context->node_previews, keys->buffer[i]) : NULL;
+		if (keys != NULL) {
+			array_free(keys);
+			free(keys);
+		}
+	}
+	else {
+		util_uv_cache_dilate_map();
+		t = util_uv_dilatemap;
 	}
 	char *out = string_copy("-");
 	if (t != NULL && x >= 0 && y >= 0 && x < (int)t->width && y < (int)t->height) {
@@ -763,20 +1014,21 @@ static minic_val_t mn_studio_udim_pixel(minic_val_t *a, int n) {
 		}
 		out = pixel_text(t, c);
 	}
+	util_udim_set_tile(saved);
 	if (in_use) {
 		draw_begin(current, false, 0);
 	}
 	return minic_val_ptr(out);
 }
 
-// Vide la texture channel (0 base, 1 nor, 2 pack) du calque i à la couleur (r, g, b, a). Pour les bancs : une couleur
-// sans peindre. tile : -1 (tuile du contexte, voir studio_udim_pixel). 1 si fait.
+// Vide la tuile tile (-1 : tuile du contexte) de la texture channel (0 base, 1 nor, 2 pack) du calque i à la couleur
+// (r, g, b, a). Pour les bancs : une couleur par tuile sans peindre. 1 si fait.
 static minic_val_t mn_studio_udim_fill(minic_val_t *a, int n) {
 	int                   i       = (int)minic_arg_i(a, n, 0);
 	int                   channel = (int)minic_arg_i(a, n, 1);
 	int                   tile    = (int)minic_arg_i(a, n, 2);
 	slot_layer_t_array_t *layers  = g_project->_->layers;
-	if (tile != -1 || i < 0 || i >= (int)layers->length || channel < 0 || channel > 2) {
+	if (i < 0 || i >= (int)layers->length || channel < 0 || channel > 2) {
 		return minic_val_int(0);
 	}
 	slot_layer_t  *l = layers->buffer[i];
@@ -789,14 +1041,138 @@ static minic_val_t mn_studio_udim_fill(minic_val_t *a, int n) {
 	if (in_use) {
 		draw_end();
 	}
-	i32 color = color_from_floats((f32)minic_arg_f(a, n, 3), (f32)minic_arg_f(a, n, 4), (f32)minic_arg_f(a, n, 5), (f32)minic_arg_f(a, n, 6));
-	_gpu_begin(t, NULL, NULL, GPU_CLEAR_COLOR, color, 0.0);
-	gpu_end();
+	i32 saved = util_udim_tile();
+	if (tile >= 0) {
+		util_udim_set_tile(tile);
+	}
+	int done = util_udim_tile() == tile || tile < 0;
+	if (done) {
+		i32 color = color_from_floats((f32)minic_arg_f(a, n, 3), (f32)minic_arg_f(a, n, 4), (f32)minic_arg_f(a, n, 5), (f32)minic_arg_f(a, n, 6));
+		_gpu_begin(t, NULL, NULL, GPU_CLEAR_COLOR, color, 0.0);
+		gpu_end();
+	}
+	util_udim_set_tile(saved);
 	if (in_use) {
 		draw_begin(current, false, 0);
 	}
-	g_context->ddirty               = 2;
+	g_context->ddirty       = 2;
 	g_context->layers_preview_dirty = true;
+	return minic_val_int(done);
+}
+
+// Pixel d'une render target du chemin de rendu (gbuffer1 : couleur de base du viewport) là où se voit le point du
+// monde (x, y, z), « r g b a » de 0 à 1 ; « - » si elle n'existe pas ou si le point est hors de l'écran.
+static minic_val_t mn_studio_rt_pixel(minic_val_t *a, int n) {
+	char            *name = minic_arg_p(a, n, 0);
+	render_target_t *rt   = name != NULL ? any_map_get(render_path_render_targets, name) : NULL;
+	if (rt == NULL || rt->_image == NULL) {
+		return minic_val_ptr(string_copy("-"));
+	}
+	gpu_texture_t *current = _draw_current;
+	bool           in_use  = gpu_in_use;
+	if (in_use) {
+		draw_end();
+	}
+	gpu_texture_t *t    = rt->_image;
+	vec4_t         clip = vec4_apply_mat4((vec4_t){(f32)minic_arg_f(a, n, 1), (f32)minic_arg_f(a, n, 2), (f32)minic_arg_f(a, n, 3), 1.0f},
+	                                      scene_camera->vp);
+	int            x    = (int)((clip.x / clip.w + 1.0f) * 0.5f * t->width);
+	int            y    = (int)((-clip.y / clip.w + 1.0f) * 0.5f * t->height);
+	char          *out  = string_copy("-");
+	if (clip.w > 0.0f && x >= 0 && y >= 0 && x < (int)t->width && y < (int)t->height) {
+		buffer_t *b = gpu_get_texture_pixels(t);
+		float     c[4];
+		int       at = y * (int)t->width + x;
+		for (int k = 0; k < 4; ++k) {
+			c[k] = t->format == GPU_TEXTURE_FORMAT_RGBA128  ? ((float *)b->buffer)[at * 4 + k]
+			       : t->format == GPU_TEXTURE_FORMAT_RGBA64 ? half_to_float(((uint16_t *)b->buffer)[at * 4 + k])
+			                                                : b->buffer[at * 4 + k] / 255.0f;
+		}
+		out = pixel_text(t, c);
+	}
+	if (in_use) {
+		draw_begin(current, false, 0);
+	}
+	return minic_val_ptr(out);
+}
+
+// Met le calque i dans le groupe g (-1 : hors groupe), comme un glisser-déposer sur le groupe de l'onglet Layers ; les
+// enfants d'un groupe sont juste en dessous de lui dans la pile. 1 si fait.
+static minic_val_t mn_studio_layer_set_parent(minic_val_t *a, int n) {
+	int                   i      = (int)minic_arg_i(a, n, 0);
+	int                   g      = (int)minic_arg_i(a, n, 1);
+	slot_layer_t_array_t *layers = g_project->_->layers;
+	if (i < 0 || i >= (int)layers->length || g >= (int)layers->length || (g >= 0 && !slot_layer_is_group(layers->buffer[g]))) {
+		return minic_val_int(0);
+	}
+	layers->buffer[i]->parent = g >= 0 ? layers->buffer[g] : NULL;
+	g_context->layers_preview_dirty = true;
+	return minic_val_int(1);
+}
+
+// Onglet Meshes, un matériau glissé sur le maillage i : ce maillage (et ceux qui partagent ses données) montre le
+// matériau m, que le flatten dessine par-dessus les calques ; -1 : plus de surcharge. 1 si fait.
+static minic_val_t mn_studio_mesh_override(minic_val_t *a, int n) {
+	int                    i       = (int)minic_arg_i(a, n, 0);
+	int                    m       = (int)minic_arg_i(a, n, 1);
+	mesh_object_t_array_t *objects = g_project->_->paint_objects;
+	if (i < 0 || i >= (int)objects->length || m < -1 || m >= (int)g_project->_->materials->length) {
+		return minic_val_int(0);
+	}
+	tab_meshes_set_linked_override(objects->buffer[i], m);
+	g_context->ddirty         = 2;
+	g_project->mesh_materials = i32_array_create(0);
+	return minic_val_int(1);
+}
+
+// Outil ColorID, bouton To Mask : la carte d'id path (importée au besoin), la couleur piquée rgb (0xRRGGBB). Un masque
+// sur le calque courant, blanc là où la carte a cette couleur ; son indice, -1 si rien.
+static minic_val_t mn_studio_colorid_mask(minic_val_t *a, int n) {
+	char *path = minic_arg_p(a, n, 0);
+	int   rgb  = (int)minic_arg_i(a, n, 1);
+	if (path == NULL || !iron_file_exists(path)) {
+		return minic_val_int(-1);
+	}
+	ui_header_draw_tool_properties_import(path);
+	render_target_t *rt = any_map_get(render_path_render_targets, "texpaint_colorid");
+	draw_begin(rt->_image, true, 0xff000000 | (unsigned)rgb);
+	draw_end();
+	g_context->colorid_picked = true;
+	if (slot_layer_is_mask(g_context->layer)) {
+		context_set_layer(g_context->layer->parent);
+	}
+	slot_layer_t *m = layers_new_mask(false, g_context->layer, -1);
+	if (m == NULL) {
+		return minic_val_int(-1);
+	}
+	history_new_white_mask();
+	ui_header_draw_tool_properties_to_mask(m);
+	return minic_val_int(array_index_of((any_array_t *)g_project->_->layers, m));
+}
+
+// Menu Export du masque i, fichier name dans dir, comme le sélecteur de fichiers. 1 si fait.
+static minic_val_t mn_studio_mask_export(minic_val_t *a, int n) {
+	int                   i      = (int)minic_arg_i(a, n, 0);
+	char                 *dir    = minic_arg_p(a, n, 1);
+	char                 *name   = minic_arg_p(a, n, 2);
+	slot_layer_t_array_t *layers = g_project->_->layers;
+	if (i < 0 || i >= (int)layers->length || !slot_layer_is_mask(layers->buffer[i]) || dir == NULL || name == NULL) {
+		return minic_val_int(0);
+	}
+	tab_layers_l      = layers->buffer[i];
+	ui_files_filename = name;
+	tab_layers_draw_layer_context_menu_export_on_file_picked(dir);
+	return minic_val_int(1);
+}
+
+// Calque courant = calque i. 1 si fait.
+static minic_val_t mn_studio_layer_select(minic_val_t *a, int n) {
+	int                   i      = (int)minic_arg_i(a, n, 0);
+	slot_layer_t_array_t *layers = g_project->_->layers;
+	if (i < 0 || i >= (int)layers->length) {
+		return minic_val_int(0);
+	}
+	context_set_layer(layers->buffer[i]);
 	return minic_val_int(1);
 }
 
@@ -814,31 +1190,6 @@ static minic_val_t mn_studio_layer_tree(minic_val_t *a, int n) {
 	return minic_val_ptr(s);
 }
 
-// Calque courant = calque i. 1 si fait.
-static minic_val_t mn_studio_layer_select(minic_val_t *a, int n) {
-	int                   i      = (int)minic_arg_i(a, n, 0);
-	slot_layer_t_array_t *layers = g_project->_->layers;
-	if (i < 0 || i >= (int)layers->length) {
-		return minic_val_int(0);
-	}
-	context_set_layer(layers->buffer[i]);
-	return minic_val_int(1);
-}
-
-// Met le calque i dans le groupe g (-1 : hors groupe), comme un glisser-déposer sur le groupe de l'onglet Layers ; les
-// enfants d'un groupe sont juste en dessous de lui dans la pile. 1 si fait.
-static minic_val_t mn_studio_layer_set_parent(minic_val_t *a, int n) {
-	int                   i      = (int)minic_arg_i(a, n, 0);
-	int                   g      = (int)minic_arg_i(a, n, 1);
-	slot_layer_t_array_t *layers = g_project->_->layers;
-	if (i < 0 || i >= (int)layers->length || g >= (int)layers->length || (g >= 0 && !slot_layer_is_group(layers->buffer[g]))) {
-		return minic_val_int(0);
-	}
-	layers->buffer[i]->parent       = g >= 0 ? layers->buffer[g] : NULL;
-	g_context->layers_preview_dirty = true;
-	return minic_val_int(1);
-}
-
 // Opacité du calque courant (0 à 1), comme le curseur Opacity de son menu, avec son pas d'historique. 1 si fait.
 static minic_val_t mn_studio_layer_set_opacity(minic_val_t *a, int n) {
 	f32 opacity = (f32)minic_arg_f(a, n, 0);
@@ -851,9 +1202,10 @@ static minic_val_t mn_studio_layer_set_opacity(minic_val_t *a, int n) {
 	return minic_val_int(1);
 }
 
-// Opération sur le calque courant, comme les menus, avec son pas d'historique, finie tout de suite : "clear", "merge_down"
-// (Merge Down), "merge_group" (Merge Group d'un groupe, par son menu), "apply_mask" (Apply Mask d'un masque), "undo",
-// "redo". Le lot D2 en ajoute d'autres (même fonction). 1 si fait.
+// Opération sur le calque courant, comme les menus, avec son pas d'historique, finie tout de suite : "duplicate",
+// "delete", "clear", "invert" (masque), "merge_down" (Merge Down), "merge_group" (Merge Group d'un groupe, par son menu),
+// "apply_mask" (Apply Mask d'un masque), "undo", "redo", "sync" (util_udim_sync, fait par le viewport à chaque image). 1 si
+// fait.
 static minic_val_t mn_studio_layer_op(minic_val_t *a, int n) {
 	char         *op = minic_arg_p(a, n, 0);
 	slot_layer_t *l  = g_context->layer;
@@ -867,9 +1219,20 @@ static minic_val_t mn_studio_layer_op(minic_val_t *a, int n) {
 	}
 	i32 before = (i32)_sys_on_next_frames->length;
 	int done   = 1;
-	if (strcmp(op, "clear") == 0) {
+	if (strcmp(op, "duplicate") == 0) {
+		history_duplicate_layer();
+		layers_duplicate_layer(l);
+	}
+	else if (strcmp(op, "delete") == 0) {
+		tab_layers_delete_layer(l);
+	}
+	else if (strcmp(op, "clear") == 0) {
 		history_clear_layer();
 		slot_layer_clear(l, slot_layer_is_mask(l) ? 0xffffffff : 0x00000000, NULL, 1.0, layers_default_rough, 0.0);
+	}
+	else if (strcmp(op, "invert") == 0 && slot_layer_is_mask(l)) {
+		history_invert_mask();
+		slot_layer_invert_mask(l);
 	}
 	else if (strcmp(op, "merge_down") == 0 && array_index_of((any_array_t *)g_project->_->layers, l) > 0) { // tab_layers.c, menu du calque
 		history_merge_layers();
@@ -895,6 +1258,9 @@ static minic_val_t mn_studio_layer_op(minic_val_t *a, int n) {
 	else if (strcmp(op, "redo") == 0) {
 		history_redo();
 	}
+	else if (strcmp(op, "sync") == 0) {
+		util_udim_sync();
+	}
 	else {
 		done = 0;
 	}
@@ -913,6 +1279,7 @@ void studio_atlas_init(void) {
 	minic_register("studio_atlases", "p()", mn_studio_atlases);
 	minic_register("studio_set_atlases", "p(p)", mn_studio_set_atlases);
 	minic_register("studio_import_mesh", "i(p,i)", mn_studio_import_mesh);
+	minic_register("studio_append_mesh", "i(p,i)", mn_studio_append_mesh);
 	minic_register("studio_dialog_title", "p()", mn_studio_dialog_title);
 	minic_register("studio_status_message", "p()", mn_studio_status_message);
 	minic_register("studio_layer_set_atlas", "i(i)", mn_studio_layer_set_atlas);
@@ -927,12 +1294,24 @@ void studio_atlas_init(void) {
 	minic_register("studio_mesh_set_parent", "i(p,p)", mn_studio_mesh_set_parent);
 	minic_register("studio_layer_masks", "p()", mn_studio_layer_masks);
 	minic_register("studio_project_res", "i(i)", mn_studio_project_res);
+	minic_register("studio_world_screen", "p(f,f,f)", mn_studio_world_screen);
+	minic_register("studio_paint_option", "i(p,i)", mn_studio_paint_option);
+	minic_register("studio_udim_pick", "p(p,f,f,f)", mn_studio_udim_pick);
+	minic_register("studio_clone_source", "i(f,f,f,f,f,f)", mn_studio_clone_source);
+	minic_register("studio_bake", "i(p,i,i)", mn_studio_bake);
+	minic_register("studio_bake_state", "p()", mn_studio_bake_state);
+	minic_register("studio_udim_stats", "p()", mn_studio_udim_stats);
+	minic_register("studio_udim_layer", "p(i)", mn_studio_udim_layer);
 	minic_register("studio_udim_pixel", "p(i,i,i,i,i)", mn_studio_udim_pixel);
 	minic_register("studio_layer_select", "i(i)", mn_studio_layer_select);
 	minic_register("studio_layer_set_parent", "i(i,i)", mn_studio_layer_set_parent);
-	minic_register("studio_layer_set_opacity", "i(f)", mn_studio_layer_set_opacity);
 	minic_register("studio_udim_fill", "i(i,i,i,f,f,f,f)", mn_studio_udim_fill);
+	minic_register("studio_rt_pixel", "p(p,f,f,f)", mn_studio_rt_pixel);
 	minic_register("studio_layer_op", "i(p)", mn_studio_layer_op);
 	minic_register("studio_layer_tree", "p()", mn_studio_layer_tree);
+	minic_register("studio_layer_set_opacity", "i(f)", mn_studio_layer_set_opacity);
+	minic_register("studio_mesh_override", "i(i,i)", mn_studio_mesh_override);
+	minic_register("studio_colorid_mask", "i(p,i)", mn_studio_colorid_mask);
+	minic_register("studio_mask_export", "i(i,p,p)", mn_studio_mask_export);
 #endif
 }

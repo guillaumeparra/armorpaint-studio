@@ -130,6 +130,16 @@ void make_texcoord_run(node_shader_t *kong, bool is_atlas) {
 		if (g_context->layer->uv_map == 1) {
 			node_shader_write_vert(kong, string_tmp("output.tex_coord = input.tex1 * %s;", scale));
 		}
+		else if (!is_atlas && util_udim_layer_should_tile(g_context->layer)) {
+			// STUDIO-PATCH(udim-tiles): texture per tile, materials in the UDIM space; bake in the uvs of the tile
+			if (g_context->tool == TOOL_TYPE_BAKE) {
+				node_shader_write_vert(kong, string_tmp("output.tex_coord = input.tex * %s;", scale));
+			}
+			else {
+				node_shader_add_constant(kong, "float2 udim_tile", "_udim_tile");
+				node_shader_write_vert(kong, string_tmp("output.tex_coord = (input.tex + constants.udim_tile) * %s;", scale));
+			}
+		}
 		else if (!is_atlas && util_mesh_udim_layer(g_context->layer)) {
 			// STUDIO-PATCH(udim-material-uv): materials in the UDIM space, continuous from a tile to its neighbours (upstream
 			// repeated them per tile); bake reads layer textures in atlas space

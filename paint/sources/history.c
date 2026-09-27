@@ -606,6 +606,9 @@ slot_layer_t *history_undo_slot(i32 i) {
 }
 
 void history_copy_to_undo(i32 from_id, i32 to_id, bool is_mask) {
+	if (util_udim_copy_to_undo(from_id, to_id, is_mask)) { // STUDIO-PATCH(udim-tiles): tiled layer, saved tile by tile
+		return;
+	}
 	char *to_id_s   = i32_to_string(to_id);
 	char *from_id_s = i32_to_string(from_id);
 	if (history_undo_layers != NULL && to_id < history_undo_layers->length) {
@@ -1027,7 +1030,9 @@ void history_edit_nodes(ui_node_canvas_t *canvas, i32 canvas_type, i32 canvas_gr
 
 void history_paint() {
 	bool is_mask = slot_layer_is_mask(g_context->layer);
-	history_copy_to_undo(g_context->layer->id, history_undo_i, is_mask);
+	if (!util_udim_paint_undo(g_context->layer, history_undo_i, is_mask)) { // STUDIO-PATCH(udim-tiles): tiles saved when first drawn to
+		history_copy_to_undo(g_context->layer->id, history_undo_i, is_mask);
+	}
 
 	history_push_undo    = false;
 	history_step_t *step = history_push(HISTORY_ACTION_PAINT);

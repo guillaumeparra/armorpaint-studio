@@ -91,6 +91,9 @@ f32 uniforms_ext_f32_link(object_t *object, shader_data_t *mat, char *link) {
 		f32  val  = (fill ? g_context->layer->scale : g_context->brush_scale) * g_context->brush_nodes_scale;
 		return val;
 	}
+	else if (string_equals(link, "_udim_tile_code")) { // STUDIO-PATCH(udim-tiles): the tile of the object drawn, for the pickers
+		return util_udim_tile_code(object);
+	}
 	else if (string_equals(link, "_atlas_stride")) {
 		return util_mesh_udim_active() ? util_mesh_atlas_stride() : 1.0;
 	}

@@ -195,6 +195,9 @@ void slot_layer_unload(slot_layer_t *raw) {
 }
 
 void slot_layer_swap(slot_layer_t *raw, slot_layer_t *other) {
+	if (util_udim_swap_layers(raw, other)) { // STUDIO-PATCH(udim-tiles): tiled layer and undo slot, swapped tile by tile
+		return;
+	}
 	if ((slot_layer_is_layer(raw) || slot_layer_is_mask(raw)) && (slot_layer_is_layer(other) || slot_layer_is_mask(other))) {
 		render_target_t *rt0     = any_map_get(render_path_render_targets, string("texpaint%s", raw->ext));
 		render_target_t *rt1     = any_map_get(render_path_render_targets, string("texpaint%s", other->ext));
@@ -238,23 +241,30 @@ void slot_layer_swap(slot_layer_t *raw, slot_layer_t *other) {
 }
 
 void slot_layer_clear(slot_layer_t *raw, i32 base_color, gpu_texture_t *base_image, f32 occlusion, f32 roughness, f32 metallic) {
-	// Base
-	_gpu_begin(raw->texpaint, NULL, NULL, GPU_CLEAR_COLOR, base_color, 0.0);
-	gpu_end();
-	if (base_image != NULL) {
-		draw_begin(raw->texpaint, false, 0);
-		draw_scaled_image(base_image, 0, 0, raw->texpaint->width, raw->texpaint->height);
-		draw_end();
-	}
+	// STUDIO-PATCH(udim-tiles): every tile, see paint/sources/util/util_udim.h
+	i32 udim_n = util_udim_loop_begin(util_udim_tile_layer(raw, false));
+	for (i32 udim_k = 0; udim_k < udim_n; ++udim_k) {
+		util_udim_loop_tile(udim_k);
 
-	if (slot_layer_is_layer(raw)) {
-		// Nor
-		_gpu_begin(raw->texpaint_nor, NULL, NULL, GPU_CLEAR_COLOR, color_from_floats(0.5, 0.5, 1.0, 0.0), 0.0);
+		// Base
+		_gpu_begin(raw->texpaint, NULL, NULL, GPU_CLEAR_COLOR, base_color, 0.0);
 		gpu_end();
-		// Occ, rough, met
-		_gpu_begin(raw->texpaint_pack, NULL, NULL, GPU_CLEAR_COLOR, color_from_floats(occlusion, roughness, metallic, 0.0), 0.0);
-		gpu_end();
+		if (base_image != NULL) {
+			draw_begin(raw->texpaint, false, 0);
+			draw_scaled_image(base_image, 0, 0, raw->texpaint->width, raw->texpaint->height);
+			draw_end();
+		}
+
+		if (slot_layer_is_layer(raw)) {
+			// Nor
+			_gpu_begin(raw->texpaint_nor, NULL, NULL, GPU_CLEAR_COLOR, color_from_floats(0.5, 0.5, 1.0, 0.0), 0.0);
+			gpu_end();
+			// Occ, rough, met
+			_gpu_begin(raw->texpaint_pack, NULL, NULL, GPU_CLEAR_COLOR, color_from_floats(occlusion, roughness, metallic, 0.0), 0.0);
+			gpu_end();
+		}
 	}
+	util_udim_loop_end();
 
 	g_context->layer_preview_dirty = true;
 	g_context->ddirty              = 3;
@@ -262,22 +272,29 @@ void slot_layer_clear(slot_layer_t *raw, i32 base_color, gpu_texture_t *base_ima
 }
 
 void slot_layer_invert_mask(slot_layer_t *raw) {
-	gpu_texture_t *inverted = gpu_create_render_target(raw->texpaint->width, raw->texpaint->height, GPU_TEXTURE_FORMAT_RGBA32);
-	draw_begin(inverted, false, 0);
-	draw_set_pipeline(pipes_invert_mask);
-	draw_image(raw->texpaint, 0, 0);
-	draw_set_pipeline(NULL);
-	draw_end();
-	gpu_texture_t *_texpaint = raw->texpaint;
-	gpu_delete_texture(_texpaint);
-	render_target_t *rt = any_map_get(render_path_render_targets, string("texpaint%d", raw->id));
-	raw->texpaint = rt->_image     = inverted;
+	// STUDIO-PATCH(udim-tiles): every tile, the inverted texture put in place of the old one (the view keeps its pointer),
+	// see paint/sources/util/util_udim.h
+	i32 udim_n = util_udim_loop_begin(util_udim_tile_layer(raw, true));
+	for (i32 udim_k = 0; udim_k < udim_n; ++udim_k) {
+		util_udim_loop_tile(udim_k);
+		gpu_texture_t *inverted = gpu_create_render_target(raw->texpaint->width, raw->texpaint->height, GPU_TEXTURE_FORMAT_RGBA32);
+		draw_begin(inverted, false, 0);
+		draw_set_pipeline(pipes_invert_mask);
+		draw_image(raw->texpaint, 0, 0);
+		draw_set_pipeline(NULL);
+		draw_end();
+		util_udim_replace(raw->texpaint, inverted);
+	}
+	util_udim_loop_end();
 	g_context->layer_preview_dirty = true;
 	g_context->ddirty              = 3;
 	g_context->rtdirty             = 1;
 }
 
 void layers_apply_mask(slot_layer_t *l, slot_layer_t *m) {
+	if (util_udim_apply_mask(l, m)) { // STUDIO-PATCH(udim-tiles): tiled layer, mask applied tile by tile (calls back here)
+		return;
+	}
 	if (!slot_layer_is_layer(l) || !slot_layer_is_mask(m)) {
 		return;
 	}
@@ -330,36 +347,43 @@ slot_layer_t *slot_layer_duplicate(slot_layer_t *raw) {
 	array_insert(layers, i, l);
 	tab_stages_add_layer(l->name);
 
-	if (slot_layer_is_layer(raw)) {
-		draw_begin(l->texpaint, false, 0);
-		draw_set_pipeline(pipes_copy);
-		draw_image(raw->texpaint, 0, 0);
-		draw_set_pipeline(NULL);
-		draw_end();
+	// STUDIO-PATCH(udim-tiles): every tile, see paint/sources/util/util_udim.h
+	i32 udim_n = util_udim_loop_begin(util_udim_layer_tiled(raw) && util_udim_tile_layer(l, false));
+	for (i32 udim_k = 0; udim_k < udim_n; ++udim_k) {
+		util_udim_loop_tile(udim_k);
 
-		if (l->texpaint_nor != NULL) {
-			draw_begin(l->texpaint_nor, false, 0);
+		if (slot_layer_is_layer(raw)) {
+			draw_begin(l->texpaint, false, 0);
 			draw_set_pipeline(pipes_copy);
-			draw_image(raw->texpaint_nor, 0, 0);
+			draw_image(raw->texpaint, 0, 0);
 			draw_set_pipeline(NULL);
 			draw_end();
-		}
 
-		if (l->texpaint_pack != NULL) {
-			draw_begin(l->texpaint_pack, false, 0);
-			draw_set_pipeline(pipes_copy);
-			draw_image(raw->texpaint_pack, 0, 0);
+			if (l->texpaint_nor != NULL) {
+				draw_begin(l->texpaint_nor, false, 0);
+				draw_set_pipeline(pipes_copy);
+				draw_image(raw->texpaint_nor, 0, 0);
+				draw_set_pipeline(NULL);
+				draw_end();
+			}
+
+			if (l->texpaint_pack != NULL) {
+				draw_begin(l->texpaint_pack, false, 0);
+				draw_set_pipeline(pipes_copy);
+				draw_image(raw->texpaint_pack, 0, 0);
+				draw_set_pipeline(NULL);
+				draw_end();
+			}
+		}
+		else if (slot_layer_is_mask(raw)) {
+			draw_begin(l->texpaint, false, 0);
+			draw_set_pipeline(pipes_copy8);
+			draw_image(raw->texpaint, 0, 0);
 			draw_set_pipeline(NULL);
 			draw_end();
 		}
 	}
-	else if (slot_layer_is_mask(raw)) {
-		draw_begin(l->texpaint, false, 0);
-		draw_set_pipeline(pipes_copy8);
-		draw_image(raw->texpaint, 0, 0);
-		draw_set_pipeline(NULL);
-		draw_end();
-	}
+	util_udim_loop_end();
 
 	if (l->texpaint_preview != NULL) {
 		draw_begin(l->texpaint_preview, true, 0x00000000);
@@ -409,7 +433,9 @@ void slot_layer_resize_and_set_bits(slot_layer_t *raw) {
 	i32        res_y = config_get_texture_res_y();
 	any_map_t *rts   = render_path_render_targets;
 
-	if (slot_layer_is_layer(raw)) {
+	if (util_udim_resize_layer(raw, res_x, res_y)) { // STUDIO-PATCH(udim-tiles): tiled layer, every tile resized in place
+	}
+	else if (slot_layer_is_layer(raw)) {
 		gpu_texture_format_t format = base_bits == TEXTURE_BITS_BITS8    ? GPU_TEXTURE_FORMAT_RGBA32
 		                              : base_bits == TEXTURE_BITS_BITS16 ? GPU_TEXTURE_FORMAT_RGBA64
 		                                                                 : GPU_TEXTURE_FORMAT_RGBA128;

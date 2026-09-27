@@ -100,15 +100,22 @@ void ui_header_draw_tool_properties_color_picker_base() {
 }
 
 void ui_header_draw_tool_properties_to_mask(slot_layer_t *m) {
-	_gpu_begin(m->texpaint, NULL, NULL, GPU_CLEAR_NONE, 0, 0.0);
-	gpu_set_pipeline(pipes_colorid_to_mask);
-	render_target_t *rt = any_map_get(render_path_render_targets, "texpaint_colorid");
-	gpu_set_texture(pipes_texpaint_colorid, rt->_image);
-	gpu_set_texture(pipes_tex_colorid, project_get_image(g_project->_->assets->buffer[g_context->colorid]));
-	gpu_set_vertex_buffer(const_data_screen_aligned_vb);
-	gpu_set_index_buffer(const_data_screen_aligned_ib);
-	gpu_draw();
-	gpu_end();
+	// STUDIO-PATCH(udim-tiles): every tile, the color id map read in the uv of each tile (as the ColorID brush does),
+	// see paint/sources/util/util_udim.h
+	i32 udim_n = util_udim_loop_begin(util_udim_tile_layer(m, false));
+	for (i32 udim_k = 0; udim_k < udim_n; ++udim_k) {
+		util_udim_loop_tile(udim_k);
+		_gpu_begin(m->texpaint, NULL, NULL, GPU_CLEAR_NONE, 0, 0.0);
+		gpu_set_pipeline(pipes_colorid_to_mask);
+		render_target_t *rt = any_map_get(render_path_render_targets, "texpaint_colorid");
+		gpu_set_texture(pipes_texpaint_colorid, rt->_image);
+		gpu_set_texture(pipes_tex_colorid, project_get_image(g_project->_->assets->buffer[g_context->colorid]));
+		gpu_set_vertex_buffer(const_data_screen_aligned_vb);
+		gpu_set_index_buffer(const_data_screen_aligned_ib);
+		gpu_draw();
+		gpu_end();
+	}
+	util_udim_loop_end();
 	g_context->colorid_picked      = false;
 	ui_toolbar_handle->redraws     = 1;
 	ui_header_handle->redraws      = 1;
