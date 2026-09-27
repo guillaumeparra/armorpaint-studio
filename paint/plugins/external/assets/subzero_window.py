@@ -25,21 +25,28 @@
 # STUDIO_OCIO_*), appliquée à la fenêtre ou enregistrée dans studio.env (studio_env.py). ArmorPaint n'a lu studio.env
 # qu'à son démarrage : la fenêtre relit ses variables de couleur à l'ouverture, sauf celles de l'environnement.
 #
+# Viewer (subzero_viewer.py) : panneau carré à gauche des réglages, bouton Viewer ; $SUBZERO_VIEWER (défaut : ouvert
+# sans ArmorPaint, fermé avec). Il montre les cartes du dernier rendu, touches 1 à 9 ou clic sur une vignette. Sans
+# ArmorPaint, taille par défaut 512 ($SUBZERO_SIZE) et aperçus à la taille choisie, pour que le viewer montre ce qui
+# sera exporté. Sans ArmorPaint aussi, navigateur de paquets à gauche (subzero_browser.py, bouton Browser) : un onglet
+# par dossier de $SUBZERO_LIBRARY, et ceux ajoutés par « + ».
+#
 # SUBZERO_TEST=<fichier.json> : essai sans intervention (.tests/subzero_app.sh, .tests/subzero_window_ui.py). Le
 # fichier donne "open" ({"file"} ou {"dir"} : paquet, ou matériau déjà envoyé à rééditer ; absent : celui de l'état),
 # "graph", "preset", "values" ({id: valeur}), "size" (log2, ou null pour celle du projet), "format" (clé de
 # subzero_render.FORMATS), "live", "dir" (dossier de
 # base d'un projet jamais enregistré), "action" ("create", "update", "duplicate" ou "none"), "settings" ({variable:
 # valeur ou null}, avec "save": true pour écrire studio.env), "result" (fichier écrit à la fin), "screenshot" et
-# "settings_screenshot" (panneau Settings). La fenêtre les applique, agit, écrit le résultat, puis se ferme.
+# "settings_screenshot" (panneau Settings), "viewer" (ouvert ou non), puis, avant la capture, "viewer_map" (canal),
+# "viewer_keys" ([{"key": caractère, "keypad", "vk" (code virtuel macOS), "scan"}]), "exposure", "gamma", "saturation",
+# "zoom" ("fit", "1:1" ou un facteur) et "viewer_hover" ([x, y] : valeurs lues à ce pixel). Navigateur : "browser"
+# (ouvert ou non), "browser_add" (dossier ajouté au démarrage), "browser_open" (nom d'un paquet de l'onglet courant,
+# ouvert comme par un double clic, à la place de "open"), puis, avant la capture, "browser_tab" (dossier de l'onglet
+# montré) et "browser_search" (texte). La fenêtre les applique, agit, écrit le résultat, puis se ferme.
 
-import datetime
-import hashlib
 import json
 import math
 import os
-import posixpath
-import re
 import shutil
 import sys
 import threading
@@ -49,351 +56,25 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 import studio_env
 import studio_qt
-import subzero_7z
+import subzero_browser
 import subzero_color
 import subzero_exr
 import subzero_meta
+from subzero_meta import read_icons
 import subzero_render
-from studio_qt import ERROR, MUTED, SUCCESS, WARNING, log, muted
+import subzero_viewer
+from subzero_material import (CHANNEL_LABEL, CHANNEL_SUFFIX, CHANNELS, COLOR_VARS, MAP_VARS, NAME_TEMPLATE, RECIPE,
+                              SUBZERO_VARS, apply_overrides, auto_mapping, check_template, condition, env_flag, env_values, links,
+                              graph_values, log2_size, make_recipe, read_recipe, recipe_package, recipe_spaces, render_material,
+                              render_values, shown, slug, stale_files, subzero_dir, write_recipe)
+from studio_qt import ERROR, MUTED, PAINTER_ACCENT, SUCCESS, WARNING, log, muted
+from subzero_viewer import read_tga
 
-RECIPE = "subzero.json"
 PREVIEW_SIZE = 9  # 512
 THUMB = 72  # sept vignettes sur la largeur de la fenêtre
 SOON_MS = 300  # réglage au clavier ou à la molette : rendu après ce délai sans nouveau changement
-
-# Canaux d'ArmorPaint : socket de la sortie PBR (import_folder.c) et suffixe du fichier, reconnu par les règles de nom.
-CHANNELS = [
-    ("base", "Base Color", 0, "basecolor"),
-    ("opacity", "Opacity", 1, "opacity"),
-    ("occlusion", "Occlusion", 2, "occlusion"),
-    ("roughness", "Roughness", 3, "roughness"),
-    ("metallic", "Metallic", 4, "metallic"),
-    ("normal", "Normal", 5, "normal"),
-    ("height", "Height", 7, "height"),
-]
-CHANNEL_LABEL = {c[0]: c[1] for c in CHANNELS}
-CHANNEL_SOCKET = {c[0]: c[2] for c in CHANNELS}
-CHANNEL_SUFFIX = {c[0]: c[3] for c in CHANNELS}
-COLOR_SPACES = {"base": "srgb_tx"}  # sans PyOpenColorIO (lot E6) : espace intégré de ce qu'écrit sbsrender
-
-# Variables des réglages de couleur (lot E11) : celles de subzero, puis celles d'ArmorPaint (réglées ici sans lui).
-MAP_VARS = [(ch, subzero_color.map_var(CHANNEL_SUFFIX[ch])) for ch in CHANNEL_LABEL]
-SUBZERO_VARS = [subzero_color.VAR_COLOR, subzero_color.VAR_DATA] + [v for _, v in MAP_VARS] + [subzero_color.VAR_PICKING]
-COLOR_VARS = SUBZERO_VARS + list(subzero_color.HOST_VARS)
-
-# Usage (ou identifiant) d'une sortie -> canal.
-USAGE_CHANNEL = {
-    "basecolor": "base", "opacity": "opacity", "ambientocclusion": "occlusion", "roughness": "roughness",
-    "metallic": "metallic", "normal": "normal", "height": "height",
-}
-NAME_CHANNEL = dict(USAGE_CHANNEL, albedo="base", base="base", ao="occlusion", occlusion="occlusion",
-                    metalness="metallic", metal="metallic", rough="roughness", displacement="height", alpha="opacity")
-# Sorties connues qu'ArmorPaint ne sait pas représenter : montrées, non liées.
-UNSUPPORTED = {
-    "emissive": "ArmorPaint only has an emission flag",
-    "diffuse": "specular/glossiness workflow: base color is used",
-    "specular": "specular/glossiness workflow", "glossiness": "specular/glossiness workflow",
-    "specularlevel": "no specular level in ArmorPaint", "anisotropylevel": "no anisotropy in ArmorPaint",
-    "anisotropyangle": "no anisotropy in ArmorPaint", "translucency": "no translucency in ArmorPaint",
-    "scatteringcolor": "no subsurface color in ArmorPaint", "scatteringdistancescale": "no subsurface in ArmorPaint",
-    "sheencolor": "no sheen in ArmorPaint", "sheenopacity": "no sheen in ArmorPaint",
-    "sheenroughness": "no sheen in ArmorPaint", "absorptioncolor": "no absorption in ArmorPaint",
-}
-
-# Paramètres techniques, fixés d'office et masqués comme dans Painter : bascules channel_<canal> (le canal existe dans
-# le projet) et format de la normale (OpenGL, celui d'ArmorPaint).
-PAINTER_CHANNELS = {
-    "diffuse", "basecolor", "specular", "glossiness", "roughness", "metallic", "height", "normal", "ambientocclusion",
-    "specularlevel", "opacity", "translucency", "scatter", "scatteringcolor", "scatteringdistancescale",
-    "anisotropylevel", "anisotropyangle", "redshift", "rayleigh", "absorptioncolor", "mask", "sheenopacity",
-    "sheencolor", "sheenroughness", "emissive", "displacement", "ior",
-}
-PROJECT_CHANNELS = {"basecolor", "normal", "roughness", "metallic", "height", "ambientocclusion", "opacity", "emissive"}
-
-
-
-# ---- Règles pures (testées sans Qt) ------------------------------------------------------------------------------------
-
-
-def env_flag(name, default):
-    """Variable d'environnement booléenne (lot E5) : 0, false, no, off ou vide = faux ; absente = default."""
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    return value.strip().lower() not in ("", "0", "false", "no", "off")
-
-
-def slug(label):
-    """Nom de dossier et préfixe des fichiers : un seul mot, « Colorful Planks » -> « ColorfulPlanks »."""
-    words = re.findall(r"[A-Za-z0-9]+", label or "")
-    s = "".join(w[:1].upper() + w[1:] for w in words)
-    return s or "Material"
-
-
-def subzero_dir(project_file):
-    """Dossier des matériaux d'un projet : « /p/robot_v003.arm » -> « /p/robot_subzero », commun à ses versions."""
-    stem = re.sub(r"\.arm$", "", os.path.basename(project_file), flags=re.I)
-    stem = re.sub(r"[._-]v\d+$", "", stem, flags=re.I) or stem
-    return os.path.join(os.path.dirname(project_file), stem + "_subzero")
-
-
-def technical_value(inp):
-    """Valeur imposée d'un paramètre technique, None pour un paramètre montré."""
-    ident = inp["identifier"]
-    if inp.get("widget") == "combobox" and (ident == "normal_format" or "$normal_map_format" in (inp.get("usertag") or {})):
-        for value, label in inp.get("items") or []:
-            if "opengl" in str(label).lower():
-                return value
-        return None
-    if inp.get("widget") == "togglebutton" and ident.startswith("channel_") and ident[8:] in PAINTER_CHANNELS:
-        return 1 if ident[8:] in PROJECT_CHANNELS else 0
-    return None
-
-
-def shown(inp):
-    """Paramètre montré à l'artiste (hors système, techniques et types que sbsrender ne reçoit pas en valeur)."""
-    return (not inp.get("system") and inp.get("widget") is not None and technical_value(inp) is None
-            and inp["type"] not in ("string", "font"))
-
-
-def env_values(graph, values):
-    env = {i["identifier"]: i["default"] for i in graph["inputs"]}
-    env.update(values)
-    for i in graph["inputs"]:
-        t = technical_value(i)
-        if t is not None:
-            env[i["identifier"]] = t
-    return env
-
-
-_compiled = {}
-
-
-def condition(expr, env):
-    f = _compiled.get(expr)
-    if f is None:
-        try:
-            f = subzero_meta.compile_visibleif(expr)
-        except Exception:  # noqa: BLE001 - condition illisible : visible, comme Painter
-            f = lambda env: True  # noqa: E731
-        _compiled[expr] = f
-    try:
-        return bool(f(env))
-    except Exception:  # noqa: BLE001
-        return True
-
-
-def output_channel(output):
-    """(canal, None) ou (None, raison : non représentable dans ArmorPaint, ou usage inconnu)."""
-    for u in output.get("usages") or []:
-        key = re.sub(r"[^a-z0-9]", "", u.lower())
-        if key in USAGE_CHANNEL:
-            return USAGE_CHANNEL[key], None
-        if key in UNSUPPORTED:
-            return None, UNSUPPORTED[key]
-    key = re.sub(r"[^a-z0-9]", "", output["identifier"].lower())
-    key = key[7:] if key.startswith("channel") and key != "channel" else key
-    if key in NAME_CHANNEL:
-        return NAME_CHANNEL[key], None
-    return None, UNSUPPORTED.get(key) or "Unknown usage: choose a channel by hand"
-
-
-def auto_mapping(graph, values):
-    """[(sortie, canal ou None, raison)] des sorties image visibles, dans l'ordre du graphe ; un canal par sortie au
-    plus, la première l'emporte. Sans couleur de base, la diffuse en tient lieu."""
-    env = env_values(graph, values)
-    rows, taken = [], set()
-    for o in graph["outputs"]:
-        if o["type"] != "image" or (o.get("visibleif") and not condition(o["visibleif"], env)):
-            continue
-        ch, why = output_channel(o)
-        if ch in taken:
-            ch, why = None, "%s already comes from another output" % CHANNEL_LABEL[ch]
-        if ch:
-            taken.add(ch)
-        rows.append([o, ch, why])
-    if "base" not in taken:
-        for row in rows:
-            if row[1] is None and "diffuse" in [u.lower() for u in row[0].get("usages") or []]:
-                row[1], row[2] = "base", None
-                break
-    return rows
-
-
-def render_values(graph, values):
-    """Valeurs à passer à sbsrender : celles qui diffèrent du défaut, plus les paramètres techniques."""
-    by_id = {i["identifier"]: i for i in graph["inputs"]}
-    out = {}
-    for k, v in values.items():
-        i = by_id.get(k)
-        if i is not None and i["type"] not in ("image", "string", "font") and v != i["default"]:
-            out[k] = v
-    for i in graph["inputs"]:
-        t = technical_value(i)
-        if t is not None and t != i["default"]:
-            out[i["identifier"]] = t
-    return out
-
-
-def split_alpha(base, opacity=None):
-    """Couleur de base dont l'alpha n'est pas partout opaque (décalque) : ArmorPaint multiplie la couleur par l'alpha
-    (image_texture_node.c, sauf en JPEG), d'où des bords sombres sous l'opacité. La couleur est réécrite sans alpha ;
-    l'alpha va dans opacity (niveaux de gris, même format) s'il est donné. Vrai si réécrit."""
-    ext = os.path.splitext(base)[1].lower()
-    if ext == ".tga":
-        return split_alpha_tga(base, opacity)
-    if ext == ".exr":
-        return subzero_exr.split_alpha(base, opacity)
-    if ext in (".png", ".tif", ".tiff"):
-        return split_alpha_qt(base, opacity)
-    return False
-
-
-def split_alpha_tga(base, opacity=None):
-    """split_alpha d'un TGA non compressé, ce qu'écrit sbsrender."""
-    try:
-        with open(base, "rb") as f:
-            data = f.read()
-    except OSError:
-        return False
-    if len(data) < 18 or data[2] != 2 or data[16] != 32:
-        return False
-    start = 18 + data[0] + ((data[5] | data[6] << 8) * ((data[7] + 7) // 8) if data[1] else 0)
-    n = (data[12] | data[13] << 8) * (data[14] | data[15] << 8)
-    end = start + n * 4
-    if len(data) < end:
-        return False
-    alpha = data[start + 3:end:4]
-    if alpha.count(255) == n:
-        return False
-    rgb = bytearray(n * 3)
-    for c in range(3):
-        rgb[c::3] = data[start + c:end:4]
-    orient = data[17] & 0x30  # origine en haut, de droite à gauche
-
-    def write(path, kind, bpp, desc, body):
-        tmp = path + ".tmp"
-        with open(tmp, "wb") as f:
-            f.write(bytes([0, 0, kind, 0, 0, 0, 0, 0]) + data[8:16] + bytes([bpp, desc]))
-            f.write(body)
-            f.write(TGA_FOOTER)
-        os.replace(tmp, path)
-
-    if opacity:
-        write(opacity, 3, 8, 0x08 | orient, alpha)  # comme les sorties grises de sbsrender
-    write(base, 2, 24, orient, rgb)
-    return True
-
-
-def links(files, spaces=None, was=None):
-    """Liaisons pour ArmorPaint : [{"file", "output" (0 couleur, 1 alpha), "socket", "color_space", "color_space_was"}].
-    spaces : {canal: espace du fichier} (défaut COLOR_SPACES) ; was : ceux du rendu précédent envoyé."""
-    spaces = COLOR_SPACES if spaces is None else spaces
-    out = []
-    for ch, path in files.items():
-        link = {"file": path, "output": 0, "socket": CHANNEL_SOCKET[ch]}
-        if spaces.get(ch):
-            link["color_space"] = spaces[ch]
-            if (was or {}).get(ch):
-                link["color_space_was"] = was[ch]
-        out.append(link)
-    return out
-
-
-def recipe_spaces(recipe):
-    """Espaces des textures d'une recette : ceux qu'elle note (E11), la couleur de base en srgb_tx pour une recette
-    du lot E6 (avec format), aucun pour la v0."""
-    color = recipe.get("color")
-    if isinstance(color, dict) and isinstance(color.get("spaces"), dict):
-        return dict(color["spaces"])
-    return dict(COLOR_SPACES) if recipe.get("format") else {}
-
-
-def convert_maps(color, files, fmt):
-    """Cartes rendues passées dans l'espace réglé (subzero_color.Color, thread du rendu) ; rend ({canal: espace du
-    fichier}, [avertissements], [canaux réécrits]). Sans OCIO : fichiers tels quels, espaces de COLOR_SPACES (lot E6).
-    Une conversion ratée laisse le fichier tel que sbsrender l'a écrit, dans son espace source."""
-    if color is None or not color.ready:
-        return {ch: cs for ch, cs in COLOR_SPACES.items() if ch in files}, [], []
-    spaces, notes, converted = {}, [], []
-    plan = color.plan([(ch, CHANNEL_SUFFIX[ch]) for ch in files])
-    for ch, path in files.items():
-        src, dst, err = plan[ch]
-        if err:
-            notes.append(err)
-        if not src:
-            notes.append("%s: no %s in the OCIO configuration, left as rendered" % (
-                CHANNEL_LABEL[ch], "sRGB texture space" if ch in subzero_color.COLOR_MAPS else "data space"))
-            if ch in COLOR_SPACES:
-                spaces[ch] = COLOR_SPACES[ch]
-            continue
-        try:
-            if color.convert_file(path, src, dst):
-                converted.append(ch)
-        except subzero_color.Error as e:
-            notes.append(str(e))
-            spaces[ch] = src
-            continue
-        spaces[ch] = dst
-        if dst != src and not subzero_render.FORMATS[fmt]["float"] and color.encoding(dst) == "scene-linear":
-            notes.append("%s in %s (scene-linear) as 8-bit %s: banding, prefer EXR" % (
-                CHANNEL_LABEL[ch], dst, subzero_render.FORMATS[fmt]["label"]))
-    return spaces, notes, converted
-
-
-def stale_files(folder, keep):
-    """Textures d'un rendu précédent du dossier (<Nom>_<canal>.<ext>, un autre format ou une sortie retirée) qui ne sont
-    pas dans keep (chemins)."""
-    prefix = os.path.basename(folder.rstrip("/"))
-    exts = {f["ext"] for f in subzero_render.FORMATS.values()}
-    keep = {os.path.normpath(k) for k in keep}
-    names = ("%s_%s%s" % (prefix, suffix, ext) for suffix in CHANNEL_SUFFIX.values() for ext in sorted(exts))
-    return [os.path.join(folder, n) for n in names
-            if os.path.isfile(os.path.join(folder, n)) and os.path.normpath(os.path.join(folder, n)) not in keep]
-
-
-def file_sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def read_recipe(folder):
-    with open(os.path.join(folder, RECIPE), encoding="utf-8") as f:
-        recipe = json.load(f)
-    if not isinstance(recipe, dict) or recipe.get("tool") != "subzero":
-        raise ValueError("not a subzero recipe")
-    return recipe
-
-
-def recipe_package(recipe, folder):
-    """Chemin du paquet d'une recette : absolu s'il existe, sinon relatif au dossier (projet déplacé)."""
-    pkg = recipe.get("package") or {}
-    path = pkg.get("path") or ""
-    if path and os.path.isfile(path):
-        return path
-    rel = pkg.get("relative") or ""
-    if rel:
-        candidate = os.path.normpath(os.path.join(folder, rel))
-        if os.path.isfile(candidate):
-            return candidate
-    return path
-
-
-def write_recipe(folder, recipe):
-    path = os.path.join(folder, RECIPE)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(recipe, f, indent=1, sort_keys=True)
-        f.write("\n")
-    os.replace(tmp, path)
-
-
-def log2_size(n):
-    return max(4, min(13, int(round(math.log2(max(1, n))))))
-
+COLUMN = 560  # largeur de la colonne des réglages
+WINDOW_HEIGHT = 860  # hauteur à l'ouverture, et côté du viewer, dans la limite de l'écran
 
 # ---- Rendu en arrière-plan --------------------------------------------------------------------------------------------
 
@@ -461,41 +142,6 @@ class Worker(QtCore.QObject):
                 self.finished.emit(job, result)
 
 
-def read_icons(desc, sbsar):
-    """{pkgurl: PNG} des icônes de graphes, rangées à côté du XML de leur assemblage dans l'archive."""
-    wanted = {g["pkgurl"]: posixpath.join(posixpath.dirname(a["member"]), g["icon"])
-              for a in desc["assemblies"] for g in a["graphs"] if g.get("icon")}
-    if not wanted:
-        return {}
-    try:
-        members = subzero_7z.read_7z(sbsar)
-    except (OSError, ValueError):
-        return {}
-    return {url: members[m] for url, m in wanted.items() if members.get(m)}
-
-
-TGA_FOOTER = bytes(8) + b"TRUEVISION-XFILE.\0"  # pied TGA 2.0, qu'écrit sbsrender : Qt refuse un TGA sans lui
-
-
-def read_tga(path):
-    """TGA non compressé : gris 8 bits (type 3, sorties grises de sbsrender, que Qt ne lit pas), couleur 24 ou 32 bits
-    (type 2), même sans le pied TGA 2.0 (couleur de base réécrite par split_alpha avant le lot E11). QImage nulle
-    sinon."""
-    with open(path, "rb") as f:
-        head = f.read(18)
-        if len(head) < 18 or head[1] or (head[2], head[16]) not in ((3, 8), (2, 24), (2, 32)):
-            return QtGui.QImage()
-        w, h, n = head[12] | head[13] << 8, head[14] | head[15] << 8, head[16] // 8
-        f.seek(18 + head[0])
-        data = f.read(w * h * n)
-    if len(data) < w * h * n:
-        return QtGui.QImage()
-    fmt = {1: QtGui.QImage.Format_Grayscale8, 3: QtGui.QImage.Format_BGR888, 4: QtGui.QImage.Format_ARGB32}[n]
-    image = QtGui.QImage(data, w, h, w * n, fmt).copy()  # ARGB32 : octets B, G, R, A en petit-boutiste, comme le TGA
-    flip = QtGui.QTransform().scale(-1 if head[17] & 0x10 else 1, 1 if head[17] & 0x20 else -1)  # origine en bas
-    return image if flip.isIdentity() else image.transformed(flip)
-
-
 def read_exr_thumb(path, proc=None):
     """Vignette d'un EXR (Qt ne le lit pas) : sans compression, ZIPS ou ZIP, un pixel sur n ; QImage nulle sinon.
     proc : transformation de couleur (subzero_color), appliquée aux valeurs flottantes."""
@@ -509,30 +155,6 @@ def read_exr_thumb(path, proc=None):
     if proc is not None:
         return subzero_color.floats_image(data, w, h, proc)
     return QtGui.QImage(data, w, h, w * 3, QtGui.QImage.Format_RGB888).copy()
-
-
-def split_alpha_qt(base, opacity=None):
-    """split_alpha d'un PNG ou d'un TIFF 8 bits, par Qt (thread du rendu)."""
-    image = QtGui.QImageReader(base).read()
-    if image.isNull() or not image.hasAlphaChannel():
-        return False
-    alpha = image.convertToFormat(QtGui.QImage.Format_Alpha8)
-    w, h, bpl = alpha.width(), alpha.height(), alpha.bytesPerLine()
-    bits = bytes(alpha.constBits())
-    if all(bits[y * bpl:y * bpl + w].count(255) == w for y in range(h)):
-        return False
-    fmt = "tif" if base.lower().endswith((".tif", ".tiff")) else "png"
-
-    def save(img, path):
-        tmp = path + ".tmp"
-        if not img.save(tmp, fmt):
-            raise OSError("could not write %s" % path)
-        os.replace(tmp, path)
-
-    if opacity:
-        save(QtGui.QImage(bits, w, h, bpl, QtGui.QImage.Format_Grayscale8).copy(), opacity)
-    save(image.convertToFormat(QtGui.QImage.Format_RGB888), base)
-    return True
 
 
 def load_thumbs(files, color=None, spaces=None):
@@ -1000,6 +622,33 @@ class Params(QtWidgets.QWidget):
         return any(not row.reset.isHidden() for row in self.rows.values())
 
 
+# ---- Sans ArmorPaint (lot E9) -----------------------------------------------------------------------------------------
+
+
+class LocalHost(QtCore.QObject):
+    """Tient lieu d'ArmorPaint (subzero_app.py) : même interface que studio_qt.Channel (request, events, closed). L'état
+    vient de l'environnement ; créer ou mettre à jour un matériau, c'est l'avoir exporté (la fenêtre a déjà écrit les
+    textures et la recette). Réponses différées comme celles d'un vrai hôte."""
+
+    closed = QtCore.Signal()
+    standalone = True
+
+    def __init__(self, state):
+        super().__init__()
+        self.state = state
+        self.events = {}
+
+    def request(self, op, args, callback):
+        args = args or {}
+        if op == "state":
+            reply, error = dict(self.state), None
+        elif op in ("create", "update"):
+            reply, error = {"material": args.get("name"), "kept": []}, None
+        else:
+            reply, error = None, {"code": "unsupported", "message": "%s: not available without ArmorPaint" % op}
+        QtCore.QTimer.singleShot(0, lambda: callback(reply, error))
+
+
 # ---- Fenêtre -------------------------------------------------------------------------------------------------------------
 
 
@@ -1311,10 +960,21 @@ class SettingsDialog(QtWidgets.QDialog):
 
 class SubzeroWindow(QtWidgets.QWidget):
     def __init__(self, channel, mac, test=None):
-        super().__init__(None, QtCore.Qt.Window | QtCore.Qt.WindowStaysOnTopHint)
+        # Sans ArmorPaint (lot E9, subzero_app.py) : fenêtre ordinaire, qui exporte dans un dossier.
+        self.standalone = bool(getattr(channel, "standalone", False))
+        flags = QtCore.Qt.Window if self.standalone else QtCore.Qt.Window | QtCore.Qt.WindowStaysOnTopHint
+        super().__init__(None, flags)
         self.channel = channel
         self.mac = mac
         self.test = test
+        self.template, self.template_error = NAME_TEMPLATE, None
+        if self.standalone:
+            wanted = os.environ.get("SUBZERO_EXPORT_TEMPLATE") or NAME_TEMPLATE
+            self.template_error = check_template(wanted)
+            if self.template_error is None:
+                self.template = wanted
+            else:
+                log(self.template_error)
         self.test_log = {}
         self.state = {}
         self.tools = None
@@ -1341,6 +1001,7 @@ class SubzeroWindow(QtWidgets.QWidget):
         self.origins = {}  # variable de couleur -> fichier, studio_env.ENVIRONMENT ou WINDOW
         self.locked = set()  # variables de l'environnement, que studio.env ne change pas
         self.applied_spaces = {}  # {canal: espace} des textures du matériau envoyé, pour color_space_was
+        self.previous_files = []  # noms des textures du matériau envoyé (recette), nettoyées si un rendu les remplace
         self.thumb_files = None  # ({canal: fichier}, {canal: espace}) des vignettes montrées
         self.settings = None  # SettingsDialog
         self.worker = Worker()
@@ -1349,10 +1010,22 @@ class SubzeroWindow(QtWidgets.QWidget):
         self.soon = QtCore.QTimer(self, singleShot=True, interval=SOON_MS)
         self.soon.timeout.connect(self._commit)
         self.setWindowTitle("subzero")
-        self.resize(560, 860)
         self.setAcceptDrops(True)
         self._build()
         self._update_buttons()
+        viewer = (test or {}).get("viewer")
+        self.viewer_button.setChecked(env_flag("SUBZERO_VIEWER", self.standalone) if viewer is None else bool(viewer))
+        self.viewer.setVisible(self.viewer_button.isChecked())
+        if self.browser is not None:
+            shown = (test or {}).get("browser")
+            self.browser_button.setChecked(self.browser.config.get("visible", True) if shown is None else bool(shown))
+            self.browser.setVisible(self.browser_button.isChecked())
+            if (test or {}).get("browser_add"):
+                self.browser.add_folder(test["browser_add"])
+        self._initial_geometry()
+        self.viewer_button.toggled.connect(lambda on: self._toggle_panel(self.viewer, on))
+        if self.browser is not None:
+            self.browser_button.toggled.connect(lambda on: self._toggle_panel(self.browser, on))
         channel.events["raise"] = lambda m: self.to_front()
         channel.events["open"] = self._on_open_event
         channel.events["prefs"] = self._on_prefs_event
@@ -1366,8 +1039,23 @@ class SubzeroWindow(QtWidgets.QWidget):
 
     def _build(self):
         # Disposition du panneau Shader Settings de Painter : barre du haut (matériau, boutons de même largeur, nom,
-        # vignettes), sections défilantes (MATERIAL, PARAMETERS, OUTPUTS), barre du bas (état, envoi).
-        root = QtWidgets.QVBoxLayout(self)
+        # vignettes), sections défilantes (MATERIAL, PARAMETERS, OUTPUTS), barre du bas (état, envoi). À gauche de
+        # cette colonne, le viewer.
+        outer = QtWidgets.QHBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        self.viewer = subzero_viewer.Viewer(CHANNEL_LABEL)
+        self.viewer.mapChanged.connect(lambda ch: self._highlight_thumbs())
+        self.viewer_keys = subzero_viewer.Keys(self, self.viewer)
+        self.browser = subzero_browser.Browser() if self.standalone else None
+        if self.browser is not None:
+            self.browser.opened.connect(lambda path: self._open({"file": path}))
+            outer.addWidget(self.browser)
+        outer.addWidget(self.viewer)
+        column = QtWidgets.QWidget()
+        column.setMinimumWidth(440)
+        outer.addWidget(column, 1)
+        root = QtWidgets.QVBoxLayout(column)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
@@ -1401,7 +1089,14 @@ class SubzeroWindow(QtWidgets.QWidget):
         self.reload_button.setToolTip("Read the file again (after saving it in Designer)")
         self.settings_button = QtWidgets.QPushButton("Settings")
         self.settings_button.setToolTip("Color spaces of the maps and colors (OCIO)")
-        for b in (self.open_button, self.reload_button, self.settings_button):
+        self.viewer_button = QtWidgets.QPushButton("Viewer")
+        self.viewer_button.setCheckable(True)
+        self.viewer_button.setToolTip("Show the rendered maps (keys 1 to 9 switch maps)")
+        self.browser_button = QtWidgets.QPushButton("Browser")
+        self.browser_button.setCheckable(True)
+        self.browser_button.setToolTip("Packages of the library folders ($SUBZERO_LIBRARY, and folders added with +)")
+        self.browser_button.setVisible(self.standalone)
+        for b in (self.open_button, self.reload_button, self.settings_button, self.viewer_button, self.browser_button):
             buttons.addWidget(b, 1)
         head.addLayout(buttons)
         self.open_button.clicked.connect(self._browse_package)
@@ -1428,9 +1123,12 @@ class SubzeroWindow(QtWidgets.QWidget):
         self.banner.setObjectName("banner")
         self.banner.setWordWrap(True)
         self.banner.hide()
-        self.prefs_button = QtWidgets.QPushButton("Open Preferences")
+        self.prefs_button = QtWidgets.QPushButton("Locate sbsrender..." if self.standalone else "Open Preferences")
         self.prefs_button.hide()
-        self.prefs_button.clicked.connect(lambda: self.channel.request("show_prefs", None, lambda d, e: None))
+        if self.standalone:
+            self.prefs_button.clicked.connect(self._pick_sbsrender)
+        else:
+            self.prefs_button.clicked.connect(lambda: self.channel.request("show_prefs", None, lambda d, e: None))
         banner_row = QtWidgets.QHBoxLayout()
         banner_row.addWidget(self.banner, 1)
         banner_row.addWidget(self.prefs_button, 0, QtCore.Qt.AlignVCenter)
@@ -1447,6 +1145,8 @@ class SubzeroWindow(QtWidgets.QWidget):
             image.setFixedSize(THUMB, THUMB)
             image.setAlignment(QtCore.Qt.AlignCenter)
             image.setStyleSheet("background: #252525; border-radius: 2px;")
+            image.installEventFilter(self)
+            image.setProperty("channel", ch)
             caption = QtWidgets.QLabel(label)
             caption.setObjectName("caption")
             caption.setAlignment(QtCore.Qt.AlignCenter)
@@ -1482,7 +1182,8 @@ class SubzeroWindow(QtWidgets.QWidget):
         self.format_combo = QtWidgets.QComboBox()
         for key, f in subzero_render.FORMATS.items():
             self.format_combo.addItem(f["label"], key)
-        self.format_combo.setToolTip("File format of the textures sent to ArmorPaint (previews stay in TGA)")
+        self.format_combo.setToolTip("File format of the %s (previews stay in TGA)" % (
+            "exported textures" if self.standalone else "textures sent to ArmorPaint"))
         seed_row = QtWidgets.QHBoxLayout()
         seed_row.setSpacing(6)
         seed_row.addWidget(self.seed, 1)
@@ -1549,14 +1250,20 @@ class SubzeroWindow(QtWidgets.QWidget):
         self.status = ElidedLabel()
         self.live = QtWidgets.QCheckBox("Live")
         self.live.setChecked(env_flag("SUBZERO_LIVE", True))
-        self.live.setToolTip("Update the material in ArmorPaint after each change")
+        self.live.setToolTip("Export the textures again after each change" if self.standalone else
+                             "Update the material in ArmorPaint after each change")
         self.duplicate_button = QtWidgets.QPushButton("Duplicate")
-        self.duplicate_button.setToolTip("Send as a new material, in a new folder")
-        self.send_button = QtWidgets.QPushButton("Send to ArmorPaint")
+        self.duplicate_button.setToolTip("Export to a new folder" if self.standalone else
+                                         "Send as a new material, in a new folder")
+        self.reveal_button = QtWidgets.QPushButton("Show")
+        self.reveal_button.setToolTip("Open the export folder")
+        self.reveal_button.clicked.connect(self._reveal)
+        self.send_button = QtWidgets.QPushButton("Export" if self.standalone else "Send to ArmorPaint")
         self.send_button.setObjectName("primary")
         self.send_button.setDefault(True)
         actions.addWidget(self.status, 1)
         actions.addWidget(self.live)
+        actions.addWidget(self.reveal_button)
         actions.addWidget(self.duplicate_button)
         actions.addWidget(self.send_button)
         root.addWidget(bottom)
@@ -1571,7 +1278,11 @@ class SubzeroWindow(QtWidgets.QWidget):
     def _update_buttons(self):
         ready = self.graph is not None and self.tools is not None and any(ch for _, ch, _ in self.mapping)
         sent = self.material_dir is not None
-        self.send_button.setText("Update" if sent else "Send to ArmorPaint")
+        self.send_button.setText("Update" if sent else "Export" if self.standalone else "Send to ArmorPaint")
+        if self.standalone:
+            self.send_button.setToolTip("Export again to %s" % self.material_dir if sent else
+                                        "Render the textures at full size into a folder")
+        self.reveal_button.setVisible(self.standalone and sent)
         self.send_button.setEnabled(ready and (not sent or self.dirty or not self.live.isChecked()))
         self.duplicate_button.setVisible(sent)
         self.duplicate_button.setEnabled(ready)
@@ -1590,11 +1301,14 @@ class SubzeroWindow(QtWidgets.QWidget):
         self._read_origins()
         self._sync_env()
         self._make_color()
-        sizes = [("Project (%d)" % self._project_res(), None)] + [(str(1 << n), n) for n in (9, 10, 11, 12)]
+        default = "Default (%d)" if self.standalone else "Project (%d)"
+        sizes = [(default % self._project_res(), None)] + [(str(1 << n), n) for n in (9, 10, 11, 12, 13)]
         self.size_combo.clear()
         for label, n in sizes:
             self.size_combo.addItem(label, n)
         opening = (self.test or {}).get("open") or self.state.get("open")
+        if self.template_error:
+            self._status(self.template_error, ERROR)
         self._locate(then=lambda: self._open(opening) if opening else self._ready())
 
     def _project_res(self):
@@ -1611,7 +1325,16 @@ class SubzeroWindow(QtWidgets.QWidget):
         self._submit(job, "locate")
 
     def _ready(self):
-        if self.test is not None:
+        t = self.test
+        if t is not None and t.get("browser_open") and self.browser is not None and not t.get("_browsed"):
+            t["_browsed"] = True
+            self.browser.flush()
+            path = self.browser.find(t["browser_open"])
+            self.test_log["browser_open"] = path
+            if path:
+                self.browser.opened.emit(path)
+                return
+        if t is not None:
             self._run_test()
 
     def _on_open_event(self, message):
@@ -1704,6 +1427,7 @@ class SubzeroWindow(QtWidgets.QWidget):
         for w in c.warnings:
             log("color: %s" % w)
         self.params.set_color(c)
+        self.viewer.set_color(c)
         self.settings_button.setToolTip("Color spaces of the maps and colors (OCIO)" + ("\n" + c.error if c.error else ""))
 
     def _source(self, channel):
@@ -1821,8 +1545,9 @@ class SubzeroWindow(QtWidgets.QWidget):
         elif job.kind in ("preview", "final"):
             self.thumb_files = (result["files"], result["spaces"])
             self._show_thumbs(result["thumbs"])
+            self._show_maps()
             if job.kind == "preview":
-                self._status("Preview %d px in %.2f s" % (1 << PREVIEW_SIZE, result["seconds"]))
+                self._status("Preview %d px in %.2f s" % (1 << job.info["size"], result["seconds"]))
             self.test_log.setdefault("renders", []).append({"kind": job.kind, "seconds": result["seconds"],
                                                            "files": result["files"], "spaces": result["spaces"],
                                                            "converted": result.get("converted")})
@@ -1925,9 +1650,11 @@ class SubzeroWindow(QtWidgets.QWidget):
             files = {ch: os.path.join(self.material_dir, f) for ch, f in (recipe.get("files") or {}).items()
                      if os.path.isfile(os.path.join(self.material_dir, f))}
             self.applied_spaces = recipe_spaces(recipe)
+            self.previous_files = list((recipe.get("files") or {}).values())
             spaces = {ch: self.applied_spaces.get(ch) or self._source(ch) for ch in files}
             self.thumb_files = (files, spaces)
             self._show_thumbs(load_thumbs(files, self.color, spaces))
+            self._show_maps()
             self.dirty = False
             self._status("Editing %s" % self.material_name)
         elif keep is not None:
@@ -1947,6 +1674,8 @@ class SubzeroWindow(QtWidgets.QWidget):
         cooked = " · cooked in %.2f s" % pkg["cook"]["seconds"] if pkg.get("cook") and not pkg["cook"].get("cached") else ""
         self.subtitle.setText("%s · %s%s" % (os.path.basename(pkg["path"]), graph.get("category") or graph.get("graphtype") or "graph", cooked))
         self.test_log["opened"] = {"path": pkg["path"], "graph": graph["pkgurl"], "cook": pkg.get("cook")}
+        if self.browser is not None:
+            self.browser.mark(pkg["path"])
         self._update_buttons()
         if recipe is not None or self.test is not None:
             self._test_next()
@@ -1954,12 +1683,7 @@ class SubzeroWindow(QtWidgets.QWidget):
     def _set_graph(self, graph, values=None, entries=None, preset=None, size=None):
         self.graph = graph
         by_id = {i["identifier"]: i for i in graph["inputs"]}
-        self.values = {i["identifier"]: i["default"] for i in graph["inputs"] if shown(i) and i["type"] != "image"}
-        if "$randomseed" in by_id:
-            self.values["$randomseed"] = by_id["$randomseed"]["default"]
-        for k, v in (values or {}).items():
-            if k in self.values:
-                self.values[k] = v
+        self.values = graph_values(graph, values)
         self.entries = {k: v for k, v in (entries or {}).items() if k in by_id}
         self.preset = preset
         self.size = size
@@ -2067,12 +1791,7 @@ class SubzeroWindow(QtWidgets.QWidget):
         self._commit()
 
     def _remap(self):
-        rows = auto_mapping(self.graph, self.values)
-        for row in rows:
-            o = row[0]["identifier"]
-            if o in self.overrides:
-                row[1] = self.overrides[o] or None
-                row[2] = None if row[1] else "not linked"
+        rows = apply_overrides(auto_mapping(self.graph, self.values), self.overrides)
         self.mapping = rows
         self.outputs.blockSignals(True)
         self.outputs.clear()
@@ -2125,17 +1844,19 @@ class SubzeroWindow(QtWidgets.QWidget):
         out_dir = self.preview_dir
         color = self.color
         spaces = {ch: self._source(ch) for _, ch in outs}  # aperçu tel que sbsrender l'écrit
+        # sans ArmorPaint, à la taille choisie (512 par défaut) : le viewer montre ce qui sera exporté
+        size = self._final_size() if self.standalone else (PREVIEW_SIZE, PREVIEW_SIZE)
         self._status("Rendering preview...")
 
         def job(track, step):
             res = subzero_render.render(sbsar, graph, out_dir, tools, values=values, entries=entries,
-                                        size=(PREVIEW_SIZE, PREVIEW_SIZE), outputs=[o for o, _ in outs],
+                                        size=size, outputs=[o for o, _ in outs],
                                         names={o: ch for o, ch in outs}, cancel=track)
             files = {ch: res["files"][o] for o, ch in outs}
             return {"files": files, "spaces": spaces, "thumbs": load_thumbs(files, color, spaces),
                     "seconds": res["seconds"]}
 
-        self._submit(job, "preview")
+        self._submit(job, "preview", size=size[0])
 
     def _final_size(self):
         if self.size is not None:
@@ -2145,13 +1866,12 @@ class SubzeroWindow(QtWidgets.QWidget):
 
     def _render_final(self, folder, action):
         graph, tools, sbsar = self.graph, self.tools, self.package["sbsar"]
-        values, entries = render_values(graph, self.values), dict(self.entries)
+        values, entries = dict(self.values), dict(self.entries)
         outs = self.linked()
-        prefix = os.path.basename(folder.rstrip("/"))
-        names = {o: "%s_%s" % (prefix, CHANNEL_SUFFIX[ch]) for o, ch in outs}
         fmt = self.fmt
         size = self._final_size()
         color = self.color
+        template = self.template
         self.final_seq += 1
         seq = self.final_seq
         self._status("Rendering %d px..." % (1 << size[0]))
@@ -2159,24 +1879,12 @@ class SubzeroWindow(QtWidgets.QWidget):
         self._update_buttons()
 
         def job(track, step):
-            os.makedirs(folder, exist_ok=True)
-            res = subzero_render.render(sbsar, graph, folder, tools, values=values, entries=entries, size=size,
-                                        outputs=[o for o, _ in outs], names=names, fmt=fmt, cancel=track)
-            files = {ch: res["files"][o] for o, ch in outs}
-            if "base" in files and subzero_render.FORMATS[fmt]["alpha"]:  # décalque : alpha de la couleur vers
-                # l'opacité, faute de sortie opacité
-                opacity = os.path.join(folder, "%s_%s%s" % (prefix, CHANNEL_SUFFIX["opacity"],
-                                                            subzero_render.FORMATS[fmt]["ext"]))
-                if split_alpha(files["base"], None if "opacity" in files else opacity) and "opacity" not in files:
-                    files["opacity"] = opacity
-                elif "opacity" not in files and os.path.isfile(opacity):
-                    os.remove(opacity)  # d'un rendu précédent
-            spaces, notes, converted = convert_maps(color, files, fmt)
-            data = {"files": files, "seconds": res["seconds"], "size": size, "format": fmt, "warnings": res["warnings"],
-                    "spaces": spaces, "color_warnings": notes, "converted": converted, "seq": seq}
+            data = render_material(sbsar, graph, folder, tools, outs, values=values, entries=entries, size=size,
+                                   fmt=fmt, color=color, template=template, cancel=track)
+            data["seq"] = seq
             step(data)
             data = dict(data)
-            data["thumbs"] = load_thumbs(files, color, spaces)
+            data["thumbs"] = load_thumbs(data["files"], color, data["spaces"])
             return data
 
         self._submit(job, "final", folder=folder, action=action, outs=outs)
@@ -2217,14 +1925,22 @@ class SubzeroWindow(QtWidgets.QWidget):
                     self.material_name = (reply or {}).get("material") or args.get("name")
                 self.applied_spaces = dict(data["spaces"])
                 if self.pending is None and data.get("seq") == self.final_seq:
-                    entry["deleted"] = self._delete_stale(args["dir"], data["files"], (reply or {}).get("kept") or [])
+                    entry["deleted"] = self._delete_stale(args["dir"], data["files"], (reply or {}).get("kept") or [],
+                                                          self.previous_files if action == "update" else [])
+                    self.previous_files = [os.path.basename(p) for p in data["files"].values()]
                 verb = {"create": "Sent", "update": "Updated"}.get(action, "Sent")
                 notes = data.get("color_warnings") or []
-                self._status("%s %s: %d px in %.2f s, ArmorPaint %.2f s%s" % (
-                    verb, self.material_name or "", 1 << data["size"][0], data["seconds"], took,
-                    " \u00b7 " + notes[0] + (" (+%d)" % (len(notes) - 1) if len(notes) > 1 else "") if notes else ""),
-                    WARNING if notes else SUCCESS)
-                self.status.setToolTip("\n".join(notes))
+                more = " \u00b7 " + notes[0] + (" (+%d)" % (len(notes) - 1) if len(notes) > 1 else "") if notes else ""
+                if self.standalone:
+                    self._status("%s %s: %d px in %.2f s%s" % (
+                        "Exported" if action == "create" else "Updated", os.path.basename(args["dir"]),
+                        1 << data["size"][0], data["seconds"], more), WARNING if notes else SUCCESS)
+                    self.status.setToolTip("\n".join([args["dir"]] + notes))
+                else:
+                    self._status("%s %s: %d px in %.2f s, ArmorPaint %.2f s%s" % (
+                        verb, self.material_name or "", 1 << data["size"][0], data["seconds"], took, more),
+                        WARNING if notes else SUCCESS)
+                    self.status.setToolTip("\n".join(notes))
             self._update_buttons()
             if self.pending is not None:
                 request, self.pending = self.pending, None
@@ -2234,11 +1950,11 @@ class SubzeroWindow(QtWidgets.QWidget):
 
         self.channel.request(action, args, done)
 
-    def _delete_stale(self, folder, files, kept):
+    def _delete_stale(self, folder, files, kept, previous=()):
         """Après la réponse au dernier rendu final : fichiers d'un rendu précédent (autre format, sortie retirée), dont
         ArmorPaint a retiré les textures ; ceux qu'un autre nœud utilise encore (kept) restent."""
         deleted = []
-        for path in stale_files(folder, list(files.values()) + list(kept)):
+        for path in stale_files(folder, list(files.values()) + list(kept), self.template, previous):
             try:
                 os.remove(path)
                 deleted.append(os.path.basename(path))
@@ -2249,29 +1965,9 @@ class SubzeroWindow(QtWidgets.QWidget):
         return deleted
 
     def _write_recipe(self, folder, outs, data):
-        pkg_path = self.package["path"]
-        recipe = {
-            "tool": "subzero",
-            "version": 1,
-            "name": self.name.text().strip() or self.graph.get("label") or "",
-            "package": {"path": pkg_path, "relative": os.path.relpath(pkg_path, folder), "sha256": file_sha256(pkg_path)},
-            "graph": self.graph["pkgurl"],
-            "preset": self.preset,
-            "values": {k: v for k, v in self.values.items()
-                       if v != next((i["default"] for i in self.graph["inputs"] if i["identifier"] == k), None)},
-            "entries": dict(self.entries),
-            "size": self.size,
-            "format": data["format"],
-            "outputs": {o: ch for o, ch in outs},
-            "overrides": dict(self.overrides),
-            "files": {ch: os.path.basename(p) for ch, p in data["files"].items()},
-            "color": {"config": self.color.config_source if self.color.ready else "", "name": self.color.name,
-                      "spaces": dict(data["spaces"])},
-            "sbsrender": self.tools.get("version") if self.tools else None,
-            "rendered": {"size": [1 << data["size"][0], 1 << data["size"][1]], "seconds": data["seconds"],
-                         "date": datetime.datetime.now().isoformat(timespec="seconds")},
-        }
-        write_recipe(folder, recipe)
+        write_recipe(folder, make_recipe(self.package["path"], folder, self.name.text().strip() or self.graph.get("label") or "",
+                                         self.graph, self.values, self.entries, self.preset, self.size, outs,
+                                         self.overrides, data, self.color, self.tools))
 
     def _show_thumbs(self, thumbs):
         linked = {ch for _, ch in self.linked()}
@@ -2283,6 +1979,24 @@ class SubzeroWindow(QtWidgets.QWidget):
                 image.setPixmap(pix)
             elif ch in linked:
                 image.setPixmap(QtGui.QPixmap())
+        self._highlight_thumbs()
+
+    def _highlight_thumbs(self):
+        """Vignette de la carte du viewer entourée ; clic sur une vignette : sa carte dans le viewer."""
+        current = self.viewer.current if self.viewer.isVisible() else None
+        for ch, (holder, image) in self.thumbs.items():
+            image.setStyleSheet("background: #252525; border-radius: 2px; border: 1px solid %s;" % (
+                PAINTER_ACCENT if ch == current else "#252525"))
+            image.setCursor(QtCore.Qt.PointingHandCursor if current else QtCore.Qt.ArrowCursor)
+
+    def _show_maps(self):
+        files, spaces = self.thumb_files
+        self.viewer.set_maps(files, spaces, [ch for ch, _, _, _ in CHANNELS])
+
+    def eventFilter(self, obj, event):
+        if event.type() == QtCore.QEvent.MouseButtonPress and obj.property("channel"):
+            self.viewer.select(obj.property("channel"))
+        return False
 
     # -- envoi
 
@@ -2295,8 +2009,12 @@ class SubzeroWindow(QtWidgets.QWidget):
         if self.test is not None and self.test.get("dir"):
             self.base_dir = self.test["dir"]
             return self.base_dir
+        if os.environ.get("SUBZERO_EXPORT_DIR"):  # lot E9 : dossier de base sans projet enregistré
+            self.base_dir = os.path.expanduser(os.environ["SUBZERO_EXPORT_DIR"])
+            return self.base_dir
         path = QtWidgets.QFileDialog.getExistingDirectory(
-            self, "Folder for the textures (the project is not saved yet)", os.path.expanduser("~"))
+            self, "Export folder (one subfolder per material)" if self.standalone else
+            "Folder for the textures (the project is not saved yet)", os.path.expanduser("~"))
         if not path:
             return None
         self.base_dir = path
@@ -2324,7 +2042,76 @@ class SubzeroWindow(QtWidgets.QWidget):
             return
         self._render_final(folder, "create")
 
+    def _reveal(self):
+        if self.material_dir:
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(self.material_dir))
+
+    def _pick_sbsrender(self):
+        """Sans ArmorPaint : sbsrender choisi à la main, gardé dans studio.env (SUBZERO_SBSRENDER) s'il y en a un."""
+        start = os.path.dirname(self.state.get("sbsrender") or "") or subzero_render.DESIGNER_WHERE
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "sbsrender of Adobe Substance 3D Designer", start)
+        if not path:
+            return
+        os.environ["SUBZERO_SBSRENDER"] = path
+        target = studio_env.write_target()
+        if target:
+            try:
+                studio_env.store(target, {"SUBZERO_SBSRENDER": path})
+                log("%s: SUBZERO_SBSRENDER=%s" % (target, path))
+            except (OSError, ValueError) as e:
+                log("could not write %s: %s" % (target, e))
+        self._on_prefs_event({"sbsrender": path})
+
     # -- fenêtre
+
+    def _initial_geometry(self):
+        """Colonne de COLUMN, le viewer carré de la hauteur de la fenêtre et le navigateur, dans la limite de l'écran :
+        un écran trop étroit pour les trois garde le navigateur fermé."""
+        screen = self.screen() or QtGui.QGuiApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen is not None else QtCore.QRect(0, 0, 1920, 1080)
+        height = max(560, min(WINDOW_HEIGHT, avail.height() - 60))
+        viewer = not self.viewer.isHidden()  # fenêtre pas encore montrée : isVisible() faux
+        browser = self.browser is not None and not self.browser.isHidden()
+        room = avail.width() - 40 - COLUMN
+        if viewer and browser and room - subzero_browser.WIDTH < min(height, 640):
+            self.browser_button.setChecked(False)
+            self.browser.hide()
+            browser = False
+        if browser:
+            room -= subzero_browser.WIDTH
+        if viewer:
+            height = max(480, min(height, room))
+            self.viewer.setFixedWidth(height)
+        self.resize(COLUMN + (height if viewer else 0) + (subzero_browser.WIDTH if browser else 0), height)
+
+    def _toggle_panel(self, panel, on):
+        """Viewer ou navigateur, ajouté à gauche : la fenêtre s'élargit de sa largeur, colonne inchangée."""
+        if on == panel.isVisible():
+            return
+        geo = self.geometry()
+        if on:
+            side = self.height() if panel is self.viewer else panel.width()
+            if panel is self.viewer:
+                panel.setFixedWidth(side)
+            panel.show()
+            geo.setLeft(geo.left() - side)
+        else:
+            geo.setLeft(geo.left() + panel.width())
+            panel.hide()
+        if panel is self.browser:
+            self.browser.remember_visible(on)
+        screen = self.screen()
+        if screen is not None:  # dans l'écran : décalée à droite si le bord gauche en sort
+            avail = screen.availableGeometry()
+            if geo.left() < avail.left():
+                geo.moveLeft(avail.left())
+        self.setGeometry(geo)
+        self._highlight_thumbs()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.viewer.isVisible() and self.viewer.width() != self.height():
+            self.viewer.setFixedWidth(self.height())
 
     def to_front(self):
         self.show()
@@ -2336,6 +2123,9 @@ class SubzeroWindow(QtWidgets.QWidget):
     def closeEvent(self, event):
         super().closeEvent(event)
         self.worker.stop()
+        self.viewer.stop()
+        if self.browser is not None:
+            self.browser.stop()
         shutil.rmtree(self.preview_dir, ignore_errors=True)
         if self.mac is not None:
             self.mac.hide()  # macOS rend le premier plan à ArmorPaint
@@ -2357,7 +2147,8 @@ class SubzeroWindow(QtWidgets.QWidget):
         if "graph" in t and t["graph"] != self.graph["pkgurl"]:
             self._set_graph(subzero_render.find_graph(self.package["description"], t["graph"]))
         if "preset" in t:
-            self._on_preset(max(0, self.preset_combo.findData(t["preset"])))
+            self.preset_combo.setCurrentIndex(max(0, self.preset_combo.findData(t["preset"])))
+            self._on_preset(self.preset_combo.currentIndex())
         for k, v in (t.get("values") or {}).items():
             self._on_param(k, v, "drag")
         merged = dict(self.values)
@@ -2369,6 +2160,7 @@ class SubzeroWindow(QtWidgets.QWidget):
         self._remap()
         if "size" in t:
             self.size = t["size"]
+            self.size_combo.setCurrentIndex(max(0, self.size_combo.findData(self.size)))
         if "format" in t:
             self._set_format(t["format"])
         if "live" in t:
@@ -2377,13 +2169,45 @@ class SubzeroWindow(QtWidgets.QWidget):
         action = t.get("action", "create")
         t["_stage"] = "action"
         if action == "none":
-            self._finish_test()
+            if not self.worker.busy:  # sinon à la fin du rendu en cours (aperçu des réglages de l'essai)
+                self._finish_test()
         elif action == "duplicate":
             self._send(duplicate=True)
         elif action == "update" and self.material_dir is not None:
             self._render_final(self.material_dir, "update")
         else:
             self._send()
+
+    def _test_viewer(self, t):
+        """Carte, touches, tirettes et zoom de l'essai, puis état du viewer une fois son calcul fini."""
+        v = self.viewer
+        v.flush()
+        if t.get("viewer_map"):
+            v.select(t["viewer_map"])
+        pressed = []
+        for k in t.get("viewer_keys") or []:
+            char = k.get("key") or ""
+            code = ord(char.upper()) if len(char) == 1 else getattr(QtCore.Qt, "Key_" + char, 0)
+            mods = QtCore.Qt.KeypadModifier if k.get("keypad") else QtCore.Qt.NoModifier
+            event = QtGui.QKeyEvent(QtCore.QEvent.KeyPress, int(code), mods, int(k.get("scan", 0)), int(k.get("vk", 0)),
+                                    0, char if len(char) == 1 else "")
+            target = QtWidgets.QApplication.focusWidget() or self
+            QtWidgets.QApplication.sendEvent(target, event)
+            pressed.append({"key": char, "digit": subzero_viewer.key_digit(event), "current": v.current})
+        for key in ("exposure", "gamma", "saturation"):
+            if key in t:
+                v.set_param(key, float(t[key]))
+        zoom = t.get("zoom")
+        if zoom == "fit":
+            v.canvas.fit()
+        elif zoom == "1:1":
+            v.canvas.one_to_one()
+        elif zoom is not None:
+            v.canvas.zoom_to(float(zoom))
+        v.flush()
+        if t.get("viewer_hover"):
+            v.canvas.hovered.emit(tuple(t["viewer_hover"]))
+        self.test_log["viewer"] = dict(v.test_log(), keys=pressed, width=v.width(), height=self.height())
 
     def _test_next(self, failed=False):
         t = self.test
@@ -2416,6 +2240,16 @@ class SubzeroWindow(QtWidgets.QWidget):
             "tools": self.tools,
             "color": self._color_log(),
         })
+        if self.viewer.isVisible():
+            self._test_viewer(t)
+        if self.browser is not None:
+            if t.get("browser_tab"):
+                self.browser.tab_bar.setCurrentIndex(max(0, self.browser._tab_index(t["browser_tab"])))
+                self.browser.flush()
+            if "browser_search" in t:
+                self.browser.search.setText(t["browser_search"])
+            self.browser.flush()
+            self.test_log["browser"] = self.browser.test_log()
         if t.get("screenshot"):
             QtWidgets.QApplication.processEvents()  # dispositions à jour (vignettes montrées juste avant)
             self.grab().save(t["screenshot"])

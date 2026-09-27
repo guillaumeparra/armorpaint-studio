@@ -30,10 +30,11 @@ import subzero_color  # noqa: E402
 import subzero_exr  # noqa: E402
 import subzero_meta  # noqa: E402
 import subzero_render  # noqa: E402
+import subzero_material as sm  # noqa: E402
 import subzero_window as sw  # noqa: E402
 from PySide6 import QtGui  # noqa: E402
 
-for var in sw.COLOR_VARS:  # réglages de la machine : sans effet sur le banc
+for var in sm.COLOR_VARS:  # réglages de la machine : sans effet sur le banc
     os.environ.pop(var, None)
 HAS_OCIO = subzero_color.MISSING is None
 SRGB = "sRGB Encoded Rec.709 (sRGB)"  # srgb_tx dans la configuration intégrée (studio-config-latest)
@@ -109,7 +110,7 @@ def ops(requests, op):
 
 
 def listing(folder):
-    return sorted(f for f in os.listdir(folder) if f != sw.RECIPE)
+    return sorted(f for f in os.listdir(folder) if f != sm.RECIPE)
 
 
 def exr_channels(path):
@@ -123,41 +124,41 @@ def qt_image(path):
 
 # ---- Règles pures ----------------------------------------------------------------------------------------------------
 
-check("nom d'une ligne", sw.slug("Colorful Planks") == "ColorfulPlanks" and sw.slug("wood_plain-02") == "WoodPlain02"
-      and sw.slug("  ") == "Material", sw.slug("wood_plain-02"))
+check("nom d'une ligne", sm.slug("Colorful Planks") == "ColorfulPlanks" and sm.slug("wood_plain-02") == "WoodPlain02"
+      and sm.slug("  ") == "Material", sm.slug("wood_plain-02"))
 flags = []
 for value in (None, "", "0", "off", "No", "1", "yes"):
     if value is None:
         os.environ.pop("SUBZERO_TEST_FLAG", None)
     else:
         os.environ["SUBZERO_TEST_FLAG"] = value
-    flags.append(sw.env_flag("SUBZERO_TEST_FLAG", True))
+    flags.append(sm.env_flag("SUBZERO_TEST_FLAG", True))
 os.environ.pop("SUBZERO_TEST_FLAG", None)
 check("variable booléenne (SUBZERO_LIVE) : absente = défaut ; vide, 0, off, no = faux", flags == [True, False, False, False,
       False, True, True], flags)
-check("dossier commun aux versions du projet", sw.subzero_dir("/p/robot_v003.arm") == "/p/robot_subzero"
-      and sw.subzero_dir("/p/robot.arm") == "/p/robot_subzero", sw.subzero_dir("/p/robot_v003.arm"))
+check("dossier commun aux versions du projet", sm.subzero_dir("/p/robot_v003.arm") == "/p/robot_subzero"
+      and sm.subzero_dir("/p/robot.arm") == "/p/robot_subzero", sm.subzero_dir("/p/robot_v003.arm"))
 normal_format = {"identifier": "normal_format", "type": "int1", "widget": "combobox", "usertag": {},
                  "items": [(0, "DirectX"), (1, "OpenGL")]}
-check("format de normale : OpenGL imposé", sw.technical_value(normal_format) == 1)
-check("bascules de canaux", sw.technical_value({"identifier": "channel_basecolor", "widget": "togglebutton"}) == 1
-      and sw.technical_value({"identifier": "channel_specular", "widget": "togglebutton"}) == 0
-      and sw.technical_value({"identifier": "channel_choice", "widget": "togglebutton"}) is None)
+check("format de normale : OpenGL imposé", sm.technical_value(normal_format) == 1)
+check("bascules de canaux", sm.technical_value({"identifier": "channel_basecolor", "widget": "togglebutton"}) == 1
+      and sm.technical_value({"identifier": "channel_specular", "widget": "togglebutton"}) == 0
+      and sm.technical_value({"identifier": "channel_choice", "widget": "togglebutton"}) is None)
 with open(os.path.join(work, "gray.tga"), "wb") as f:  # 2x1, 32 bits, alpha opaque
     f.write(bytes([0, 0, 2] + [0] * 9 + [2, 0, 1, 0, 32, 8]) + bytes([9, 9, 9, 255] * 2))
 with open(os.path.join(work, "decal.tga"), "wb") as f:  # origine en haut
     f.write(bytes([0, 0, 2] + [0] * 9 + [2, 0, 1, 0, 32, 0x28]) + bytes([1, 2, 3, 255, 4, 5, 6, 0]))
 gray = open(os.path.join(work, "gray.tga"), "rb").read()
-check("alpha opaque : couleur laissée telle quelle", not sw.split_alpha(os.path.join(work, "gray.tga"),
+check("alpha opaque : couleur laissée telle quelle", not sm.split_alpha(os.path.join(work, "gray.tga"),
                                                                         os.path.join(work, "gray_opacity.tga"))
       and open(os.path.join(work, "gray.tga"), "rb").read() == gray
       and not os.path.exists(os.path.join(work, "gray_opacity.tga")))
 check("alpha de décalque : couleur en RGB, alpha en opacité grise, orientation et pied TGA 2.0 gardés",
-      sw.split_alpha(os.path.join(work, "decal.tga"), os.path.join(work, "decal_opacity.tga"))
+      sm.split_alpha(os.path.join(work, "decal.tga"), os.path.join(work, "decal_opacity.tga"))
       and open(os.path.join(work, "decal.tga"), "rb").read() == bytes(
-          [0, 0, 2] + [0] * 9 + [2, 0, 1, 0, 24, 0x20]) + bytes([1, 2, 3, 4, 5, 6]) + sw.TGA_FOOTER
+          [0, 0, 2] + [0] * 9 + [2, 0, 1, 0, 24, 0x20]) + bytes([1, 2, 3, 4, 5, 6]) + sm.TGA_FOOTER
       and open(os.path.join(work, "decal_opacity.tga"), "rb").read() == bytes(
-          [0, 0, 3] + [0] * 9 + [2, 0, 1, 0, 8, 0x28]) + bytes([255, 0]) + sw.TGA_FOOTER)
+          [0, 0, 3] + [0] * 9 + [2, 0, 1, 0, 8, 0x28]) + bytes([255, 0]) + sm.TGA_FOOTER)
 check("TGA réécrit lu par Qt (pied TGA 2.0)", not qt_image(os.path.join(work, "decal.tga")).isNull()
       if hasattr(QtGui, "QImageReader") else True)
 with open(os.path.join(work, "nofooter.tga"), "wb") as f:  # couleur de base réécrite avant E11 : sans pied, origine en bas
@@ -167,16 +168,16 @@ check("vignette d'un TGA sans pied : lu, BGR vers RGB, origine en bas", not thum
       and thumb.pixelColor(0, 0).getRgb()[:3] == (9, 8, 7) and thumb.pixelColor(1, 1).getRgb()[:3] == (6, 5, 4),
       [thumb.pixelColor(x, y).getRgb()[:3] for y in (0, 1) for x in (0, 1)] if not thumb.isNull() else "null")
 check("liaisons : couleur de chaque fichier vers son canal, couleur de base en srgb_tx",
-      sw.links({"base": "b.exr", "opacity": "o.exr"}) == [
+      sm.links({"base": "b.exr", "opacity": "o.exr"}) == [
           {"file": "b.exr", "output": 0, "socket": 0, "color_space": "srgb_tx"},
-          {"file": "o.exr", "output": 0, "socket": 1}], sw.links({"base": "b.exr", "opacity": "o.exr"}))
+          {"file": "o.exr", "output": 0, "socket": 1}], sm.links({"base": "b.exr", "opacity": "o.exr"}))
 check("liaisons : espaces donnés, et ceux du rendu précédent (color_space_was)",
-      sw.links({"base": "b.exr", "normal": "n.exr"}, {"base": "ACEScg", "normal": "Raw"}, {"base": "srgb_tx"}) == [
+      sm.links({"base": "b.exr", "normal": "n.exr"}, {"base": "ACEScg", "normal": "Raw"}, {"base": "srgb_tx"}) == [
           {"file": "b.exr", "output": 0, "socket": 0, "color_space": "ACEScg", "color_space_was": "srgb_tx"},
           {"file": "n.exr", "output": 0, "socket": 5, "color_space": "Raw"}])
 check("espaces d'une recette : notés (E11), couleur de base srgb_tx (E6), aucun (v0)",
-      sw.recipe_spaces({"format": "exr16", "color": {"spaces": {"base": "ACEScg"}}}) == {"base": "ACEScg"}
-      and sw.recipe_spaces({"format": "png"}) == {"base": "srgb_tx"} and sw.recipe_spaces({}) == {})
+      sm.recipe_spaces({"format": "exr16", "color": {"spaces": {"base": "ACEScg"}}}) == {"base": "ACEScg"}
+      and sm.recipe_spaces({"format": "png"}) == {"base": "srgb_tx"} and sm.recipe_spaces({}) == {})
 
 # Décalque EXR (A, B, G, R en half, comme sbsrender) : 2x1, le second pixel transparent.
 half = lambda *v: struct.pack("<%de" % len(v), *v)
@@ -184,11 +185,11 @@ rgba = [("A", subzero_exr.HALF), ("B", subzero_exr.HALF), ("G", subzero_exr.HALF
 subzero_exr.write(os.path.join(work, "opaque.exr"), 2, 1, rgba, [half(1, 1, .3, .3, .2, .2, .1, .1)])
 subzero_exr.write(os.path.join(work, "decal.exr"), 2, 1, rgba, [half(1, 0, .3, .6, .2, .5, .1, .4)])
 opaque = open(os.path.join(work, "opaque.exr"), "rb").read()
-check("EXR opaque : couleur laissée telle quelle", not sw.split_alpha(os.path.join(work, "opaque.exr"),
+check("EXR opaque : couleur laissée telle quelle", not sm.split_alpha(os.path.join(work, "opaque.exr"),
                                                                       os.path.join(work, "opaque_opacity.exr"))
       and open(os.path.join(work, "opaque.exr"), "rb").read() == opaque
       and not os.path.exists(os.path.join(work, "opaque_opacity.exr")))
-ok = sw.split_alpha(os.path.join(work, "decal.exr"), os.path.join(work, "decal_opacity.exr"))
+ok = sm.split_alpha(os.path.join(work, "decal.exr"), os.path.join(work, "decal_opacity.exr"))
 with subzero_exr.Image(os.path.join(work, "decal.exr")) as im:
     rgb = [c for c, _ in im.channels], [im.values(im.line(0), c) for c in "RGB"]
 with subzero_exr.Image(os.path.join(work, "decal_opacity.exr")) as im:
@@ -203,7 +204,7 @@ for ext in ("png", "tif"):
     image.setPixelColor(1, 0, QtGui.QColor(40, 50, 60, 0 if ext == "png" else 128))
     base, opacity = os.path.join(work, "decal." + ext), os.path.join(work, "decal_opacity." + ext)
     image.save(base)
-    ok = sw.split_alpha(base, opacity)
+    ok = sm.split_alpha(base, opacity)
     b, o = qt_image(base), qt_image(opacity)
     check("décalque %s : couleur sans alpha, alpha en gris" % ext.upper(), ok and not b.hasAlphaChannel()
           and b.pixelColor(0, 0).getRgb()[:3] == (10, 20, 30) and o.isGrayscale()
@@ -211,17 +212,17 @@ for ext in ("png", "tif"):
           (ok, b.hasAlphaChannel(), o.isGrayscale(), [o.pixelColor(x, 0).red() for x in (0, 1)]))
     image.fill(QtGui.QColor(1, 2, 3, 255))
     image.save(base)
-    check("%s opaque : laissé tel quel" % ext.upper(), not sw.split_alpha(base, opacity + "2")
+    check("%s opaque : laissé tel quel" % ext.upper(), not sm.split_alpha(base, opacity + "2")
           and not os.path.exists(opacity + "2"))
-check("décalque JPEG : rien à séparer", not sw.split_alpha(os.path.join(work, "x.jpg"), os.path.join(work, "o.jpg")))
+check("décalque JPEG : rien à séparer", not sm.split_alpha(os.path.join(work, "x.jpg"), os.path.join(work, "o.jpg")))
 
 stale = os.path.join(work, "stale", "Wood")
 shutil.rmtree(os.path.dirname(stale), ignore_errors=True)
 os.makedirs(stale)
 for n in ("Wood_basecolor.tga", "Wood_basecolor.exr", "Wood_normal.png", "Wood_opacity.tif", "Wood_normal.jpg",
-          "Wood_custom.exr", "Other_basecolor.tga", "notes.txt", sw.RECIPE):
+          "Wood_custom.exr", "Other_basecolor.tga", "notes.txt", sm.RECIPE):
     open(os.path.join(stale, n), "w").close()
-found = sorted(os.path.basename(p) for p in sw.stale_files(stale, [os.path.join(stale, "Wood_basecolor.exr"),
+found = sorted(os.path.basename(p) for p in sm.stale_files(stale, [os.path.join(stale, "Wood_basecolor.exr"),
                                                                      os.path.join(stale, "Wood_normal.jpg")]))
 check("fichiers périmés : <Nom>_<canal>.<ext> hors du rendu, rien d'autre", found == [
     "Wood_basecolor.tga", "Wood_normal.png", "Wood_opacity.tif"], found)
@@ -236,11 +237,11 @@ except subzero_render.Error as e:
     sys.exit(1 if FAIL else 0)
 
 planks = subzero_render.find_graph(subzero_meta.read_sbsar(PLANKS))
-mapping = {o["identifier"]: ch for o, ch, _ in sw.auto_mapping(planks, {})}
+mapping = {o["identifier"]: ch for o, ch, _ in sm.auto_mapping(planks, {})}
 check("sorties de colorful_planks vers les canaux (diffuse, spéculaire, brillance masquées par channel_*)", mapping == {
     "basecolor": "base", "normal": "normal", "roughness": "roughness", "metallic": "metallic", "height": "height",
     "ambientocclusion": "occlusion"}, mapping)
-shown_all = {o["identifier"]: (ch, why) for o, ch, why in sw.auto_mapping(dict(planks, outputs=[
+shown_all = {o["identifier"]: (ch, why) for o, ch, why in sm.auto_mapping(dict(planks, outputs=[
     dict(o, visibleif=None) for o in planks["outputs"]]), {})}
 check("sorties non représentables montrées sans canal, avec la raison", shown_all.get("glossiness", (1, ""))[0] is None
       and "glossiness" in shown_all["glossiness"][1] and shown_all.get("diffuse", (1,))[0] is None, shown_all)
@@ -248,7 +249,7 @@ shelf = sorted(glob.glob(os.path.join(SHELF, "Resources/starter_assets/materials
 bad = []
 for path in shelf:
     g = subzero_render.find_graph(subzero_meta.read_sbsar(path))
-    rows = sw.auto_mapping(g, {})
+    rows = sm.auto_mapping(g, {})
     chans = [ch for _, ch, _ in rows if ch]
     colour = any(u.lower() in ("basecolor", "diffuse") for o, _, _ in rows for u in o.get("usages") or [])
     if len(chans) != len(set(chans)) or any(not ch and not why for _, ch, why in rows) or colour != ("base" in chans):
@@ -258,7 +259,7 @@ if shelf:
           "en a l'usage" % len(shelf), not bad, bad[:3])
 else:
     print("skip étagère : %s absent" % SHELF)
-shown = [i["identifier"] for i in planks["inputs"] if sw.shown(i)]
+shown = [i["identifier"] for i in planks["inputs"] if sm.shown(i)]
 check("paramètres montrés : ni système, ni canaux, ni format de normale",
       "wood_color" in shown and "age" in shown and "contrast" in shown and not any(
           s.startswith(("$", "channel_")) or s == "normal_format" for s in shown), shown)
@@ -293,7 +294,7 @@ if create:
     check("textures écrites à la résolution du projet", all(os.path.isfile(l["file"]) for l in a["links"]))
     with subzero_exr.Image(os.path.join(folder, "ColorfulPlanks_basecolor.exr")) as im:
         check("1024 px, half", (im.width, [t for _, t in im.channels]) == (1024, [1, 1, 1, 1]), (im.width, im.channels))
-recipe = sw.read_recipe(folder) if os.path.isfile(os.path.join(folder, sw.RECIPE)) else {}
+recipe = sm.read_recipe(folder) if os.path.isfile(os.path.join(folder, sm.RECIPE)) else {}
 check("recette", recipe.get("graph") == planks["pkgurl"] and recipe.get("package", {}).get("sha256")
       and recipe.get("files", {}).get("base") == "ColorfulPlanks_basecolor.exr" and recipe.get("format") == "exr16",
       recipe)
@@ -310,7 +311,7 @@ res, reqs = run("update", {"open": {"dir": folder}, "values": {"age": 0.9, "$ran
 update = ops(reqs, "update")
 check("un update sur le même dossier", len(update) == 1 and update[0]["args"]["dir"] == folder and not ops(reqs, "create"),
       [r.get("op") for r in reqs])
-recipe = sw.read_recipe(folder)
+recipe = sm.read_recipe(folder)
 check("recette mise à jour", recipe["values"].get("age") == 0.9 and recipe["values"].get("$randomseed") == 7
       and recipe.get("format") == "png", recipe)
 check("réédition : nom gardé", res.get("material_name") == "Colorful Planks", res.get("material_name"))
@@ -326,12 +327,12 @@ check("PNG 8 bits à la résolution du projet", image.width() == 1024 and image.
                                                                                                      image.depth()))
 
 del recipe["format"]  # recette v0 (lots E0-E4) : TGA
-sw.write_recipe(folder, recipe)
+sm.write_recipe(folder, recipe)
 res, reqs = run("v0", {"open": {"dir": folder}, "size": 8, "action": "update"}, state(project))
 update = ops(reqs, "update")
 tgas = [p.replace(".png", ".tga") for p in pngs]
 check("recette sans format (v0) : rééditée en TGA, PNG et EXR gardé supprimés",
-      update and listing(folder) == tgas and sw.read_recipe(folder).get("format") == "tga", listing(folder))
+      update and listing(folder) == tgas and sm.read_recipe(folder).get("format") == "tga", listing(folder))
 
 res, reqs = run("duplicate", {"open": {"dir": folder}, "action": "duplicate"}, state(project))
 create = ops(reqs, "create")
@@ -474,7 +475,7 @@ else:
     final = [r for r in res.get("renders") or [] if r["kind"] == "final"]
     check("E11 ACEScg : seule la couleur de base réécrite, les cartes de donnée telles que sbsrender les écrit",
           final and final[-1].get("converted") == ["base"], final and final[-1].get("converted"))
-    recipe = sw.read_recipe(aces_dir) if aces_dir else {}
+    recipe = sm.read_recipe(aces_dir) if aces_dir else {}
     check("E11 ACEScg : recette avec configuration et espaces", (recipe.get("color") or {}).get("spaces", {}).get("base")
           == "ACEScg" and recipe["color"].get("config") == "ocio://studio-config-latest", recipe.get("color"))
     check("E11 ACEScg : vignette vue depuis ACEScg", ((res.get("color") or {}).get("thumbs") or {}).get("base") == "ACEScg",
@@ -494,7 +495,7 @@ else:
     check("E11 suivi : couleur de base de nouveau en %s, avec color_space_was ACEScg" % SRGB,
           last.get(0, {}).get("color_space") == SRGB and any(
               by_socket(u).get(0, {}).get("color_space_was") == "ACEScg" for u in updates), [u["args"]["links"] for u in updates])
-    check("E11 suivi : recette revenue en sRGB", sw.read_recipe(aces_dir).get("color", {}).get("spaces", {}).get("base")
+    check("E11 suivi : recette revenue en sRGB", sm.read_recipe(aces_dir).get("color", {}).get("spaces", {}).get("base")
           == SRGB)
 
     # Variable de l'environnement : verrouillée ; studio.env relu (variable venue d'un fichier qui ne l'a plus :
@@ -518,11 +519,11 @@ else:
         "Raw", "Raw", "unknown color space NoSuchSpace ($SUBZERO_OCIO_NORMAL)"], plan.get("normal"))
     panel = res.get("settings_panel") or {}
     check("E11 panneau (ArmorPaint) : variables de subzero, verrouillée non modifiable, erreur au bandeau",
-          set(panel.get("fields") or []) == set(sw.SUBZERO_VARS) and "SUBZERO_OCIO_COLOR" not in panel.get("editable", [])
+          set(panel.get("fields") or []) == set(sm.SUBZERO_VARS) and "SUBZERO_OCIO_COLOR" not in panel.get("editable", [])
           and "NoSuchSpace" in panel.get("banner", ""), panel)
 
     # Nuanciers : par la transformation d'affichage du viewport ; évènement ocio (viewport coupé) : tels quels.
-    colors = [i for i in planks["inputs"] if i.get("widget") == "color" and sw.shown(i)]
+    colors = [i for i in planks["inputs"] if i.get("widget") == "color" and sm.shown(i)]
     res_on, _ = run("swatch_on", {"open": {"file": PLANKS}, "action": "none"}, host_state(""))
     res_off, _ = run("swatch_off", {"open": {"file": PLANKS}, "action": "none"}, host_state(""),
                      events=[{"event": "ocio", "state": {"ocio": host(viewport=False)}}])
@@ -549,7 +550,7 @@ else:
     check("E11 autonome : $STUDIO_ENV vide, rien à enregistrer", "STUDIO_ENV is empty" in (res.get("settings_error") or ""),
           res.get("settings_error"))
     check("E11 autonome : panneau avec OCIO et STUDIO_OCIO_*, celles de l'environnement verrouillées",
-          set(panel.get("fields") or []) == set(sw.COLOR_VARS) and "STUDIO_OCIO_DISPLAY" not in panel.get("editable", [])
+          set(panel.get("fields") or []) == set(sm.COLOR_VARS) and "STUDIO_OCIO_DISPLAY" not in panel.get("editable", [])
           and "OCIO" in panel.get("editable", []), panel)
 
     # OCIO coupé dans ArmorPaint : comme sans PyOpenColorIO (lot E6).

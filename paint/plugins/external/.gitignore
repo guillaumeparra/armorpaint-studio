@@ -9,3 +9,5 @@ assets/libstudio_ocio.so
 .shotgrid/venv/
 # subzero (E11) : le Python de la fenêtre, propre à la machine, recréé par tools/setup_subzero.sh.
 .subzero/
+# subzero autonome (E9) : paquets de tools/release_subzero.py (dossier, .tar.gz, roue, SHA256SUMS), refaits à chaque version.
+/dist/

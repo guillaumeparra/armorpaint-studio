@@ -195,8 +195,8 @@ with subzero_exr.Image(src) as im:
     ramp = struct.pack("<%de" % w, *(x / (w - 1.0) for x in range(w)))
     lines = [ramp + b"".join(im.channel_bytes(im.line(y), c) for c in "BGR") for y in range(h)]
     subzero_exr.write(dst, w, h, [(c, subzero_exr.HALF) for c in "ABGR"], lines)
-import subzero_window as sw
-assert sw.split_alpha(dst, os.path.join(f, "decal", "decal_opacity.exr"))
+import subzero_material as sm
+assert sm.split_alpha(dst, os.path.join(f, "decal", "decal_opacity.exr"))
 for ext in ("png", "tif"):
     image = QtGui.QImage(os.path.join(f, ext, "basecolor." + ext)).convertToFormat(QtGui.QImage.Format_ARGB32)
     for x in range(image.width()):
@@ -206,7 +206,7 @@ for ext in ("png", "tif"):
             image.setPixelColor(x, y, c)
     base = os.path.join(f, "decal", "decal." + ext)
     image.save(base)
-    assert sw.split_alpha(base, os.path.join(f, "decal", "decal_opacity." + ext))
+    assert sm.split_alpha(base, os.path.join(f, "decal", "decal_opacity." + ext))
 PY
 IMPORTS=$(cd "$F" && ls */*.* | grep -v "\.json$")
 {

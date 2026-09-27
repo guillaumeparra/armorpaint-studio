@@ -1,0 +1,28 @@
+#!/bin/sh
+# subzero launcher (standalone package). Python: $SUBZERO_PYTHON, else the venv made by setup.sh next to this
+# package, else $STUDIO_PYTHON (ArmorPaint Studio), else python3 / python from the PATH (rez: the python package).
+# Every argument goes to subzero: subzero --help.
+f=$0
+while [ -L "$f" ]; do # installed as a symlink (/usr/local/bin/subzero): follow it to the package
+	l=$(readlink "$f")
+	case $l in
+	/*) f=$l ;;
+	*) f=$(dirname "$f")/$l ;;
+	esac
+done
+ROOT=$(cd "$(dirname "$f")/.." && pwd)
+
+PY=
+for p in "${SUBZERO_PYTHON:-}" "$ROOT/venv/bin/python" "${STUDIO_PYTHON:-}"; do
+	if [ -n "$p" ] && [ -x "$p" ]; then
+		PY=$p
+		break
+	fi
+done
+if [ -z "$PY" ]; then
+	PY=$(command -v python3 || command -v python) || {
+		echo "subzero: no Python found: run $ROOT/setup.sh, or set SUBZERO_PYTHON" >&2
+		exit 1
+	}
+fi
+PYTHONPATH="$ROOT/python${PYTHONPATH:+:$PYTHONPATH}" exec "$PY" -B -m subzero "$@"

@@ -886,7 +886,20 @@ Livré : `assets/subzero_color.py` (configuration, espace de chaque carte, conve
 - **Survol d'une vignette** : la carte à 1:1 (1 pixel de l'image = 1 pixel physique sur Retina), réduite si elle dépasse l'écran, avec sa taille. Avant l'envoi, seul l'aperçu 512 existe : le 1:1 d'une carte finale suppose un rendu final (Live ou « Send »).
 - Maquette d'abord, validée par Guillaume, puis branchement.
 
-### E9 — subzero standalone · **2-3 j**
+### E9 — subzero standalone · **2-3 j** · ✅ fait (2026-09-28)
+
+Livré : `assets/subzero_app.py` (fenêtre sans ArmorPaint et commandes `render`, `info`, `locate` en JSON),
+`assets/subzero_material.py` (dossier, recette, noms, textures périmées), `subzero_window.LocalHost`, variables
+`SUBZERO_EXPORT_DIR`, `SUBZERO_EXPORT_TEMPLATE`, `SUBZERO_NORMAL_FORMAT`, `SUBZERO_SIZE`. Paquet à part, à côté des
+versions d'ArmorPaint Studio : `tools/release_subzero.py` (archive avec lanceur `bin/subzero` et `setup.sh`, roue pip
+avec la commande `subzero`, `package.py` et `rezbuild.py` de rez ; archives reproductibles, aucun fichier d'Adobe),
+gabarit `release/subzero/`. Demandés en cours de route par Guillaume : le **viewer** des cartes
+(`assets/subzero_viewer.py` : panneau carré, touches 1 à 9, zoom, 1:1, OCIO, tirettes exposition, gamma et saturation
+à la Nuke ; aussi dans ArmorPaint, fermé par défaut), une fenêtre à 512 par défaut, et le **navigateur de paquets**
+(`assets/subzero_browser.py`, sans ArmorPaint : un onglet par dossier de `SUBZERO_LIBRARY`, dossiers ajoutés gardés
+dans `browser.json`). Banc : `.tests/subzero_standalone.py` (43 ok, vrai `sbsrender`) ; `subzero_window_ui.py`,
+`subzero.sh`, `subzero_color_check.py` et `subzero_app.sh` passent toujours. Reste : l'essai du paquet sur Rocky 9.4 avec `sbsrender` Linux, les formats que seul le
+standalone servirait (WebP, DDS), et la décision sur rez (`rez build` avec `rezbuild.py`, ou `rez pip` sur la roue).
 
 - La fenêtre sans ArmorPaint : un canal local remplace le protocole. Le chemin de `sbsrender` vient de `SUBZERO_SBSRENDER`, du fichier des préférences studio ou de la détection.
 - **Panneau « Export »** à la place de « Send » :

@@ -202,6 +202,8 @@ PAINTER_ICONS = {
                      '<path d="M3.5 1.5l3.5 3.5-3.5 3.5" fill="none" stroke="%s" stroke-width="1.2"/></svg>',
     "check": '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 12 12">'
              '<path d="M2.6 6.3l2.3 2.3 4.5-5" fill="none" stroke="%s" stroke-width="1.8"/></svg>',
+    "close": '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10">'
+             '<path d="M2 2l6 6M8 2l-6 6" fill="none" stroke="%s" stroke-width="1.3"/></svg>',
 }
 _painter_icons = None  # QTemporaryDir des SVG, vivant autant que l'application
 
@@ -249,6 +251,7 @@ def apply_painter_look(app):
         """
         QToolTip { color: #d2d2d2; background: #252525; border: 1px solid #4d4d4d; padding: 3px 5px; }
         QFrame#bar { background: #2b2b2b; }
+        QFrame#viewer, QFrame#browser { border-right: 1px solid #1e1e1e; }
         QFrame#separator { background: #262626; min-height: 1px; max-height: 1px; border: none; }
         QLabel#title { color: #e6e6e6; font-size: 14px; font-weight: bold; }
         QLabel#section { color: #e6e6e6; font-weight: bold; }
@@ -263,6 +266,8 @@ def apply_painter_look(app):
         QPushButton:hover { background: #383838; border-color: #5c5c5c; }
         QPushButton:pressed { background: #262626; }
         QPushButton:disabled { color: #7a7a7a; background: #3e3e3e; border-color: #3e3e3e; }
+        QPushButton:checked { background: #1f3b5c; border-color: %(accent)s; color: #ffffff; }
+        QPushButton:checked:hover { background: #274a73; }
         QPushButton#primary { background: %(accent)s; border-color: %(accent)s; color: #ffffff; font-weight: bold; }
         QPushButton#primary:hover { background: #4b9bf3; border-color: #4b9bf3; }
         QPushButton#primary:disabled { background: #3e3e3e; border-color: #3e3e3e; color: #7a7a7a; }
@@ -310,6 +315,20 @@ def apply_painter_look(app):
                             padding: 2px 0; }
         QToolButton#reset { border: none; background: transparent; color: %(muted)s; padding: 0 2px; }
         QToolButton#reset:hover { color: #e6e6e6; }
+        QToolButton#tool { border: none; background: transparent; color: #b0b0b0; font-size: 15px; padding: 0 4px; }
+        QToolButton#tool:hover { color: #ffffff; }
+
+        QTabBar#library { background: #2b2b2b; }
+        QTabBar#library::tab { background: transparent; color: %(muted)s; border: none; border-bottom: 2px solid transparent;
+                               padding: 6px 10px 4px 10px; }
+        QTabBar#library::tab:selected { color: #e6e6e6; border-bottom: 2px solid %(accent)s; }
+        QTabBar#library::tab:hover { color: #e6e6e6; }
+        QTabBar#library::close-button { image: url(%(close)s); subcontrol-position: right; margin-left: 4px; }
+        QTabBar#library::close-button:hover { image: url(%(close_hover)s); }
+        QListWidget { background: #333333; border: none; outline: 0; }
+        QListWidget::item { color: #c8c8c8; border-radius: 3px; padding-top: 4px; }
+        QListWidget::item:hover { background: #3a3a3a; }
+        QListWidget::item:selected { background: #1f3b5c; color: #ffffff; }
 
         QScrollArea { background: transparent; border: none; }
         QScrollArea > QWidget > QWidget { background: transparent; }
@@ -326,7 +345,8 @@ def apply_painter_look(app):
         QMenu::item:selected { background: %(accent)s; color: #ffffff; }
         """
         % {"accent": PAINTER_ACCENT, "muted": MUTED, "warning": WARNING, "chevron": painter_icon("chevron_down", "#b0b0b0"),
-           "chevron_off": painter_icon("chevron_down", "#5c5c5c"), "check": painter_icon("check", "#2b2b2b")}
+           "chevron_off": painter_icon("chevron_down", "#5c5c5c"), "check": painter_icon("check", "#2b2b2b"),
+           "close": painter_icon("close", "#8c8c8c"), "close_hover": painter_icon("close", "#e6e6e6")}
     )
 
 
@@ -403,6 +423,19 @@ def ui_scale(mac):
 
 
 # ---- Démarrage ----------------------------------------------------------------------------------------------------------
+
+
+def start_standalone(name, painter=False):
+    """Application Qt d'une fenêtre lancée sans ArmorPaint (subzero autonome, lot E9) : ni protocole, ni échelle
+    d'ArmorPaint, application ordinaire au premier plan. Rend app."""
+    app = QtWidgets.QApplication([sys.argv[0]])
+    app.setApplicationName(name)
+    app.setDesktopFileName(name)  # Wayland : icône et regroupement de la fenêtre par subzero.desktop
+    if painter:
+        apply_painter_look(app)
+    else:
+        apply_look(app)
+    return app
 
 
 def start(name, painter=False):
