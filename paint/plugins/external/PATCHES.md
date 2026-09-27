@@ -1731,7 +1731,7 @@ derrière pour peindre dans la même image.
 | | |
 |---|---|
 | Fichier | `paint/sources/util/util_layer.c` (`layers_merge_layer`, `layers_apply_masks`, `layers_merge_down`, `layers_merge_group` ; `layers_apply_mask_stack` et `layers_bake_mask_opacity` ajoutées) |
-| Commit studio | `COMMIT` sur la branche `studio` |
+| Commit studio | `37a7b094` sur la branche `studio` |
 | Validé contre | upstream `85f6cf1c` (2026-09-27) |
 | Constaté | 2026-09-27 ; présent en `85f6cf1c` |
 
@@ -1762,7 +1762,7 @@ la vue n'en lit pas : ils se multiplient toujours.
 - Merge Down d'un masque sur un masque d'opacité < 1 : `layers_bake_mask_opacity` écrit d'abord cette opacité dans les
   pixels du masque du dessous (`lerp(1, masque, opacité)`) et la remet à 1. Le produit garde ainsi le poids de chacun.
 
-Pour régénérer : `git diff COMMIT^ COMMIT -- paint/sources/util/util_layer.c`. Ce fichier porte aussi
+Pour régénérer : `git diff 37a7b094^ 37a7b094 -- paint/sources/util/util_layer.c`. Ce fichier porte aussi
 [udim-tile-limit](#udim-tile-limit), donc `git diff upstream studio` mêle les deux patches.
 
 **Test.** `.tests/masks_app.sh`, 18 vérifications. Calque rouge sur la base grise, masques gris unis, texel du flatten
