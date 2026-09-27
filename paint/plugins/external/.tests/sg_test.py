@@ -30,11 +30,21 @@ def clean_env(**extra):
     return env
 
 
+class HostRefusal(Exception):
+    """Refus d'une requête host par le faux ArmorPaint (réponse "ok":false)."""
+
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+
+
 class Sidecar(object):
-    """Un sidecar lancé comme par le superviseur : stdin/stdout en pipes, stderr capturé."""
+    """Un sidecar lancé comme par le superviseur : stdin/stdout en pipes, stderr capturé. host : ce qui répond à ses
+    requêtes host pendant une requête (FakeArmorPaint), comme studio_workfiles.c dans l'app."""
 
     def __init__(self, workdir, argv=None, **env):
         self.workdir = workdir
+        self.host = None
         self.err_path = os.path.join(workdir, "stderr-%d.txt" % time.monotonic_ns())
         self.err = open(self.err_path, "w")
         argv = argv or [sys.executable, os.path.join(HERE, "sg_fixture.py"), workdir]
@@ -72,10 +82,22 @@ class Sidecar(object):
         message_id = self.next_id
         self.next_id += 1
         self.send_raw(json.dumps({"id": message_id, "op": op, "args": args if args is not None else {}}) + "\n")
-        reply = self.read(timeout)
-        assert reply is not None, "sidecar exited; stderr:\n%s" % self.stderr()[-3000:]
+        while True:
+            reply = self.read(timeout)
+            assert reply is not None, "sidecar exited; stderr:\n%s" % self.stderr()[-3000:]
+            if "host" not in reply:
+                break
+            self.answer_host(reply)
         assert reply["id"] == message_id, reply
         return reply
+
+    def answer_host(self, request):
+        assert self.host is not None, "unexpected host request: %s" % request
+        try:
+            reply = {"host": request["host"], "ok": True, "data": self.host(request["op"], request.get("args") or {})}
+        except HostRefusal as e:
+            reply = {"host": request["host"], "ok": False, "error": {"code": e.code, "message": str(e)}}
+        self.send_raw(json.dumps(reply) + "\n")
 
     def data(self, op, args=None, timeout=60):
         reply = self.call(op, args, timeout)
@@ -357,7 +379,8 @@ class TestToolkit(Base):
         tp = s.data("texture_pattern", {"path": nv["path"]})
         tex = os.path.join(work, "textures", "v001")
         self.assertEqual(tp["template"], "armorpaint_asset_textures")
-        # Marqueurs malgré les types des clés (channel alphanumeric, texture_ext à choix, UDIM séquence).
+        # Marqueurs malgré les types des clés (texture_ext à choix, UDIM séquence ; channel filtré :
+        # test_texture_name_refused_by_template).
         self.assertEqual(tp["pattern"], os.path.join(tex, "robot_<channel>.<ext>"))
         self.assertEqual(tp["pattern_udim"], os.path.join(tex, "robot_<channel>.<UDIM>.<ext>"))
 
@@ -423,10 +446,12 @@ class TestEngine(Base):
         self.assertEqual(menu["context"]["label"], "Demo / robot / Texture / texturing")
         self.assertEqual((menu["context"]["task_id"], menu["context"]["project_id"]), (1, 1))
         self.assertFalse(menu["has_ui"])
-        # Sans Qt, workfiles2 ne s'enregistre pas : seule la section contexte du moteur reste.
-        self.assertEqual([c["name"] for c in menu["commands"]], self.CONTEXT_COMMANDS)
-        self.assertEqual({c["type"] for c in menu["commands"]}, {"context_menu"})
-        self.assertEqual(menu["favourites"], [])
+        # Sans interface, workfiles2 ne s'enregistre pas : la section contexte du moteur reste, et Publish... si les
+        # modules Qt s'importent (tk-multi-publish2 s'enregistre toujours : son API sert sans fenêtre, op publish).
+        commands = [c for c in menu["commands"] if c["app_instance"] != "tk-multi-publish2"]
+        self.assertEqual([c["name"] for c in commands], self.CONTEXT_COMMANDS)
+        self.assertEqual({c["type"] for c in commands}, {"context_menu"})
+        self.assertEqual(menu["favourites"], ["Publish..."] if has_qt() else [])
         # Les dossiers de la tâche sont créés avant le changement de contexte.
         work = os.path.join(self.workdir, "storage", "demo", "assets", "Prop", "robot", "TXT", "work", "armorpaint")
         self.assertTrue(os.path.isdir(work))
@@ -440,7 +465,7 @@ class TestEngine(Base):
         # Autre tâche : les commandes du moteur survivent au changement de contexte.
         other = s.data("list_commands", {"task_id": 2})
         self.assertEqual(other["context"]["label"], "Demo / tree / Texture / lookdev")
-        self.assertEqual([c["name"] for c in other["commands"]], self.CONTEXT_COMMANDS)
+        self.assertEqual([c["name"] for c in other["commands"] if c["type"] == "context_menu"], self.CONTEXT_COMMANDS)
 
     @unittest.skipUnless(has_qt(), "PySide6 not importable by this Python")
     def test_menu_with_workfiles(self):
@@ -453,13 +478,341 @@ class TestEngine(Base):
         self.assertIn("File Save...", names)
         wf = {c["name"]: c for c in menu["commands"]}["File Open..."]
         self.assertEqual((wf["app_instance"], wf["type"]), ("tk-multi-workfiles2", "default"))
-        self.assertEqual(menu["favourites"], ["File Open...", "File Save..."])  # réglage menu_favourites
+        self.assertEqual(menu["favourites"], ["File Open...", "File Save...", "Publish..."])  # réglage menu_favourites
 
     def test_engine_missing(self):
         s = self.start()  # config sans tk-armorpaint
         code, reply = s.error("list_commands", {"task_id": 1})
         self.assertEqual(code, "app_unavailable")
         self.assertIn("tk-armorpaint", reply["error"]["message"])
+
+
+def png(path, rgb=(200, 80, 30), size=4):
+    """Un vrai PNG (la fenêtre Publish le charge en vignette)."""
+    import struct
+    import zlib
+
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+    raw = b"".join(b"\x00" + bytes(rgb) * size for _ in range(size))
+    header = struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    data = chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
+    write(path, b"\x89PNG\r\n\x1a\n" + data)
+
+
+class FakeArmorPaint(object):
+    """ArmorPaint pour les hooks du publish : les requêtes host de studio_workfiles.c et studio_publish.c, réponses de
+    même forme, sur des fichiers. path : le projet ouvert ("" : jamais enregistré) ; current : l'export courant
+    (Ctrl+E), des choix comme ceux de la fenêtre d'export, None s'il n'y en a pas eu ; tiles : les tuiles UDIM du
+    maillage ; textures : celles du preset ; ext : leur format. refuse : {op: (code, message)}, requêtes refusées."""
+
+    def __init__(self, path=""):
+        self.path = path
+        self.current = None
+        self.tiles = ["1001", "1002"]
+        self.textures = ["base", "nor"]
+        self.ext = "png"
+        self.refuse = {}
+        self.requests = []
+
+    def __call__(self, op, args):
+        self.requests.append((op, args))
+        if op in self.refuse:
+            raise HostRefusal(*self.refuse[op])
+        return getattr(self, "op_" + op)(args)
+
+    def ops(self):
+        return [op for op, _ in self.requests]
+
+    def op_current_path(self, args):
+        return {"path": self.path}
+
+    def op_save(self, args):
+        if not self.path:
+            raise HostRefusal("no_path", "the project has never been saved: use File Save")
+        write(self.path, "arm %s" % os.path.basename(self.path))
+
+    def op_save_as(self, args):
+        self.path = args["path"]
+        self.op_save(args)
+
+    def op_publish_thumbnail(self, args):
+        png(args["path"])
+        return {"path": args["path"], "width": 4, "height": 4}
+
+    def op_publish_copy(self, args):
+        if not self.path:
+            raise HostRefusal("not_saved", "the project has never been saved")
+        if args["path"] == self.path or not args["path"].endswith(".arm"):
+            raise HostRefusal("bad_request", "path of the copy (.arm) expected")
+        os.makedirs(os.path.dirname(args["path"]), exist_ok=True)
+        shutil.copyfile(self.path, args["path"])
+        return {"path": args["path"], "size": os.path.getsize(args["path"])}
+
+    def op_publish_preflight(self, args):
+        return self._export(args, False)
+
+    def op_publish_export(self, args):
+        return self._export(args, True)
+
+    def _export(self, args, write_files):
+        if not self.path:
+            raise HostRefusal("not_saved", "the project has never been saved: save it first (File Save...)")
+        naming = args.get("naming") or {}
+        template = naming.get("template")
+        choices = args.get("choices") or self.current
+        reply = {"path": self.path, "naming_template": template}
+        if choices is None:
+            reply["export"] = {"ok": False, "report": None, "code": "no_preset",
+                               "error": "no studio export in this session: export the textures once"}
+            return reply
+        skip = {tuple(k) for k in (args.get("skip") or []) + (choices.get("skip") or [])}
+        per_tile = choices.get("mode") == 3 and self.tiles
+        name = os.path.splitext(publish_name_of(self.path))[0]
+        files, issues = [], []
+        if self.tiles and not per_tile:
+            issues.append({"level": "warning", "code": "udim_not_per_tile", "message": "UDIM tiles: export per tile"})
+        for texture in self.textures:
+            for tile in (self.tiles if per_tile else [""]):
+                if template:
+                    pattern = (naming["pattern_udim"] if tile else naming["pattern"]).replace("<channel>", texture)
+                    pattern = pattern.replace("<ext>", self.ext)
+                else:
+                    pattern = os.path.join(
+                        choices["dir"], "%s_%s%s.%s" % (name, texture, ".<UDIM>" if tile else "", self.ext)
+                    )
+                path = pattern.replace("<UDIM>", tile)
+                files.append({"path": path, "texture": texture, "variant": "", "udim": tile,
+                              "sequence": pattern if tile else None, "width": 64, "height": 64, "format": self.ext,
+                              "bits": 8, "channels": 3, "compression": "", "color_space": "sRGB - Texture",
+                              "size_estimate": 12288, "exists": os.path.exists(path),
+                              "skip": (texture, "", tile) in skip or (texture, "*", "*") in skip})
+        written = [f["path"] for f in files if not f["skip"]]
+        if not written:
+            issues.append({"level": "blocking", "code": "no_selection", "message": "No file selected"})
+        ok = not any(i["level"] == "blocking" for i in issues)
+        if ok and write_files:
+            for path in written:
+                png(path, (30, 120, 200))
+        report = {"ok": ok, "preset": choices["preset"], "color_space_override": None,
+                  "destination": os.path.dirname(written[0]) if written else choices["dir"], "width": 64, "height": 64,
+                  "source_bits": 8, "mode": "per UDIM tile" if per_tile else "visible",
+                  "total_size": 12288 * len(written),
+                  "manifest": None, "files": files, "issues": issues}
+        reply["export"] = {"ok": ok, "report": report, "error": "" if ok else "blocked by the preflight"}
+        return reply
+
+
+def publish_name_of(path):
+    from studio_sg_session import publish_name
+
+    return publish_name(path)
+
+
+# Hook du sidecar pour les tests : lit la base du site simulé (PublishedFile et leurs dépendances).
+FIND_HOOK = """
+def setup(session):
+    def find(args):
+        return session._connect().find(args["entity_type"], args.get("filters", []), args.get("fields", []))
+    session.ops["find"] = find
+"""
+
+
+@unittest.skipUnless(os.environ.get("STUDIO_TEST_TK_APPS"), "STUDIO_TEST_TK_APPS not set (Toolkit apps)")
+@unittest.skipUnless(has_qt(), "PySide6 not importable by this Python (tk-multi-publish2 imports its Qt modules)")
+class TestPublish(Base):
+    """Publish sans fenêtre (op publish, lot C4) : tk-multi-publish2 et les hooks du moteur
+    (tk-armorpaint/hooks/tk-multi-publish2) sur le site simulé (scénario demo), contre un faux ArmorPaint. Le vrai
+    ArmorPaint et la fenêtre Publish : publish_app.sh."""
+
+    def start_publish(self, **env):
+        hook = os.path.join(self.workdir, "find_hook.py")
+        write(hook, FIND_HOOK)
+        s = self.start("demo", STUDIO_SG_NO_UI="1", STUDIO_SG_HOOK=hook, **env)
+        nv = s.data("next_version", {"task_id": 1, "name": "robot"})
+        host = FakeArmorPaint(nv["path"])
+        host.op_save({})
+        s.host = host
+        self.work = os.path.dirname(nv["path"])
+        self.publish_area = os.path.join(os.path.dirname(os.path.dirname(self.work)), "publish", "armorpaint")
+        return s, host
+
+    def published(self, s):
+        fields = ["code", "name", "version_number", "path", "description", "task", "image",
+                  "published_file_type.PublishedFileType.code"]
+        files = {f["id"]: f for f in s.data("find", {"entity_type": "PublishedFile", "fields": fields})}
+        for dep in s.data("find", {"entity_type": "PublishedFileDependency",
+                                   "fields": ["published_file", "dependent_published_file"]}):
+            depends_on = files[dep["published_file"]["id"]].setdefault("depends_on", [])
+            depends_on.append(dep["dependent_published_file"]["id"])
+        return files
+
+    def test_publish_project_and_udim_textures(self):
+        s, host = self.start_publish()
+        host.current = {"preset": "basic", "dir": os.path.join(self.workdir, "elsewhere"), "mode": 3}
+        result = s.data("publish", {"task_id": 1, "description": "first pass"}, timeout=180)
+        self.assertTrue(result["finalized"], result)
+        self.assertEqual(result["context"]["task_id"], 1)
+        self.assertEqual([m for m in result["messages"] if m["level"] == "error"], [])
+        by_item = {p["item"]: p for p in result["publishes"]}
+        self.assertEqual(sorted(by_item), ["robot.v001.arm", "robot_base.<UDIM>.png", "robot_nor.<UDIM>.png"])
+
+        # Le projet : copié par ArmorPaint (publish_copy) au template de publish, enregistré au type du sidecar.
+        project = by_item["robot.v001.arm"]
+        copy = os.path.join(self.publish_area, "robot.v001.arm")
+        self.assertEqual((project["published_file_type"], project["version_number"]), ("ArmorPaint Project", 1))
+        self.assertTrue(os.path.isfile(copy))
+        self.assertIn(("publish_copy", {"path": copy, "context": result["context"]}), host.requests)
+
+        # Les textures : exportées une fois, nommées par le template des textures (op texture_pattern), une séquence
+        # <UDIM> par texture, copiées dans le dossier publish, dépendantes du projet.
+        self.assertEqual(host.ops().count("publish_export"), 1)
+        export = dict(host.requests)["publish_export"]
+        self.assertEqual((export["naming"]["template"], export["skip"]), ("armorpaint_asset_textures", []))
+        tex_work = os.path.join(self.work, "textures", "v001")
+        tex_pub = os.path.join(self.publish_area, "textures", "v001")
+        for tile in ("1001", "1002"):
+            self.assertTrue(os.path.isfile(os.path.join(tex_work, "robot_base.%s.png" % tile)))
+            self.assertTrue(os.path.isfile(os.path.join(tex_pub, "robot_base.%s.png" % tile)))
+        base = by_item["robot_base.<UDIM>.png"]
+        self.assertEqual((base["published_file_type"], base["version_number"]), ("UDIM Image", 1))
+        files = self.published(s)
+        self.assertEqual(len(files), 3)
+        sg_base = files[base["id"]]
+        self.assertEqual(sg_base["name"], "robot_base.<UDIM>.png")
+        self.assertEqual(sg_base["published_file_type.PublishedFileType.code"], "UDIM Image")
+        self.assertEqual(sg_base["path"]["local_path"], os.path.join(tex_pub, "robot_base.<UDIM>.png"))
+        self.assertEqual(sg_base["depends_on"], [project["id"]])
+        self.assertEqual(files[project["id"]]["path"]["local_path"], copy)
+        self.assertEqual({f["description"] for f in files.values()}, {"first pass"})
+        self.assertEqual({f["task"]["id"] for f in files.values()}, {1})
+
+        # Vignette du viewport, une capture pour tous ; puis le projet passe à la version suivante.
+        self.assertEqual(host.ops().count("publish_thumbnail"), 1)
+        self.assertEqual(host.path, os.path.join(self.work, "robot.v002.arm"))
+        self.assertTrue(os.path.isfile(host.path))
+        self.assertEqual(host.ops()[-1], "save_as")
+
+        # Deuxième publish, depuis la v002, une texture écartée : ni exportée ni publiée.
+        host.requests = []
+        result = s.data("publish", {"task_id": 1, "skip": ["robot_nor.<UDIM>.png"]}, timeout=180)
+        self.assertEqual(sorted(p["item"] for p in result["publishes"]), ["robot.v002.arm", "robot_base.<UDIM>.png"])
+        self.assertEqual(result["skipped"], ["robot_nor.<UDIM>.png"])
+        export = dict(host.requests)["publish_export"]
+        self.assertEqual(sorted(map(tuple, export["skip"])), [("nor", "", "1001"), ("nor", "", "1002")])
+        self.assertFalse(os.path.exists(os.path.join(self.work, "textures", "v002", "robot_nor.1001.png")))
+        self.assertTrue(os.path.isfile(os.path.join(self.publish_area, "textures", "v002", "robot_base.1002.png")))
+        self.assertEqual(host.path, os.path.join(self.work, "robot.v003.arm"))
+        names = sorted((f["name"], f["version_number"]) for f in self.published(s).values())
+        self.assertEqual(names, [("robot.arm", 1), ("robot.arm", 2), ("robot_base.<UDIM>.png", 1),
+                                 ("robot_base.<UDIM>.png", 2), ("robot_nor.<UDIM>.png", 1)])
+
+    def test_udim_key_without_default(self):
+        # Une séquence est enregistrée sous la valeur par défaut de sa clé : %04d sans default: "<UDIM>".
+        s, host = self.start_publish(STUDIO_TEST_UDIM_DEFAULT="0")
+        host.current = {"preset": "basic", "dir": self.workdir, "mode": 3}
+        result = s.data("publish", {"task_id": 1, "skip": ["robot_nor.<UDIM>.png"]}, timeout=180)
+        warnings = [m["message"] for m in result["messages"] if 'Set default: "<UDIM>"' in m["message"]]
+        self.assertEqual(len(warnings), 1, result["messages"])
+        self.assertIn("will list the texture as robot_base.%04d.png", warnings[0])
+        paths = [f["path"]["local_path"] for f in self.published(s).values() if f["name"].startswith("robot_base")]
+        self.assertEqual([os.path.basename(p) for p in paths], ["robot_base.%04d.png"])
+
+    def test_texture_name_refused_by_template(self):
+        # Le canal et l'extension remplacent des marqueurs que les clés ne filtrent pas (op texture_pattern) : un nom
+        # que le template refuse empêche la copie vers le Publish Template, tk-multi-publish2 publierait en place.
+        s, host = self.start_publish(STUDIO_TEST_CHANNEL_FILTER="alphanumeric")
+        tp = s.data("texture_pattern", {"path": host.path})
+        self.assertEqual(os.path.basename(tp["pattern_udim"]), "robot_<channel>.<UDIM>.<ext>")  # malgré le filtre
+        host.current = {"preset": "basic", "dir": self.workdir, "mode": 3}
+        host.textures = ["base_color", "nor"]
+        code, reply = s.error("publish", {"task_id": 1}, timeout=180)
+        self.assertEqual(code, "publish_invalid")
+        message = reply["error"]["message"]
+        refused = "robot_base_color.<UDIM>.png does not match the texture template armorpaint_asset_textures "
+        self.assertIn(refused, message)
+        self.assertIn("Illegal value 'base_color' does not fit filter_by 'alphanumeric'", message)
+        self.assertNotIn("robot_nor", message)
+        self.assertEqual(self.published(s), {})
+        self.assertNotIn("publish_export", host.ops())
+
+        host.textures, host.ext = ["base"], "tif"
+        code, reply = s.error("publish", {"task_id": 1}, timeout=180)
+        self.assertEqual(code, "publish_invalid")
+        self.assertIn("Illegal value: 'tif' not in choices", reply["error"]["message"])
+        self.assertEqual(self.published(s), {})
+
+    def test_texture_name_refused_published_in_place(self):
+        # Sans Publish Template, la texture est publiée où l'export l'écrit de toute façon : un avertissement.
+        s, host = self.start_publish(STUDIO_TEST_CHANNEL_FILTER="alphanumeric", STUDIO_TEST_TEXTURES_COPY="0")
+        host.current = {"preset": "basic", "dir": self.workdir, "mode": 3}
+        host.textures = ["base_color"]
+        result = s.data("publish", {"task_id": 1}, timeout=180)
+        self.assertTrue(result["finalized"], result)
+        warnings = [m["message"] for m in result["messages"] if "does not match the texture template" in m["message"]]
+        self.assertEqual(len(warnings), 1, result["messages"])
+        self.assertIn("will not recognize it", warnings[0])
+        paths = [f["path"]["local_path"] for f in self.published(s).values() if f["name"].startswith("robot_base")]
+        self.assertEqual(paths, [os.path.join(self.work, "textures", "v001", "robot_base_color.<UDIM>.png")])
+
+    def test_export_settings_sources(self):
+        # Sans export dans la session ni sidecar du projet : le preset du collecteur, par tuile (le maillage a des
+        # tuiles UDIM). Sans ce réglage : le projet seul.
+        s, host = self.start_publish()
+        result = s.data("publish", {"task_id": 1}, timeout=180)
+        self.assertEqual([p["item"] for p in result["publishes"]], ["robot.v001.arm"])
+        self.assertTrue(any("No texture export" in m["message"] for m in result["messages"]), result["messages"])
+        self.assertNotIn("publish_export", host.ops())
+
+        # Le sidecar du projet (dernier export de la fenêtre d'export) passe avant l'export courant.
+        import studio_export_choices
+
+        host.current = {"preset": "basic", "dir": self.workdir, "mode": 0}
+        sidecar = studio_export_choices.sidecar_path(host.path)
+        write(sidecar, json.dumps({"export": {"preset": "karma", "dir": self.workdir, "mode": 3,
+                                              "presets": {"karma": {}}}}))
+        host.requests = []
+        result = s.data("publish", {"task_id": 1}, timeout=180)
+        export = dict(host.requests)["publish_export"]
+        self.assertEqual((export["choices"]["preset"], export["choices"]["mode"]), ("karma", 3))
+
+    def test_textures_without_version(self):
+        # Noms d'ArmorPaint (pas de template) : la texture publiée en place serait réécrite par l'export suivant.
+        s, host = self.start_publish(STUDIO_SG_NAMING="0")
+        host.current = {"preset": "basic", "dir": os.path.join(self.workdir, "out"), "mode": 3}
+        result = s.data("publish", {"task_id": 1}, timeout=180)
+        self.assertEqual([p["item"] for p in result["publishes"]], ["robot.v001.arm"])
+        self.assertTrue(any("no version in its name" in m["message"] for m in result["messages"]), result["messages"])
+        self.assertNotIn("publish_export", host.ops())
+
+    def test_invalid_publishes_nothing(self):
+        s, host = self.start_publish()
+        host.current = {"preset": "basic", "dir": self.workdir, "mode": 3}
+        write(os.path.join(self.work, "robot.v002.arm"), "arm")  # la version suivante existe déjà
+        code, reply = s.error("publish", {"task_id": 1}, timeout=180)
+        self.assertEqual(code, "publish_invalid")
+        self.assertIn("next version of this project already exists", reply["error"]["message"])
+        self.assertEqual(self.published(s), {})
+        self.assertNotIn("publish_export", host.ops())
+
+        host.path = ""  # jamais enregistré
+        code, reply = s.error("publish", {"task_id": 1}, timeout=180)
+        self.assertEqual(code, "publish_invalid")
+        self.assertIn("never been saved", reply["error"]["message"])
+        self.assertEqual(s.error("publish", {"task_id": 1, "skip": ["armorpaint.session"]})[0], "nothing_to_publish")
+        self.assertEqual(s.error("publish", {"task_id": 1, "skip": "all"})[0], "bad_request")
+
+    def test_export_failure(self):
+        s, host = self.start_publish()
+        host.current = {"preset": "basic", "dir": self.workdir, "mode": 3}
+        host.refuse["publish_export"] = ("write_failed", "disk full")
+        code, reply = s.error("publish", {"task_id": 1}, timeout=180)
+        self.assertEqual(code, "publish_failed")
+        self.assertIn("disk full", reply["error"]["message"])
+        self.assertIn("already published: robot.v001.arm", reply["error"]["message"])
+        self.assertEqual(host.path, os.path.join(self.work, "robot.v001.arm"))  # pas de version suivante
 
 
 class TestCoreDiscovery(Base):

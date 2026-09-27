@@ -465,6 +465,13 @@ char *studio_report_json(const studio_plan_t *plan, const studio_report_t *repor
 		sb_quote(&b, f->variant);
 		sb_printf(&b, ", \"udim\": ");
 		sb_quote(&b, f->udim);
+		sb_printf(&b, ", \"sequence\": ");
+		if (f->sequence != NULL) {
+			sb_quote(&b, f->sequence);
+		}
+		else {
+			sb_printf(&b, "null");
+		}
 		sb_printf(&b, ", \"width\": %d, \"height\": %d, \"format\": \"%s\", \"bits\": %d, \"channels\": %d, "
 		          "\"compression\": ", f->width, f->height, studio_format_name(t->format), t->bits, t->channels);
 		if (t->compression != NULL) {

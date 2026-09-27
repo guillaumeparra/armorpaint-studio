@@ -26,3 +26,10 @@
 void studio_export_window_init(void);
 void studio_export_window_show(void); // ouvre la fenêtre, ou la ramène devant
 bool studio_export_window_is_open(void);
+
+// Export ou préflight comme la fenêtre, pour le publish (lot C4, studio_publish.c), sans changer l'export courant.
+// choices : objet JSON, les args d'une requête export ; NULL ou "" : l'export courant, celui que refait Ctrl+E.
+// more_skip : fichiers à ne pas écrire en plus (lignes de studio_export_set_skip), NULL : aucun. Rend (malloc)
+// {"ok","report","error"}, ou {"ok":false,"report":null,"code","error"} si les choix sont refusés (code no_preset :
+// aucun export studio dans la session). Thread principal, hors du dessin.
+char *studio_export_run_choices(const char *choices, bool preflight_only, const char *more_skip);

@@ -30,3 +30,8 @@ int studio_export_naming_path(const char *variant, const char *channel, const ch
                               char **error);
 // Template Toolkit qui nomme les textures du projet ouvert, NULL hors pipeline.
 const char *studio_export_naming_template(void);
+
+// Modèle donné pour le projet path, à la place de celui qu'on demanderait au sidecar (réponse de texture_pattern :
+// template NULL ou "" pour les noms d'ArmorPaint). Pour le publish (lot C4) : le sidecar est occupé par la fenêtre qui
+// publie, une requête texture_pattern attendrait sa fermeture ; il calcule le modèle et le passe avec sa requête host.
+void studio_export_naming_set(const char *path, const char *template, const char *pattern, const char *pattern_udim);

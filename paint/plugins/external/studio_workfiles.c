@@ -5,6 +5,7 @@
 #include "iron_ui.h"
 #include "studio.h"
 #include "studio_json.h"
+#include "studio_publish.h"
 #include "studio_sg.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -175,7 +176,10 @@ static void on_commands(int job) {
 // les autres commandes des apps. Dessiné par ui_menubar_draw_category_items (STUDIO-PATCH(menubar-hook)).
 
 static const char *shortcut_of(const char *command) {
-	return strcmp(command, "File Open...") == 0 ? "ctrl+alt+o" : strcmp(command, "File Save...") == 0 ? "ctrl+alt+s" : "";
+	return strcmp(command, "File Open...") == 0   ? "ctrl+alt+o"
+	       : strcmp(command, "File Save...") == 0 ? "ctrl+alt+s"
+	       : strcmp(command, "Publish...") == 0   ? "ctrl+alt+p"
+	                                              : "";
 }
 
 static void menu_commands(bool context_menu, bool favourite) {
@@ -301,7 +305,7 @@ static void handle_request(void *data) {
 		set_title("");
 		reply_ok(host, "null");
 	}
-	else {
+	else if (!studio_publish_host(host, op, req)) {
 		reply_error(host, "bad_request", string_tmp("unknown host operation: %s", op));
 	}
 done:
@@ -339,6 +343,9 @@ static void workfiles_update(void *data) {
 		}
 		else if (keyboard_started("s")) {
 			show("save");
+		}
+		else if (keyboard_started("p")) {
+			show("Publish..."); // tk-multi-publish2, lot C4
 		}
 	}
 }

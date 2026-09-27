@@ -31,6 +31,7 @@ PROTOCOL = 1
 log = logging.getLogger("studio_sg")
 
 HOST = None  # canal vers ArmorPaint (HostChannel), posé par main() ; utilisé par le moteur tk-armorpaint
+SESSION = None  # la session (studio_sg_session.Session), posée par main() ; pour les hooks du moteur (publish)
 
 
 class BridgeError(Exception):
@@ -215,8 +216,9 @@ def main(session_factory=None):
         return 1
     hello["protocol"] = PROTOCOL
     send(encode(0, True, hello))
-    global HOST
+    global HOST, SESSION
     HOST = HostChannel(proto_in, send)
+    SESSION = session
 
     while True:
         line = proto_in.readline(idle=IDLE)

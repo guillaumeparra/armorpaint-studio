@@ -318,10 +318,22 @@ static void put_preset_info(text_t *b, const char *name, const studio_preset_t *
 	}
 }
 
+// Texte d'un membre de l'objet à `base` (malloc) ; "" si absent.
+static char *member_text(const char *json, const char *base, const char *name) {
+	studio_json_value_t v = studio_json_find(json, string_tmp("%s/%s", base, name));
+	char               *s = v.type == STUDIO_JSON_STRING ? studio_json_text(v) : NULL;
+	return s != NULL ? s : strdup("");
+}
+
+// Texte JSON brut d'un membre (objet, tableau...), malloc ; "" si absent.
+static char *member_raw(const char *json, const char *base, const char *name) {
+	studio_json_value_t v = studio_json_find(json, string_tmp("%s/%s", base, name));
+	return v.type == STUDIO_JSON_OBJECT || v.type == STUDIO_JSON_ARRAY ? strndup(v.start, v.len) : strdup("");
+}
+
 // Texte JSON brut d'une valeur des arguments (objet, tableau...), malloc ; "" si absente.
 static char *arg_raw(const char *req, const char *name) {
-	studio_json_value_t v = studio_json_find(req, string_tmp("/args/%s", name));
-	return v.type == STUDIO_JSON_OBJECT || v.type == STUDIO_JSON_ARRAY ? strndup(v.start, v.len) : strdup("");
+	return member_raw(req, "/args", name);
 }
 
 static char *dir_of(const char *path) {
@@ -333,6 +345,16 @@ static char *dir_of(const char *path) {
 	}
 #endif
 	return slash != NULL ? strndup(path, (size_t)(slash - path)) : strdup("");
+}
+
+// Dossier du dernier export, sinon celui du projet enregistré (malloc).
+static char *current_dir(void) {
+	const char *last = g_context->texture_export_path;
+	if (last != NULL && last[0] != 0 && strcmp(last, "/") != 0) {
+		return strdup(last);
+	}
+	const char *file = project_filepath_get();
+	return dir_of(file != NULL ? file : "");
 }
 
 // Presets donnés par la fenêtre (args.presets : [{"name", "preset": {...}}], ceux du sidecar du projet) : lus ici,
@@ -479,11 +501,7 @@ static char *state_json(const char *req) {
 	put(&b, "],\"color_space\":");
 	put_quoted(&b, studio_export_color_space());
 
-	// Dossier du dernier export, sinon celui du projet enregistré.
-	char *dir = g_context->texture_export_path != NULL && g_context->texture_export_path[0] != 0 &&
-	                    strcmp(g_context->texture_export_path, "/") != 0
-	                ? strdup(g_context->texture_export_path)
-	                : dir_of(file != NULL ? file : "");
+	char *dir = current_dir();
 	put(&b, ",\"dir\":");
 	put_quoted(&b, dir);
 	free(dir);
@@ -494,9 +512,7 @@ static char *state_json(const char *req) {
 // ---- Requêtes --------------------------------------------------------------------------------------------------------
 
 static char *arg_text(const char *req, const char *name) {
-	studio_json_value_t v = studio_json_find(req, string_tmp("/args/%s", name));
-	char               *s = v.type == STUDIO_JSON_STRING ? studio_json_text(v) : NULL;
-	return s != NULL ? s : strdup("");
+	return member_text(req, "/args", name);
 }
 
 // Marge : comme la boîte d'export d'ArmorPaint (box_export_tab_export_textures_run), chaque calque est dilaté.
@@ -550,15 +566,15 @@ static void selection_free(selection_t *s, bool restore) {
 	free(s->skip);
 }
 
-// args.skip : [[texture, variant, tuile], ...] -> lignes de studio_export_set_skip.
-static char *skip_keys(const char *req) {
-	studio_json_value_t list = studio_json_find(req, "/args/skip");
+// skip de l'objet à `base` : [[texture, variant, tuile], ...] -> lignes de studio_export_set_skip.
+static char *skip_keys(const char *json, const char *base) {
+	studio_json_value_t list = studio_json_find(json, string_tmp("%s/skip", base));
 	int                 n    = list.type == STUDIO_JSON_ARRAY ? studio_json_length(list) : 0;
 	text_t              b    = {0};
 	for (int i = 0; i < n; ++i) {
 		char *part[3];
 		for (int k = 0; k < 3; ++k) {
-			studio_json_value_t v = studio_json_find(req, string_tmp("/args/skip/%d/%d", i, k));
+			studio_json_value_t v = studio_json_find(json, string_tmp("%s/skip/%d/%d", base, i, k));
 			part[k]               = v.type == STUDIO_JSON_STRING ? studio_json_text(v) : NULL;
 		}
 		if (part[0] != NULL && part[1] != NULL && part[2] != NULL) {
@@ -571,50 +587,78 @@ static char *skip_keys(const char *req) {
 	return b.data != NULL ? b.data : strdup("");
 }
 
-static void run_request(int id, const char *req, bool preflight_only) {
-	char *preset      = arg_text(req, "preset");
-	char *preset_json = arg_raw(req, "preset_json");
-	char *source      = arg_text(req, "preset_source");
-	char *overrides   = arg_raw(req, "overrides");
-	char *naming      = arg_text(req, "naming");
-	char *space       = arg_text(req, "color_space");
-	char *dir         = arg_text(req, "dir");
-	int   mode        = (int)studio_json_int(studio_json_find(req, "/args/mode"), EXPORT_MODE_VISIBLE);
-	bool  padding     = studio_json_truthy(studio_json_find(req, "/args/padding"));
+// Lignes de studio_export_set_skip, suivies de more (NULL : aucune), malloc.
+static char *join_skip(const char *skip, const char *more) {
+	text_t b = {0};
+	put(&b, "%s", skip);
+	if (skip[0] != 0 && skip[strlen(skip) - 1] != '\n') {
+		put(&b, "\n");
+	}
+	put(&b, "%s", more != NULL ? more : "");
+	return b.data != NULL ? b.data : strdup("");
+}
+
+static char *result_json(bool ok) {
+	const char *report = studio_export_last_report();
+	text_t      b      = {0};
+	put(&b, "{\"ok\":%s,\"report\":%s,\"error\":", ok ? "true" : "false", report[0] != 0 ? report : "null");
+	put_quoted(&b, studio_export_last_error());
+	put(&b, "}");
+	return b.data;
+}
+
+// Export ou préflight avec les choix de l'objet JSON à `base` (args d'une requête export). Les choix ne servent qu'à
+// cet export, sauf si keep et que l'export aboutit : il devient l'export courant (Ctrl+E) ; Cancel ne change rien.
+// more_skip : lignes de studio_export_set_skip ajoutées à celles des choix. Rend {"ok","report","error"} (malloc), ou
+// NULL si les choix sont refusés (*code, message).
+static char *run_choices(const char *json, const char *base, bool preflight_only, bool keep, const char *more_skip,
+                         const char **code, char *message, size_t size) {
+	char *preset      = member_text(json, base, "preset");
+	char *preset_json = member_raw(json, base, "preset_json");
+	char *source      = member_text(json, base, "preset_source");
+	char *overrides   = member_raw(json, base, "overrides");
+	char *naming      = member_text(json, base, "naming");
+	char *space       = member_text(json, base, "color_space");
+	char *dir         = member_text(json, base, "dir");
+	int   mode        = (int)studio_json_int(studio_json_find(json, string_tmp("%s/mode", base)), EXPORT_MODE_VISIBLE);
+	bool  padding     = studio_json_truthy(studio_json_find(json, string_tmp("%s/padding", base)));
+	char *result      = NULL;
 	if (mode < EXPORT_MODE_VISIBLE || mode > EXPORT_MODE_PER_UDIM_TILE) {
 		mode = EXPORT_MODE_VISIBLE;
 	}
 	if (preset_json[0] == 0 && !studio_export_is_studio_preset(preset)) {
-		reply_error(id, "bad_request", string_tmp("not a studio preset: %s", preset));
+		*code = "bad_request";
+		snprintf(message, size, "not a studio preset: %s", preset);
 	}
 	else if (dir[0] == 0) {
-		reply_error(id, "no_destination", "choose a destination folder");
+		*code = "no_destination";
+		snprintf(message, size, "choose a destination folder");
 	}
 	else {
-		// Les choix ne servent qu'à cette requête, sauf si l'export aboutit (Cancel ne change rien).
-		selection_t previous = selection_save();
-		char       *skip     = skip_keys(req);
+		selection_t   previous = selection_save();
+		export_mode_t was      = g_context->layers_export;
+		char         *keys     = skip_keys(json, base);
+		char         *skip     = join_skip(keys, more_skip);
 		studio_export_set_preset(preset, preset_json, source);
 		studio_export_set_overrides(overrides);
 		studio_export_set_naming(naming);
 		studio_export_set_color_space(space);
 		studio_export_set_skip(skip);
+		free(keys);
 		free(skip);
 		if (!preflight_only && padding) {
 			dilate_layers();
 		}
-		bool ok = studio_export_request(dir, preset, mode, preflight_only);
-		if (ok && !preflight_only) {
+		bool ok      = studio_export_request(dir, preset, mode, preflight_only);
+		bool adopted = keep && ok && !preflight_only;
+		if (adopted) {
 			adopt(dir, mode, padding);
 		}
-		selection_free(&previous, !(ok && !preflight_only));
-		const char *report = studio_export_last_report();
-		text_t      b      = {0};
-		put(&b, "{\"ok\":%s,\"report\":%s,\"error\":", ok ? "true" : "false", report[0] != 0 ? report : "null");
-		put_quoted(&b, studio_export_last_error());
-		put(&b, "}");
-		reply(id, b.data != NULL ? b.data : "null");
-		free(b.data);
+		else {
+			g_context->layers_export = was;
+		}
+		selection_free(&previous, !adopted);
+		result = result_json(ok);
 	}
 	free(preset);
 	free(preset_json);
@@ -623,6 +667,65 @@ static void run_request(int id, const char *req, bool preflight_only) {
 	free(naming);
 	free(space);
 	free(dir);
+	return result;
+}
+
+// L'export courant (Ctrl+E), sans le changer. more_skip comme run_choices.
+static char *run_current(bool preflight_only, const char *more_skip, const char **code, char *message, size_t size) {
+	const char *preset = studio_export_preset();
+	if (preset[0] == 0) {
+		*code = "no_preset";
+		snprintf(message, size, "no studio export in this session: export the textures once (File > Export Textures)");
+		return NULL;
+	}
+	if (studio_export_preset_json()[0] == 0 && !studio_export_is_studio_preset(preset)) {
+		*code = "bad_request";
+		snprintf(message, size, "not a studio preset: %s", preset);
+		return NULL;
+	}
+	char       *dir      = current_dir();
+	selection_t previous = selection_save();
+	char       *skip     = join_skip(previous.skip, more_skip);
+	studio_export_set_skip(skip);
+	free(skip);
+	if (!preflight_only && g_context->export_padding) {
+		dilate_layers();
+	}
+	bool ok = studio_export_request(dir, previous.preset, (int)g_context->layers_export, preflight_only);
+	selection_free(&previous, true);
+	free(dir);
+	return result_json(ok);
+}
+
+char *studio_export_run_choices(const char *choices, bool preflight_only, const char *more_skip) {
+	const char *code = "internal";
+	char        message[512];
+	snprintf(message, sizeof(message), "out of memory");
+	char *result = choices != NULL && choices[0] != 0
+	                   ? run_choices(choices, "", preflight_only, false, more_skip, &code, message, sizeof(message))
+	                   : run_current(preflight_only, more_skip, &code, message, sizeof(message));
+	if (result == NULL) {
+		text_t b = {0};
+		put(&b, "{\"ok\":false,\"report\":null,\"code\":");
+		put_quoted(&b, code);
+		put(&b, ",\"error\":");
+		put_quoted(&b, message);
+		put(&b, "}");
+		result = b.data;
+	}
+	return result;
+}
+
+static void run_request(int id, const char *req, bool preflight_only) {
+	const char *code = NULL;
+	char        message[512];
+	char       *result = run_choices(req, "/args", preflight_only, true, NULL, &code, message, sizeof(message));
+	if (result == NULL && code != NULL) {
+		reply_error(id, code, message);
+		return;
+	}
+	reply(id, result != NULL ? result : "null");
+	free(result);
 }
 
 // args : {"names": [...], "objects": [...]} (studio_atlas_set) -> {"ok", "error", "atlases"} : les jeux de textures

@@ -16,13 +16,16 @@ keys:
     version:
         type: int
         format_spec: "03"
-    # Textures exportées (lot B3, op texture_pattern) : canal du preset d'export, tuile UDIM, extension.
+    # Textures exportées (lot B3, op texture_pattern) : canal du preset d'export, tuile UDIM, extension. Canal sans
+    # filter_by: alphanumeric (comme mari.channel de tk-config-default2) : les presets ont base_color, sheen_tint…
     channel:
         type: str
-        filter_by: alphanumeric
     UDIM:
         type: sequence
         format_spec: "04"
+        # Comme tk-config-default2 : le chemin d'un publish UDIM porte <UDIM> (la valeur par défaut d'une clé
+        # sequence, %04d sans ce réglage, remplace la tuile dans le chemin enregistré par ShotGrid).
+        default: "<UDIM>"
     texture_ext:
         type: str
         choices: [png, jpg, exr]
@@ -40,5 +43,8 @@ paths:
     armorpaint_shot_publish: '@shot_root/publish/armorpaint/{name}.v{version}.arm'
     armorpaint_asset_textures: '@asset_root/work/armorpaint/textures/v{version}/{name}_{channel}[.{UDIM}].{texture_ext}'
     armorpaint_shot_textures: '@shot_root/work/armorpaint/textures/v{version}/{name}_{channel}.{texture_ext}'
+    # Textures publiées (lot C4) : copiées du dossier de travail par le plugin Publish Textures.
+    armorpaint_asset_textures_publish: '@asset_root/publish/armorpaint/textures/v{version}/{name}_{channel}[.{UDIM}].{texture_ext}'
+    armorpaint_shot_textures_publish: '@shot_root/publish/armorpaint/textures/v{version}/{name}_{channel}.{texture_ext}'
 
 strings: {}

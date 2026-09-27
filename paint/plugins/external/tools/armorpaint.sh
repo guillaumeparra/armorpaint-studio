@@ -7,8 +7,9 @@
 # Usage : tools/armorpaint.sh [arguments d'ArmorPaint : projet .arm, mesh…]
 #         tools/armorpaint.sh --shotgrid-demo [dossier de travail]
 #   --shotgrid-demo : sur le site ShotGrid simulé (production « Demo », .tests/demo_workfiles.sh), avec tk-core, les
-#   apps de Workfiles et le python PySide6 de .shotgrid/ (tools/setup_shotgrid.sh crée le venv s'il manque). Sans
-#   lui, ShotGrid demande un vrai tk-core (STUDIO_SGTK_PATH ou le cache de ShotGrid Desktop) : sinon toolkit_unavailable.
+#   apps Workfiles et Publish et le python PySide6 de .shotgrid/ (tools/setup_shotgrid.sh crée le venv s'il manque).
+#   Sans lui, ShotGrid demande un vrai tk-core (STUDIO_SGTK_PATH ou le cache de ShotGrid Desktop) : sinon
+#   toolkit_unavailable.
 # La fenêtre d'export (File > Export > Textures) demande Python avec PySide6 : sans STUDIO_PYTHON, celui du venv de
 # .shotgrid/ (créé par tools/setup_shotgrid.sh s'il manque). En studio, rez fournit STUDIO_PYTHON.
 # Les variables d'environnement (OCIO, STUDIO_*) passent à l'app. Journal de l'app : $TMPDIR/armorpaint-studio.log

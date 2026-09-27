@@ -16,7 +16,9 @@
 
 import json
 import os
+import re
 import shutil
+import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -55,25 +57,42 @@ def _tk_core(workdir):
     return source, root
 
 
+def _bundle_version(path):
+    """Version d'une app ou d'un framework Toolkit local : le tableau de .shotgrid/README.md pour les copies du dépôt,
+    sinon le tag du clone git (pas celui d'un dépôt qui le contiendrait). Les frameworks sont appariés par version
+    minimale : une version fausse peut les faire refuser."""
+    readme = os.path.join(os.path.dirname(path), "README.md")
+    if os.path.exists(readme):
+        with open(readme, encoding="utf-8") as f:
+            found = re.search(r"^\|\s*`%s`\s*\|\s*(v[\d.]+)\s*\|" % re.escape(os.path.basename(path)), f.read(), re.M)
+        if found:
+            return found.group(1)
+    git = lambda *args: subprocess.run(["git", "-C", path] + list(args), capture_output=True, text=True).stdout.strip()
+    top = git("rev-parse", "--show-toplevel")
+    if top and os.path.realpath(top) == os.path.realpath(path):
+        return git("describe", "--tags", "--abbrev=0") or "v0.0.0"
+    return "v0.0.0"
+
+
 def _demo_environments(config):
-    """Scénario "demo" : le moteur tk-armorpaint (external/tk-armorpaint) et tk-multi-workfiles2 dans tous les
-    environnements, comme dans une config studio. Les apps viennent de clones locaux (STUDIO_TEST_TK_APPS : dossier
-    contenant tk-multi-workfiles2, tk-framework-shotgunutils et tk-framework-qtwidgets), par descripteurs "path"."""
+    """Scénario "demo" : le moteur tk-armorpaint (external/tk-armorpaint), tk-multi-workfiles2 et tk-multi-publish2
+    dans tous les environnements, comme dans une config studio. Les apps viennent de copies locales
+    (STUDIO_TEST_TK_APPS : dossier contenant tk-multi-workfiles2, tk-multi-publish2, tk-framework-shotgunutils et
+    tk-framework-qtwidgets, .shotgrid/ du dépôt), par descripteurs "path". Publish : les hooks du moteur ; dans les
+    environnements de tâche, projet et textures copiés dans le dossier publish, sinon publiés en place ; les textures
+    toujours en place avec STUDIO_TEST_TEXTURES_COPY=0 (plugin sans Publish Template)."""
     apps = os.environ.get("STUDIO_TEST_TK_APPS")
-    if not apps or not os.path.isdir(os.path.join(apps, "tk-multi-workfiles2")):
-        sys.exit("STUDIO_TEST_TK_APPS must contain tk-multi-workfiles2 and its frameworks (scenario demo)")
+    for app in ("tk-multi-workfiles2", "tk-multi-publish2", "tk-framework-shotgunutils", "tk-framework-qtwidgets"):
+        if not apps or not os.path.isdir(os.path.join(apps, app)):
+            sys.exit("STUDIO_TEST_TK_APPS must contain %s (scenario demo)" % app)
     engine = os.path.join(os.path.dirname(HERE), "tk-armorpaint")
+    copy_textures = os.environ.get("STUDIO_TEST_TEXTURES_COPY") != "0"
 
     def location(name, version=None):
         path = engine if name == "tk-armorpaint" else os.path.join(apps, name)
-        if version is None:  # la version de la copie locale : les frameworks sont appariés par version minimale
-            import subprocess
+        return {"type": "path", "path": path, "version": version or _bundle_version(path)}
 
-            version = subprocess.run(
-                ["git", "-C", path, "describe", "--tags", "--abbrev=0"], capture_output=True, text=True
-            ).stdout.strip() or "v0.0.0"
-        return {"type": "path", "path": path, "version": version}
-
+    hooks = "{self}/%s.py:{engine}/tk-multi-publish2/basic/%s.py"
     for env, kind in (("project", None), ("asset", None), ("shot", None), ("asset_step", "asset"), ("shot_step", "shot")):
         workfiles = {
             "location": location("tk-multi-workfiles2"),
@@ -84,14 +103,35 @@ def _demo_environments(config):
         for setting, template in (("template_work", "work"), ("template_work_area", "work_area"),
                                   ("template_publish", "publish"), ("template_publish_area", "publish_area")):
             workfiles[setting] = "armorpaint_%s_%s" % (kind, template) if kind else None
+        template = lambda name: "armorpaint_%s_%s" % (kind, name) if kind else None
+        publish = {
+            "location": location("tk-multi-publish2"),
+            "collector": hooks % ("collector", "collector"),
+            "collector_settings": {"Work Template": template("work")},
+            "publish_plugins": [
+                {"name": "Publish to Flow Production Tracking", "hook": "{self}/publish_file.py", "settings": {}},
+                {
+                    "name": "Publish ArmorPaint Project",
+                    "hook": hooks % ("publish_file", "publish_session"),
+                    "settings": {"Publish Template": template("publish")},
+                },
+                {
+                    "name": "Publish Textures",
+                    "hook": hooks % ("publish_file", "publish_textures"),
+                    "settings": {"Publish Template": template("textures_publish")} if copy_textures else {},
+                },
+            ],
+            "modal": True,
+        }
         data = {
             "engines": {
                 "tk-armorpaint": {
                     "location": location("tk-armorpaint", "v0.1.0"),
-                    "apps": {"tk-multi-workfiles2": workfiles},
+                    "apps": {"tk-multi-workfiles2": workfiles, "tk-multi-publish2": publish},
                     "menu_favourites": [
                         {"app_instance": "tk-multi-workfiles2", "name": "File Open..."},
                         {"app_instance": "tk-multi-workfiles2", "name": "File Save..."},
+                        {"app_instance": "tk-multi-publish2", "name": "Publish..."},
                     ],
                 }
             },
@@ -126,12 +166,23 @@ def _demo_production(db, e):
         e["demo_task_%s" % code] = task("lookdev", shot, step_shot)
 
 
+def _edit_templates(config, old, new):
+    path = os.path.join(config, "core", "templates.yml")
+    with open(path) as f:
+        text = f.read()
+    if old not in text:
+        sys.exit("sg_fixture: %r not in %s" % (old, path))
+    with open(path, "w") as f:
+        f.write(text.replace(old, new))
+
+
 def setup(workdir, scenario=None):
     """Prépare le site dans ce processus. Retourne un dict des entités créées (et "db", la base mockgun).
 
     scenario : None ; "no_session" (Desktop jamais connecté) ; "auth_fault" (le serveur rejette la session) ;
     "offline" (le serveur est injoignable) ; "no_template" (la config n'a pas les templates ArmorPaint) ; "demo"
-    (plus de tâches pour l'artiste, voir _demo_production)."""
+    (plus de tâches pour l'artiste, voir _demo_production). Variantes des templates : STUDIO_TEST_UDIM_DEFAULT=0 (clé
+    UDIM sans default: "<UDIM>"), STUDIO_TEST_CHANNEL_FILTER=<filtre> (filter_by de la clé du canal)."""
     global TARGET
     scenario = scenario or os.environ.get("STUDIO_TEST_SCENARIO") or None
     workdir = os.path.abspath(workdir)
@@ -156,6 +207,12 @@ def setup(workdir, scenario=None):
         f.write("primary:\n    mac_path: %s\n    linux_path: %s\n    windows_path: null\n" % (storage, storage))
     if scenario == "demo":
         _demo_environments(config)
+    if os.environ.get("STUDIO_TEST_UDIM_DEFAULT") == "0":  # clé UDIM sans default: "<UDIM>" (une séquence : %04d)
+        _edit_templates(config, '        default: "<UDIM>"\n', "")
+    channel_filter = os.environ.get("STUDIO_TEST_CHANNEL_FILTER")
+    if channel_filter:  # canal filtré : alphanumeric refuse base_color
+        channel = "    channel:\n        type: str\n"
+        _edit_templates(config, channel, channel + "        filter_by: %s\n" % channel_filter)
     if scenario == "no_template":
         with open(os.path.join(config, "core", "templates.yml"), "w") as f:
             f.write("keys:\n    name: {type: str}\npaths:\n    maya_asset_work: 'assets/{name}.ma'\nstrings: {}\n")
@@ -172,6 +229,17 @@ def setup(workdir, scenario=None):
     db.schema_read = lambda project_entity=None: schema_read()
     db.schema_entity_read = lambda project_entity=None: entity_read()
     db.schema_field_read = lambda entity_type, field_name=None, project_entity=None: field_read(entity_type, field_name)
+    # Un lien vers un fichier local (le chemin d'un publish) porte link_type "local" sur un vrai site, que lit
+    # sgtk.util.resolve_publish_path (conflits de publish, File Open) ; mockgun ne l'ajoute pas. batch passe par create.
+    create = db.create
+
+    def create_with_link_type(entity_type, data, return_fields=None):
+        for value in data.values():
+            if isinstance(value, dict) and "local_path" in value:
+                value.setdefault("link_type", "local")
+        return create(entity_type, data, return_fields)
+
+    db.create = create_with_link_type
 
     e = {"db": db, "storage": storage, "config": config}
     e["artist"] = db.create("HumanUser", {"login": LOGIN, "name": "Ada Artist", "email": "ada@studio.test"})
@@ -226,6 +294,8 @@ def setup(workdir, scenario=None):
          "task_assignees": [e["other_user"]]},
     )
     e["publish_type"] = db.create("PublishedFileType", {"code": "ArmorPaint Project"})
+    for code in ("Texture", "UDIM Image"):  # textures (tk-armorpaint/hooks/tk-multi-publish2/basic/publish_textures.py)
+        e["publish_type_" + code.split()[0].lower()] = db.create("PublishedFileType", {"code": code})
     if scenario == "demo":
         _demo_production(db, e)
 

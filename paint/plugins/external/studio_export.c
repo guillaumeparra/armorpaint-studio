@@ -367,6 +367,7 @@ static void reset_plan(void) {
 		free(ex.files[i].path);
 		free(ex.files[i].variant);
 		free(ex.files[i].udim);
+		free(ex.files[i].sequence);
 	}
 	free(ex.files);
 	ex.files      = NULL;
@@ -1489,9 +1490,22 @@ static void plan_variant(const char *variant, const char *udim) {
 			}
 			continue;
 		}
+		// Le même nom avec <UDIM> à la place de la tuile : la séquence que le publish enregistre en un seul fichier (C4).
+		// Sans <UDIM> dans le résultat (modèle sans tuile), pas de séquence.
+		char *sequence = NULL;
+		if (udim[0] != 0) {
+			char *ignored = NULL;
+			sequence      = texture_path(ex.dir, variant, "<UDIM>", t, &ignored);
+			free(ignored);
+			if (sequence != NULL && strstr(sequence, "<UDIM>") == NULL) {
+				free(sequence);
+				sequence = NULL;
+			}
+		}
 		studio_plan_file_t *grow = realloc(ex.files, sizeof(studio_plan_file_t) * (size_t)(ex.file_count + 1));
 		if (grow == NULL) {
 			free(path);
+			free(sequence);
 			continue;
 		}
 		ex.files                    = grow;
@@ -1500,6 +1514,7 @@ static void plan_variant(const char *variant, const char *udim) {
 		      .texture  = t,
 		      .variant  = strdup(variant),
 		      .udim     = strdup(udim),
+		      .sequence = sequence,
 		      .width    = w,
 		      .height   = h,
 		      .raw_size = studio_image_raw_size(w, h, t->channels, t->bits),

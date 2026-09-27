@@ -25,7 +25,8 @@ from studio_sg_bridge import BridgeError
 
 log = logging.getLogger("studio_sg")
 
-VERSION_IN_NAME = re.compile(r"[._-]v\d+(?=\.|$)", re.IGNORECASE)
+# v003 entre deux séparateurs : robot.v003.arm, et robot_v003_base_color.1001.png (textures nommées <file>_<channel>).
+VERSION_IN_NAME = re.compile(r"[._-]v\d+(?=[._-]|$)", re.IGNORECASE)
 
 
 def _env_map(name, default):
@@ -70,7 +71,7 @@ def default_settings():
 
 def publish_name(path):
     """Nom de publish à la convention Toolkit : le nom de fichier sans son numéro de version (scene.v003.arm ->
-    scene.arm), qui regroupe les versions d'un même élément dans ShotGrid."""
+    scene.arm, robot_v003_base.png -> robot_base.png), qui regroupe les versions d'un même élément dans ShotGrid."""
     base = os.path.basename(path)
     matches = list(VERSION_IN_NAME.finditer(base))
     if not matches:
@@ -786,6 +787,115 @@ class Session(object):
         engine = self.sgtk.platform.current_engine() or engine  # une app a pu changer de contexte
         self.engine = engine
         return {"command": command, "context": engine.context_info()}
+
+    def op_publish(self, args):
+        """Publie le projet ouvert dans ArmorPaint sans fenêtre (lot C4) : collecte, validation, publish et finalisation
+        de tk-multi-publish2, avec les hooks du moteur (tk-armorpaint/hooks/tk-multi-publish2), comme le bouton Publish
+        de sa fenêtre. Les hooks agissent sur le projet par des requêtes host : ArmorPaint lance cette requête en job.
+        Contexte comme _engine_for(). description : le commentaire des publishes ; skip : éléments à ne pas publier,
+        par nom (robot_base.<UDIM>.png) ou par type (armorpaint.texture). Une tâche décochée par son plugin (texture sans
+        version) reste décochée. Retourne {"context", "publishes": [{"item","type","id","name","path","version_number",
+        "published_file_type"}], "skipped", "finalized", "messages": [{"level","message"}]} (avertissements et erreurs
+        des hooks) ; finalized faux : publiés, mais la finalisation (version suivante du projet) a échoué, voir
+        messages. Erreurs : publish_invalid (validation, rien n'est publié), publish_failed (au publish : ce qui est
+        déjà publié est dans le message), nothing_to_publish, app_unavailable (pas de tk-multi-publish2)."""
+        description = args.get("description")
+        if description is not None and not isinstance(description, str):
+            raise BridgeError("bad_request", "description must be a string")
+        skip = args.get("skip") or []
+        if not isinstance(skip, list) or not all(isinstance(s, str) for s in skip):
+            raise BridgeError("bad_request", "skip must be a list of strings")
+        engine = self._engine_for(args)
+        app = next((a for a in engine.apps.values() if a.name == "tk-multi-publish2"), None)
+        if app is None:
+            raise BridgeError(
+                "app_unavailable", "tk-multi-publish2 is not in the %s environment of %s" % (engine.name, engine.context)
+            )
+        messages = []
+
+        class Messages(logging.Handler):
+            def emit(self, record):
+                messages.append({"level": record.levelname.lower(), "message": record.getMessage()})
+
+        # Le logger de l'app : celui de ses hooks (sgtk.env.<env>.tk-armorpaint.tk-multi-publish2.hook.<fichier>) en
+        # descend, comme pour la fenêtre, qui y branche son journal.
+        handler = Messages(logging.WARNING)
+        app.logger.addHandler(handler)
+        try:
+            return self._publish(engine, app.create_publish_manager(), description, skip, messages)
+        finally:
+            app.logger.removeHandler(handler)
+            self.engine = self.sgtk.platform.current_engine() or engine
+
+    def _publish(self, engine, manager, description, skip, messages):
+        log.info("publish: %s", engine.context)
+        manager.collect_session()
+        skipped = []
+        for item in manager.tree:
+            if item.name in skip or item.type_spec in skip:
+                item.active = False
+                skipped.append(item.name)
+            if description is not None:
+                item.description = description
+        tasks = [(i, t) for i in manager.tree if i.active for t in i.tasks if t.active]
+        if not tasks:
+            raise BridgeError("nothing_to_publish", "nothing to publish in %s" % engine.context)
+        try:
+            failures = manager.validate()
+            if failures:
+                raise BridgeError(
+                    "publish_invalid",
+                    "; ".join("%s (%s): %s" % (t.item.name, t.name, e or "not valid") for t, e in failures),
+                )
+            try:
+                manager.publish()
+            except Exception as e:  # noqa: BLE001 — l'erreur du plugin, avec ce qui est déjà publié
+                done = [i.name for i in manager.tree if "sg_publish_data" in i.properties]
+                raise BridgeError(
+                    "publish_failed",
+                    "%s%s" % (e, " (already published: %s)" % ", ".join(done) if done else ""),
+                )
+            finalized = True
+            try:
+                manager.finalize()
+            except Exception as e:  # noqa: BLE001 — publiés : la réponse le dit, avec l'erreur
+                log.warning("publish: finalize failed: %s", e)
+                messages.append({"level": "error", "message": "finalize: %s" % (e,)})
+                finalized = False
+        finally:
+            self._reset_pixmap_check(manager)
+        publishes = []
+        for item in manager.tree:
+            data = item.properties.get("sg_publish_data")
+            if not data:
+                continue
+            path = data.get("path")
+            publishes.append(
+                {
+                    "item": item.name,
+                    "type": item.type_spec,
+                    "id": data.get("id"),
+                    "name": data.get("name") or data.get("code"),
+                    "path": (path.get("local_path") if isinstance(path, dict) else None) or item.properties.get("path"),
+                    "version_number": data.get("version_number"),
+                    "published_file_type": item.properties.get("publish_type"),
+                }
+            )
+        return {
+            "context": engine.context_info(),
+            "publishes": publishes,
+            "skipped": skipped,
+            "finalized": finalized,
+            "messages": messages,
+        }
+
+    @staticmethod
+    def _reset_pixmap_check(manager):
+        # tk-multi-publish2 décide une fois par processus si les images (vignettes, icônes) sont utilisables : sans
+        # QApplication, jamais plus. Après un publish sans fenêtre, la fenêtre Publish n'en aurait plus.
+        module = sys.modules.get(type(manager.tree.root_item).__module__)
+        if module is not None and hasattr(module, "_qt_pixmap_is_usable"):
+            module._qt_pixmap_is_usable = None
 
     def op_register_publish(self, args):
         """Crée le PublishedFile d'un fichier existant, lié à la tâche (sgtk.util.register_publish)."""

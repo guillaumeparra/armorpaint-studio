@@ -206,6 +206,23 @@ const char *studio_export_naming_template(void) {
 	return ensure() ? nm.template : NULL;
 }
 
+static char *text_or_null(const char *s) {
+	return s != NULL && s[0] != 0 ? strdup(s) : NULL;
+}
+
+void studio_export_naming_set(const char *path, const char *template, const char *pattern, const char *pattern_udim) {
+	track(path, false);
+	nm.template     = text_or_null(template);
+	nm.pattern      = nm.template != NULL ? text_or_null(pattern) : NULL;
+	nm.pattern_udim = nm.template != NULL ? text_or_null(pattern_udim) : NULL;
+	nm.ready        = true;
+	nm.seen         = true;
+
+	const char *shown = nm.pattern != NULL ? nm.pattern : nm.pattern_udim;
+	iron_log("studio: naming: %s -> %s (%s, given)", path, shown != NULL ? shown : "ArmorPaint names",
+	         nm.template != NULL ? nm.template : "no template");
+}
+
 // Le modèle est demandé dès que le projet ouvert change, pour ne pas attendre le sidecar à l'export.
 static void naming_update(void *data) {
 	(void)data;

@@ -17,6 +17,7 @@ typedef struct {
 	const studio_preset_texture_t *texture; // texture du preset
 	char                          *variant; // objet ou atlas, "" sinon
 	char                          *udim;    // tuile ("1001"), "" sinon
+	char                          *sequence; // chemin de la séquence de tuiles, <UDIM> à la place de la tuile ; NULL sinon
 	int                            width;  // taille du fichier (résolution de la texture du preset)
 	int                            height;
 	uint64_t                       raw_size; // échantillons avant compression (estimation haute)

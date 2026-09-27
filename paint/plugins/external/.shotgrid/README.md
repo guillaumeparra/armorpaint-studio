@@ -8,6 +8,7 @@ maquettes `.graffle` :
 |---|---|
 | `tk-core` | v0.24.2 |
 | `tk-multi-workfiles2` | v0.18.1 |
+| `tk-multi-publish2` | v2.11.2 |
 | `tk-framework-shotgunutils` | v5.11.3 |
 | `tk-framework-qtwidgets` | v2.12.8 |
 

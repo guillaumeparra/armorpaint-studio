@@ -1,14 +1,17 @@
 #!/bin/sh
-# Démo de Workfiles (tk-multi-workfiles2 dans le moteur tk-armorpaint, studio_workfiles.c) sur le site ShotGrid simulé
+# Démo de Workfiles et Publish (tk-multi-workfiles2 et tk-multi-publish2 dans le moteur tk-armorpaint,
+# studio_workfiles.c, studio_publish.c) sur le site ShotGrid simulé
 # (sg_fixture.py, scénario "demo") : une production "Demo" avec des Assets et des Shots, une vraie config Toolkit et sa
 # structure de dossiers sous <dossier>/storage. Au premier lancement, quelques versions sont créées par ArmorPaint
 # lui-même (--background) aux chemins que donne Toolkit (next_version), puis l'app s'ouvre sur File Open.
-# Ensuite : Ctrl+Alt+O (Cmd+Alt+O) File Open, Ctrl+Alt+S (Cmd+Alt+S) File Save.
+# Ensuite : Ctrl+Alt+O (Cmd+Alt+O) File Open, Ctrl+Alt+S (Cmd+Alt+S) File Save, Ctrl+Alt+P (Cmd+Alt+P) Publish (le
+# projet, et ses textures après un export : File > Export > Textures, noms du template armorpaint_asset_textures).
 #
 # Usage : STUDIO_TEST_TK_CORE=<clone de tk-core> STUDIO_TEST_TK_APPS=<dossier des clones> \
 #         STUDIO_SG_PYTHON=<python avec PySide6> .tests/demo_workfiles.sh [dossier de travail]
-#   STUDIO_TEST_TK_APPS contient tk-multi-workfiles2, tk-framework-shotgunutils et tk-framework-qtwidgets (clones git
-#   de github.com/shotgunsoftware, sur un tag) ; STUDIO_SG_PYTHON est l'interpréteur du sidecar, qui affiche les
+#   STUDIO_TEST_TK_APPS contient tk-multi-workfiles2, tk-multi-publish2, tk-framework-shotgunutils et
+#   tk-framework-qtwidgets (.shotgrid/ du dépôt, ou clones git de github.com/shotgunsoftware sur les tags de
+#   .shotgrid/README.md) ; STUDIO_SG_PYTHON est l'interpréteur du sidecar, qui affiche les
 #   fenêtres Qt (python3 -m venv <v> && <v>/bin/pip install PySide6).
 #   APP=<binaire ArmorPaint> pour un autre build (défaut : build Release de paint/).
 # Le dossier de travail est conservé : les versions sauvées pendant la démo y restent (rm -rf pour repartir de zéro).
@@ -22,7 +25,7 @@ if [ -z "$STUDIO_TEST_TK_CORE" ] || [ ! -d "$STUDIO_TEST_TK_CORE/python/sgtk" ];
 	echo "STUDIO_TEST_TK_CORE must point to a tk-core checkout (see sg.sh)" >&2
 	exit 1
 fi
-for app in tk-multi-workfiles2 tk-framework-shotgunutils tk-framework-qtwidgets; do
+for app in tk-multi-workfiles2 tk-multi-publish2 tk-framework-shotgunutils tk-framework-qtwidgets; do
 	[ -d "$STUDIO_TEST_TK_APPS/$app" ] || { echo "STUDIO_TEST_TK_APPS must contain $app (see the header)" >&2; exit 1; }
 done
 "${STUDIO_SG_PYTHON:=python3}" -c "import PySide6" 2>/dev/null || {

@@ -6,10 +6,10 @@
 # ArmorPaint recopie dans son log. La fenêtre s'arrête sur EOF de stdin (ArmorPaint fermé ou tué).
 #
 # Sidecar du projet : <dossier du .arm>/<nom sans .arm ni version>.export_settings.json ("robot_v003.arm" ->
-# "robot.export_settings.json", commun aux versions). La fenêtre seule le lit et l'écrit (ArmorPaint n'y touche pas) :
-#   "presets" : presets enregistrés par l'artiste ("Save as preset"), au format des presets studio ;
-#   "export"  : ses choix, remis à l'ouverture (preset, espace, mode, marge, dossier, et par preset : bits et résolution
-#               par map, maps désactivées, fichiers décochés, modèle de nom des fichiers).
+# "robot.export_settings.json", commun aux versions), décrit dans studio_export_choices.py. La fenêtre l'écrit (ArmorPaint
+# n'y touche pas) : "presets", les presets enregistrés par l'artiste ("Save as preset") ; "export", ses choix, remis à
+# l'ouverture (preset, espace, mode, marge, dossier, et par preset : bits et résolution par map, maps désactivées,
+# fichiers décochés, modèle de nom des fichiers). Le publish ShotGrid (lot C4) le lit aussi.
 # Les jeux de textures (atlas) ne sont pas dans le sidecar : ils changent dans le projet (op "atlases"), enregistrés
 # avec le .arm comme ceux de l'onglet Atlases d'ArmorPaint.
 # Écrit après un export abouti, un enregistrement de preset et à la fermeture ; pas de sidecar pour un projet jamais
@@ -37,6 +37,8 @@ import threading
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from studio_export_choices import preset_settings, read_sidecar, sidecar_path, write_sidecar
+
 MODES = ["Visible", "Selected", "Per Object", "Per UDIM Tile"]
 PREFLIGHT_DELAY_MS = 250
 # Montrés à l'artiste. Les notes (choix du preset : 8 bits, JPG, espace...) restent dans le rapport et le manifeste ;
@@ -44,7 +46,6 @@ PREFLIGHT_DELAY_MS = 250
 SHOWN_LEVELS = ("blocking", "warning")
 FILE_KEY_ROLE = QtCore.Qt.UserRole
 RESOLUTIONS = [8192, 4096, 2048, 1024, 512, 256]
-SIDECAR_SUFFIX = ".export_settings.json"
 PRESET_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 MARKER = re.compile(r"<([^<>]*)>")
 TILE_OBJECT = re.compile(r"^(.+)\.(1\d{3})$")  # cube.1001 : une tuile UDIM de cube, séparée à l'import
@@ -209,38 +210,6 @@ def file_key(f):
     """Identité d'un fichier d'une préflight à l'autre (le chemin change avec le dossier) : texture du preset, objet ou
     atlas, tuile UDIM ; celle que studio_export_set_skip attend."""
     return (f.get("texture", ""), f.get("variant", ""), f.get("udim", ""))
-
-
-def sidecar_path(project_path):
-    """Sidecar des réglages d'export, à côté du .arm ; None pour un projet jamais enregistré."""
-    if not project_path:
-        return None
-    folder, base = os.path.split(project_path)
-    stem = re.sub(r"\.arm$", "", base, flags=re.I)
-    stem = re.sub(r"[._-]v\d+$", "", stem, flags=re.I) or stem
-    return os.path.join(folder, stem + SIDECAR_SUFFIX)
-
-
-def read_sidecar(path):
-    """(contenu, erreur) ; un sidecar absent est vide, un sidecar illisible aussi (et signalé, jamais écrasé)."""
-    if not path or not os.path.exists(path):
-        return {}, None
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            raise ValueError("not a JSON object")
-        return data, None
-    except (OSError, ValueError) as e:
-        return {}, "%s: %s" % (os.path.basename(path), e)
-
-
-def write_sidecar(path, data):
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=1, ensure_ascii=False)
-        f.write("\n")
-    os.replace(tmp, path)
 
 
 def plural(n, word, words=None):
@@ -758,12 +727,7 @@ class ExportWindow(QtWidgets.QDialog):
         if prefs is not None:
             for key, value in (prefs.get("presets") or {}).items():
                 if isinstance(value, dict):
-                    self.per_preset[key] = {
-                        "overrides": {n: dict(o) for n, o in (value.get("overrides") or {}).items() if isinstance(o, dict)},
-                        "disabled": set(value.get("disabled") or []),
-                        "skip": {tuple(k) for k in value.get("skip") or [] if isinstance(k, list) and len(k) == 3},
-                        "naming": value.get("naming") if isinstance(value.get("naming"), str) else None,
-                    }
+                    self.per_preset[key] = preset_settings(value)
             return {
                 "preset": prefs.get("preset") or "",
                 "color_space": prefs.get("color_space") or "",

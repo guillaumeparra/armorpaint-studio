@@ -1,0 +1,30 @@
+# Copyright (c) 2020 Shotgun Software Inc.
+#
+# CONFIDENTIAL AND PROPRIETARY
+#
+# This work is provided "AS IS" and subject to the Shotgun Pipeline Toolkit
+# Source Code License included in this distribution package. See LICENSE.
+# By accessing, using, copying or modifying this work you indicate your
+# agreement to the Shotgun Pipeline Toolkit Source Code License. All rights
+# not expressly granted therein are reserved by Shotgun Software Inc.
+#
+# coverage configuration - used by https://coveralls.io/ integration
+#
+#
+[run]
+source=.
+omit=
+    hooks/collector.py
+    hooks/pre_publish.py
+    hooks/publish_file.py
+    python/tk_multi_publish2/flowam/constants.py
+    python/tk_multi_publish2/flowam/exceptions.py
+    python/tk_multi_publish2/flowam/inputs.py
+    python/tk_multi_publish2/flowam/publish.py
+    python/tk_multi_publish2/flowam/validate.py
+    python/tk_multi_publish2/progress/publish_logging.py
+    tests/*
+
+[report]
+exclude_lines =
+    raise NotImplementedError

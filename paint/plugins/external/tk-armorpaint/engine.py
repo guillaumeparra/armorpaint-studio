@@ -132,6 +132,11 @@ class ArmorPaintEngine(Engine):
         args.setdefault("context", self.context_info())
         return channel.request(op, args)
 
+    def sidecar_session(self):
+        """La session du sidecar (studio_sg_session.Session) : ses réglages et ses opérations, pour les hooks (le
+        publish nomme les textures par son op texture_pattern). None hors du sidecar."""
+        return getattr(sys.modules.get("studio_sg_bridge"), "SESSION", None)
+
     # ---- Qt ---------------------------------------------------------------------------------------------------------
 
     def _ensure_qt(self):
