@@ -490,10 +490,11 @@ static char *texture_path(const char *dir, const char *variant, const char *udim
 	if (r != 0) {
 		return sg;
 	}
-	// La variante est un objet (Per Object, masque d'objet en Selected) ou un jeu de textures (Visible avec des jeux).
+	// La variante est un objet (Per Object, masque d'objet en Selected) ou un jeu de textures (Visible et Per UDIM Tile
+	// avec des jeux, lot D1).
 	export_mode_t mode   = g_context->layers_export;
 	const char   *object = mode == EXPORT_MODE_PER_OBJECT || mode == EXPORT_MODE_SELECTED ? variant : "";
-	const char   *atlas  = mode == EXPORT_MODE_VISIBLE && studio_atlas_active() ? variant : "";
+	const char   *atlas  = (mode == EXPORT_MODE_VISIBLE || mode == EXPORT_MODE_PER_UDIM_TILE) && studio_atlas_active() ? variant : "";
 	int           w, h;
 	studio_preset_output_size(t, config_get_texture_res_x(), config_get_texture_res_y(), &w, &h);
 	char        resolution[16], bits[8];

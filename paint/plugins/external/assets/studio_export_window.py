@@ -243,11 +243,16 @@ def object_groups(objects):
 
 
 def composition(files, mode):
-    """« 9 maps × 7 UDIM tiles » : ce que représentent les fichiers."""
+    """« 9 maps × 7 UDIM tiles » : ce que représentent les fichiers. Par jeu et par tuile (lot D1), chaque jeu sur ses
+    tuiles seulement : « 9 maps × 6 texture set tiles (2 sets, 6 UDIM tiles) »."""
     maps = len({f.get("texture") for f in files})
     tiles = len({f.get("udim") for f in files if f.get("udim")})
     variants = len({f.get("variant") for f in files if f.get("variant")})
+    pairs = len({(f.get("variant"), f.get("udim")) for f in files if f.get("variant") and f.get("udim")})
     parts = [plural(maps, "map")]
+    if variants and tiles and pairs < variants * tiles:
+        parts.append("%s (%s, %s)" % (plural(pairs, "texture set tile"), plural(variants, "set"), plural(tiles, "UDIM tile")))
+        return " × ".join(parts)
     if variants:
         parts.append(plural(variants, "object" if mode in (1, 2) else "texture set"))
     if tiles:
@@ -1048,12 +1053,15 @@ class ExportWindow(QtWidgets.QDialog):
 
     def _update_sets_note(self):
         used = len(self._used_sets())
-        if self.mode.currentIndex() != 0:
-            text = "used by the Visible export"
-        elif used > 1:
+        mode = self.mode.currentIndex()
+        if mode not in (0, 3):
+            text = "used by the Visible and Per UDIM Tile exports"
+        elif used > 1 and mode == 0:
             text = "Visible: one set of maps per texture set (<atlas> in the names)"
+        elif used > 1:
+            text = "Per UDIM Tile: one set of maps per texture set and tile (<atlas> in the names)"
         else:
-            text = "all objects in one set of maps; choose New set... to split them"
+            text = "all objects in one set of maps%s; choose New set... to split them" % (" per tile" if mode == 3 else "")
         self.sets_note.setText(text)
         self.merge_sets.setVisible(used > 1)
 
