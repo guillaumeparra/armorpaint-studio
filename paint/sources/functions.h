@@ -331,6 +331,7 @@ void                      history_delete_layer();
 void                      history_clear_layer();
 void                      history_order_layers(i32 prev_order);
 void                      history_merge_layers();
+void                      history_merge_group(slot_layer_t *group); // STUDIO-PATCH(merge-group-undo)
 void                      history_apply_mask();
 void                      history_invert_mask();
 void                      history_to_fill_layer();

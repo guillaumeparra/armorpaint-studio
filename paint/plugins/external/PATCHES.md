@@ -1803,3 +1803,90 @@ par tuile. À la fusion :
   (`util_udim_loop_begin`/`tile`/`end`, comme `slot_layer_invert_mask`) ;
 - dans `studio_atlas.c`, les conflits se règlent en prenant la version de d2, dont les helpers contiennent ceux-ci.
   Seul `studio_layer_set_opacity` est à garder.
+
+## merge-group-undo
+
+| | |
+|---|---|
+| Fichiers | `paint/sources/history.c` (`history_merge_group`, `history_undo_merge_group`, `history_redo_merge_group`, `history_copy_merge_group`, `history_step_slots` et `history_fit_undo_slots` ajoutées ; `history_undo`, `history_redo`, `history_push`, `history_merge_layers`, `history_action_to_string`), `paint/sources/ui/tab_layers.c` (`tab_layers_draw_layer_context_menu_merge_group`), `paint/sources/types.h` (`history_step_t`), `paint/sources/enums.h` (`HISTORY_ACTION_MERGE_GROUP`), `paint/sources/functions.h` |
+| Commit studio | `abe46077` sur la branche `studio` |
+| Validé contre | upstream `85f6cf1c` (2026-09-27) |
+| Constaté | 2026-09-27 ; présent en `85f6cf1c` |
+
+**Bug.** Onglet Layers, menu d'un groupe > Merge Group, puis Undo : la pile n'est pas rendue. Cas signalé : « Layer 1 » ;
+« Layer 2 » et « Layer 3 » dans « Group 4 », à masque de groupe. Merge Group donne « Layer 1 | Group 4 », juste. Undo
+donne « Layer 3 | Layer 4 | Group 4 » : Layer 1 a disparu avec ses pixels (l'aplati n'a plus de rouge), les calques
+rendus ont des noms par défaut. Redo puis Undo redonnent le même état faux. L'Undo suivant, celui du masque de groupe,
+plante (`slot_layer_delete(NULL)`). Causes, dans `layers_merge_group` (`util_layer.c`) :
+- chaque fusion d'enfant enregistre un pas Merge Layers (`history_merge_layers`). Son indice de calque retranche aussi
+  les masques du groupe (`slot_layer_has_masks(l, true)`). Avec deux enfants et un masque de groupe, le pas vise
+  l'indice 0, le calque de base : l'Undo le supprime et recrée deux calques aux noms par défaut ;
+- rien n'enregistre le reste de la fusion : masques de groupe fusionnés puis appliqués, enfant restant sorti du groupe
+  et renommé comme lui, passage en calque de peinture d'un calque de remplissage, suppression du groupe.
+
+**Correctif.** Un seul pas d'historique, « Merge Group », pour toute la fusion :
+- `history_merge_group(group)` garde la liste des objets du groupe, de bas en haut (enfants, leurs masques, masques du
+  groupe, le groupe), et une copie de leurs champs. Elle copie les textures de chaque calque et masque dans un
+  emplacement d'undo (`history_copy_to_undo`), pousse le pas, puis appelle `layers_merge_group` avec
+  `history_merging_group` levé : `history_merge_layers` ne fait alors rien, les fusions internes n'enregistrent plus de
+  pas. Le menu du groupe (`tab_layers.c`) appelle `history_merge_group` au lieu de `layers_merge_group`.
+- Undo (`history_undo_merge_group`) : le calque fusionné sort de la pile ; les objets supprimés par la fusion
+  retrouvent des textures sous leur `ext` (`slot_layer_create`, textures transplantées) ; chaque objet reprend ses
+  champs (nom, parent, opacité, matériau de remplissage...) en gardant ses textures du moment et revient à sa place ;
+  les pixels reviennent des emplacements d'undo (`slot_layer_swap`, comme les autres pas). Ce sont les mêmes objets
+  `slot_layer_t` : les pas plus anciens, qui visent les calques par indice, restent justes.
+- Redo (`history_redo_merge_group`) : à l'image suivante, comme le Redo de Merge Down ; recopie dans les mêmes
+  emplacements et refait la fusion.
+- Emplacements d'undo : le pas en tient k, un par calque et masque du groupe ; les autres pas en comptent un.
+  `history_fit_undo_slots`, appelée en fin de `history_push` et après le pas Merge Group, retire les pas les plus
+  anciens tant que les pas annulables demandent plus de `undo_steps` emplacements. Un Merge Group n'est donc jamais
+  annulé depuis des emplacements réécrits depuis. Sans pas Merge Group dans l'historique, rien ne change (un par pas,
+  comme l'upstream).
+- Groupe de plus de `undo_steps` calques et masques : la fusion ne peut pas être annulée, et les pas d'avant visent
+  des calques qu'elle supprime. L'historique est vidé (`history_reset`, message dans la console), puis la fusion se
+  fait sans pas.
+
+Pour régénérer : `git diff abe46077^ abe46077 -- paint/sources/enums.h paint/sources/functions.h paint/sources/history.c
+paint/sources/types.h paint/sources/ui/tab_layers.c`. `enums.h` porte aussi [udim-import](#udim-import), donc
+`git diff upstream studio` mêle les deux patches.
+
+**Test.** `.tests/layers_undo_app.sh`, 22 vérifications, projet par défaut (cube, sans UDIM) à 256 px. Chaque état
+relevé : la pile (« nom<parent »), les texels base, nor et pack de chaque calque et masque, l'aplati (base, nor, pack).
+1. le cas signalé : Undo rend l'état d'avant, Redo celui d'après, un 2e Undo celui d'avant ; l'Undo suivant (le masque
+   de groupe) reste juste ;
+2. masques de calque dans le groupe, plus un masque de groupe (k = 5) : de même ;
+3. emplacements (N = `undo_steps`, 6 par défaut ; k = 3) : après N − k Clear, la fusion s'annule encore ; après
+   N − k + 1, elle n'est plus annulable et l'Undo de trop ne touche rien ;
+4. groupe de N calques et un masque : fusion faite, historique vidé, Undo sans effet ;
+5. Merge Down, Undo, Redo (non-régression).
+
+Sans le patch, même base : 13 vérifications sur 22 échouent. Le cas signalé plante (segfault à l'Undo du masque de
+groupe). Avec des masques de calque, Undo donne « Layer 1 | Layer 2 | Layer 3 », sans groupe ni masques, et Redo
+« Layer 1 | Layer 2 ». Les cas des emplacements et du grand groupe sont faux. Merge Down passe.
+
+Helpers de script : `studio_layer_tree` (pile « nom<parent ») ajouté à `studio_atlas.c`, opération `clear` ajoutée à
+`studio_layer_op`, dont `merge_group` passe maintenant par le menu du groupe, donc par ce pas.
+
+**Signes que l'upstream l'a corrigé.** Un pas Merge Group dans `history.c`, ou `history_merge_layers` sorti de la
+boucle de `layers_merge_group`. Rejouer `layers_undo_app.sh` sans le patch.
+
+**Non couvert.**
+- Merge Down d'un groupe ou sur un groupe : `layers_merge_down` appelle `layers_merge_group`, avec les pas upstream,
+  faux de la même façon. Seul le menu Merge Group passe par le nouveau pas.
+- Menu Edit > History, saut de plusieurs pas en avant d'un coup : le Redo de Merge Group, comme celui de Merge Down, se
+  fait à l'image suivante, donc après les pas qui le suivent dans le même saut (limite upstream).
+- Calques de sculpture (`texpaint_sculpt`) et enfants calques de remplissage : rendus par construction (champs et
+  pixels), pas testés.
+- Mémoire : la liste des objets et la copie de leurs champs (quelques centaines d'octets par objet) ne sont pas
+  libérées quand le pas sort de l'historique (`free(step)` upstream, comme le canevas d'un pas Edit Nodes).
+
+**Branche `d2` (UDIM, pas encore fusionnée).** À la fusion de `studio` dans `d2` :
+- `studio_atlas.c` : dans le `mn_studio_layer_op` de d2 (gardé, voir [mask-multiply](#mask-multiply)), `merge_group`
+  doit passer par le menu (`tab_layers_l = l; tab_layers_draw_layer_context_menu_merge_group(NULL);`, déclarations
+  `extern` comprises) ; garder `studio_layer_tree` et son enregistrement ;
+- `ARMORPAINT_UDIM.md`, lot D2c, limites : la ligne « upstream, non corrigé : l'Undo d'un Merge Group ne rend pas le
+  calque de base » devient « corrigé, patch merge-group-undo » ;
+- calques à tuiles : `history_undo_merge_group` recrée les textures des objets supprimés par `slot_layer_create`, sans
+  tuiles, puis les échange avec les emplacements d'undo (`slot_layer_swap`, tuile par tuile dans d2 par
+  `util_udim_swap_layers`). À vérifier en ajoutant un Undo et un Redo au Merge Group de la section 11 de
+  `udim_tiles_app.sh`.
