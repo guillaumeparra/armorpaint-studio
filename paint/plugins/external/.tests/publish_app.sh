@@ -7,14 +7,17 @@
 #      réglages d'export dans le sidecar du projet : preset basic par tuile, deux maps ;
 #   2. publish sans fenêtre (op publish, lancé en job par un script) : projet copié par ArmorPaint dans le dossier
 #      publish ; textures exportées (noms du template) puis copiées, une séquence <UDIM> par texture, de type UDIM Image,
-#      dépendante du projet ; vignettes du viewport ; projet ouvert ensuite à sa version suivante (v002) ;
+#      dépendante du projet ; vignettes du viewport, où l'objet peint se voit ; Version de review (upload_version.py)
+#      liée au projet, image du viewport à sa taille ; projet ouvert ensuite à sa version suivante (v002) ;
 #   3. la copie publiée : chemins des textures, de l'envmap et du maillage source relatifs à son dossier et normalisés
 #      (STUDIO-PATCH(arm-relative-paths)), decal.png désignée dans le dossier de travail (STUDIO-PATCH(project-copy) :
 #      work/ et publish/ sont à la même profondeur, seul un fichier rangé dans l'un des deux distingue leurs chemins) ;
 #      rouverte, elle trouve toutes ses textures ; sans le dossier de travail, celles de src/ ; une simple copie du
 #      fichier les perd (témoin) ;
 #   4. fenêtre Publish (show_app "Publish...", Qt offscreen) pilotée par le hook comme par l'artiste : v002 publié,
-#      projet ouvert en v003.
+#      sa Version de review, projet ouvert en v003 ;
+#   5. publish en --background (op publish, même script) : v003 publié, vignettes et Version de review capturées sans
+#      fenêtre, projet ouvert en v004.
 #
 #   sh .tests/publish_app.sh [dossier de travail]
 #   APP=<binaire ArmorPaint> pour un autre build (défaut : build Release de paint/).
@@ -60,12 +63,14 @@ open(os.path.join(d, "wood.png"), "wb").write(b"\x89PNG\r\n\x1a\n" + ch(b"IHDR",
 open(os.path.join(d, "sky.hdr"), "wb").write(b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 8 +X 16\n" + bytes((128, 128, 160, 129)) * 128)
 EOF
 
-# ArmorPaint sans interface, sur le projet $2 s'il est donné ; script $1.c (entrée standard), ses lignes « t: » dans
-# $W/$1.log.
+# ArmorPaint sans interface, sur le projet $2 s'il est donné ; script $1.c (entrée standard, pas un tube : ko doit
+# compter), ses lignes « t: » dans $W/$1.log. Code de retour attendu $3 (défaut 0 ; 1 si une erreur est signalée,
+# patch batch-report).
 background() {
 	cat > "$W/$1.c"
 	perl -e 'alarm 300; exec @ARGV' "$APP" ${2:+"$2"} --background --script "$W/$1.c" -ApplePersistenceIgnoreState YES \
-		> "$W/$1.log" 2>&1 || ko "$1 : ArmorPaint rc $? (voir $W/$1.log)"
+		> "$W/$1.log" 2>&1 && rc=0 || rc=$?
+	[ $rc -eq "${3:-0}" ] || ko "$1 : ArmorPaint rc $rc, attendu ${3:-0} (voir $W/$1.log)"
 }
 line() { sed -n "s/^t: $2 //p" "$W/$1.log"; }
 norm() { "$PY" -c 'import os, sys; print(os.path.normpath(sys.argv[1]))' "$1"; }
@@ -186,9 +191,21 @@ EOF
 check_py "description et tâche sur chaque publish" pub1 <<'EOF'
 assert {(f["description"], f["task"]["id"]) for f in pub.values()} == {("first pass", 1)}, pub
 EOF
-check_py "vignettes : une par publish, PNG du viewport (1280 px au plus)" pub1 <<'EOF'
+check_py "vignettes : une par publish, PNG du viewport (1280 px au plus), l'objet peint visible" pub1 <<'EOF'
 t = r["thumbnails"]
 assert len(t) == 3 and all(x["exists"] and x["size"] and 0 < max(x["size"]) <= 1280 for x in t), t
+assert all(x["warm"] > 0.01 for x in t), t
+EOF
+check_py "Version de review robot.v001 : liée au projet, à l'asset et à la tâche, image du viewport envoyée" pub1 <<'EOF'
+v, = r["versions"]
+assert r["result"]["versions"] == [{"item": "robot.v001.arm", "id": v["id"], "code": "robot.v001"}], r["result"]
+assert [f["id"] for f in v["published_files"]] == [pub["robot.arm"]["id"]], v
+assert (v["entity"]["type"], v["sg_task"]["id"], v["description"], v["sg_path_to_movie"]) == ("Asset", 1, "first pass", None), v
+u, = r["uploads"]
+assert (u["type"], u["id"], u["field"], u["exists"]) == ("Version", v["id"], "sg_uploaded_movie", True), u
+assert v["sg_uploaded_movie"]["name"] == os.path.basename(u["path"]) and not os.path.exists(u["path"]), (v, u)
+# Taille du viewport : au moins celle de la vignette, qui la réduit à 1280 px au plus.
+assert u["size"][0] >= r["thumbnails"][0]["size"][0] and u["warm"] > 0.01, (u, r["thumbnails"][0])
 EOF
 check "vignette capturée par ArmorPaint" 'grep -q "studio: publish: thumbnail" "$W/pub1.log"'
 check "projet ouvert ensuite en v002 (enregistré par ArmorPaint)" \
@@ -209,17 +226,23 @@ PATHS='int main() {
 	console_log(string("t: envmap %s", p->envmap));
 	return 0;
 }'
-printf '%s\n' "$PATHS" | background copy "$PUB/robot.v001.arm"
+background copy "$PUB/robot.v001.arm" <<EOF
+$PATHS
+EOF
 check "copie publiée rouverte : toutes ses textures trouvées" \
 	'[ -n "$(line copy asset)" ] && ! grep -q "Could not locate texture" "$W/copy.log"'
 mv "$WORK" "$WORK.away" # le dossier de travail de l'artiste, absent chez les autres
-printf '%s\n' "$PATHS" | background away "$PUB/robot.v001.arm"
+background away "$PUB/robot.v001.arm" 1 <<EOF
+$PATHS
+EOF
 mv "$WORK.away" "$WORK"
 check "rouverte sans le dossier de travail : texture et envmap trouvées dans src/, seule decal.png manque" \
 	'[ "$(norm "$(line away envmap)")" = "$W/src/sky.hdr" ] && [ "$(grep -c "Could not locate texture" "$W/away.log")" -eq 1 ] \
 	&& grep -q "Could not locate texture .*/decal.png" "$W/away.log"'
 cp "$V1" "$W/naive/robot.v001.arm"
-printf '%s\n' "$PATHS" | background naive "$W/naive/robot.v001.arm"
+background naive "$W/naive/robot.v001.arm" 1 <<EOF
+$PATHS
+EOF
 check "témoin : une simple copie du .arm ne trouve plus sa texture" 'grep -q "Could not locate texture" "$W/naive.log"'
 
 echo "== 4. fenêtre Publish (show_app, pilotée par le hook)"
@@ -236,7 +259,47 @@ check_py "fenêtre : copies v002 dans publish/, vignettes envoyées" pub2 <<'EOF
 assert os.path.isfile(os.path.join(PUB, "robot.v002.arm")) and os.path.isfile(os.path.join(PUB, "textures", "v002", "robot_normal.1002.exr"))
 assert len(r["thumbnails"]) == 3 and all(t["exists"] for t in r["thumbnails"]), r["thumbnails"]
 EOF
+check_py "fenêtre : Upload for review coché, Version robot.v002 et son image" pub2 <<'EOF'
+session, = [i for i in r["dialog"]["items"] if i["type"] == "armorpaint.session"]
+assert "Upload for review" in session["tasks"], session
+assert [v["code"] for v in r["versions"]] == ["robot.v002"], r["versions"]
+assert [(u["field"], u["exists"]) for u in r["uploads"]] == [("sg_uploaded_movie", True)], r["uploads"]
+EOF
 check "fenêtre : projet ouvert ensuite en v003" '[ -f "$WORK/robot.v003.arm" ]'
+
+echo "== 5. publish en --background (op publish, script)"
+export STUDIO_TEST_PUBLISH_RESULT="$W/pub3.json"
+background pub3 "$WORK/robot.v003.arm" <<EOF
+int job = 0;
+void poll() {
+	if (job != 0 && studio_sg_state(job) == 3) {
+		console_log(string("t: job ok=%d %s", studio_sg_ok(job), studio_sg_get(job, "/error/message")));
+		studio_sg_release(job);
+		job = 0;
+		script_quit();
+	}
+}
+int main() {
+	job = studio_sg_start("publish", "{\"task_id\":1,\"description\":\"headless\"}", 600000);
+	script_notify_on_update(poll);
+	return 0;
+}
+EOF
+unset STUDIO_TEST_PUBLISH_RESULT
+check "job abouti sans fenêtre" '[ "$(line pub3 job)" = "ok=1 " ]'
+check_py "v003 : projet et ses deux séquences publiés, finalisés, sans erreur" pub3 <<'EOF'
+res = r["result"]
+assert sorted(p["item"] for p in res["publishes"]) == ["robot.v003.arm", "robot_base_color.<UDIM>.exr", "robot_normal.<UDIM>.exr"], res
+assert res["finalized"] and not [m for m in res["messages"] if m["level"] == "error"], res["messages"]
+assert {(f["version_number"], f["description"]) for f in pub.values()} == {(3, "headless")}, pub
+assert os.path.isfile(os.path.join(PUB, "robot.v003.arm")) and os.path.isfile(os.path.join(PUB, "textures", "v003", "robot_base_color.1001.exr"))
+EOF
+check_py "vignettes et image de review capturées sans fenêtre, l'objet peint visible" pub3 <<'EOF'
+assert len(r["thumbnails"]) == 3 and all(t["exists"] and t["warm"] > 0.01 for t in r["thumbnails"]), r["thumbnails"]
+assert [v["code"] for v in r["versions"]] == ["robot.v003"], r["versions"]
+assert [(u["field"], u["exists"]) for u in r["uploads"]] == [("sg_uploaded_movie", True)] and r["uploads"][0]["warm"] > 0.01, r["uploads"]
+EOF
+check "projet ouvert ensuite en v004" '[ -f "$WORK/robot.v004.arm" ]'
 
 [ $FAIL -eq 0 ] && echo "publish_app: tout passe" || echo "publish_app: ÉCHECS (journaux dans $W)"
 exit $FAIL

@@ -1697,7 +1697,7 @@ ou un `alarm` laisse le rapport à `running` : c'est le signe qu'il faut lire.
 | | |
 |---|---|
 | Fichier | `paint/sources/minic_impl.c` (`script_project_new`) |
-| Commit studio | voir `git log -S'STUDIO-PATCH(script-project-new)'` sur la branche `studio` |
+| Commit studio | `76edd7bd` sur la branche `studio` |
 | Validé contre | upstream `85f6cf1c` (2026-09-27) |
 | Constaté depuis | `85f6cf1c` (2026-09-27) |
 

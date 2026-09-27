@@ -30,7 +30,7 @@ buffer_t         *gpu_get_texture_pixels(gpu_texture_t *image);
 void              gpu_delete_texture(gpu_texture_t *texture);
 
 #define THUMBNAIL_FRAMES 3    // frames rendues sans compas ni sphères d'environnement avant la capture
-#define THUMBNAIL_SIZE   1280 // plus grand côté de la vignette
+#define THUMBNAIL_SIZE   1280 // plus grand côté de la vignette, sauf args.size (0 : taille du viewport)
 
 static void reply_ok(int host, const char *data_json) {
 	studio_sg_host_reply(string_tmp("{\"host\":%d,\"ok\":true,\"data\":%s}", host, data_json));
@@ -194,6 +194,7 @@ static struct {
 	int   host; // requête en attente de sa capture, 0 sinon
 	char *path;
 	int   frames;
+	int   size; // plus grand côté ; 0 : taille du viewport
 } shot;
 
 static void capture(void) {
@@ -208,7 +209,7 @@ static void capture(void) {
 		return;
 	}
 	int   longest = tex->width > tex->height ? tex->width : tex->height;
-	float scale   = longest > THUMBNAIL_SIZE ? (float)THUMBNAIL_SIZE / (float)longest : 1.0f;
+	float scale   = shot.size > 0 && longest > shot.size ? (float)shot.size / (float)longest : 1.0f;
 	int   w       = (int)(tex->width * scale + 0.5f);
 	int   h       = (int)(tex->height * scale + 0.5f);
 	w             = w > 0 ? w : 1;
@@ -250,6 +251,13 @@ static void thumbnail_request(int host, const char *req) {
 		free(path);
 		return;
 	}
+	studio_json_value_t size = studio_json_find(req, "/args/size");
+	bool                has  = size.type != STUDIO_JSON_INVALID && size.type != STUDIO_JSON_NULL;
+	if (has && (size.type != STUDIO_JSON_NUMBER || studio_json_int(size, -1) < 0)) {
+		reply_error(host, "bad_request", "size of the thumbnail: a number of pixels, 0 for the viewport size");
+		free(path);
+		return;
+	}
 	if (shot.host != 0) {
 		reply_error(host, "busy", "a thumbnail is already being captured");
 		free(path);
@@ -257,6 +265,8 @@ static void thumbnail_request(int host, const char *req) {
 	}
 	free(shot.path);
 	shot.path                       = path;
+	long long n                     = has ? studio_json_int(size, 0) : THUMBNAIL_SIZE;
+	shot.size                       = n > 65536 ? 0 : (int)n; // plus grand que tout viewport : sa taille
 	shot.host                       = host;
 	shot.frames                     = 0;
 	g_context->capturing_screenshot = true;

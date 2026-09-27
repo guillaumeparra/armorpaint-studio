@@ -1,9 +1,11 @@
 # Hook du sidecar (STUDIO_SG_HOOK) pour publish_app.sh : relève ce que le publish a fait sur le site simulé, dans le
 # fichier STUDIO_TEST_PUBLISH_RESULT (JSON, écrit à la fin de l'op) :
-#   {"result" | "error" | "dialog": ..., "published": [PublishedFile et leurs dépendances], "thumbnails": [...]}
+#   {"result" | "error" | "dialog": ..., "published": [PublishedFile et leurs dépendances], "thumbnails": [...],
+#    "versions": [Version], "uploads": [...]}
 # op publish : sa réponse, ou son erreur. op show_app "Publish..." : la fenêtre de tk-multi-publish2 est pilotée comme
 # par l'artiste (bouton Publish : validation, publish, finalisation), son état final relevé, puis elle est fermée.
-# mockgun ignore les vignettes : leurs envois sont relevés ici (fichier présent, taille du PNG).
+# mockgun ignore les vignettes, et le site simulé ne garde pas les médias des Versions : leurs envois sont relevés ici
+# (fichier présent, taille du PNG, part de pixels du rouge orangé de la peinture du banc, vue par le viewport).
 
 import json
 import os
@@ -19,26 +21,52 @@ def png_size(path):
         return None
 
 
+def warm_ratio(path):
+    """Part des pixels (un sur 16 de chaque côté) nettement plus rouges que bleus : l'objet peint en orange."""
+    try:
+        from PySide6.QtGui import QImage
+    except ImportError:
+        return None
+    image = QImage(path)
+    if image.isNull():
+        return None
+    points = [(x, y) for x in range(0, image.width(), 16) for y in range(0, image.height(), 16)]
+    warm = 0
+    for x, y in points:
+        c = image.pixelColor(x, y)
+        warm += c.red() - c.blue() > 60
+    return round(warm / len(points), 4) if points else None
+
+
+def shot(path, **extra):
+    info = {"path": path, "exists": os.path.isfile(path), "size": png_size(path), "warm": warm_ratio(path)}
+    info.update(extra)
+    return info
+
+
 def setup(session):
     out = os.environ.get("STUDIO_TEST_PUBLISH_RESULT")
     if not out:
         return
     thumbnails = []
+    uploads = []
 
     def watch_thumbnails():
         sg = session._connect()
         if getattr(sg, "_studio_thumbnails", False):
             return
-        upload = sg.upload_thumbnail
+        upload_thumbnail, upload = sg.upload_thumbnail, sg.upload
 
-        def upload_thumbnail(entity_type, entity_id, path, **kwargs):
-            thumbnails.append(
-                {"type": entity_type, "id": entity_id, "path": path, "exists": os.path.isfile(path),
-                 "size": png_size(path)}
-            )
-            return upload(entity_type, entity_id, path, **kwargs)
+        def watched_upload_thumbnail(entity_type, entity_id, path, **kwargs):
+            thumbnails.append(shot(path, type=entity_type, id=entity_id))
+            return upload_thumbnail(entity_type, entity_id, path, **kwargs)
 
-        sg.upload_thumbnail = upload_thumbnail
+        def watched_upload(entity_type, entity_id, path, field_name=None, *args, **kwargs):
+            uploads.append(shot(path, type=entity_type, id=entity_id, field=field_name))
+            return upload(entity_type, entity_id, path, field_name, *args, **kwargs)
+
+        sg.upload_thumbnail = watched_upload_thumbnail
+        sg.upload = watched_upload
         sg._studio_thumbnails = True
 
     def dump(data):
@@ -52,7 +80,9 @@ def setup(session):
             f["depends_on"] = sorted(
                 d["dependent_published_file"]["id"] for d in deps if d["published_file"]["id"] == f["id"]
             )
-        data.update({"published": files, "thumbnails": thumbnails})
+        versions = sg.find("Version", [], ["code", "published_files", "entity", "sg_task", "description",
+                                           "sg_uploaded_movie", "sg_path_to_movie"])
+        data.update({"published": files, "thumbnails": thumbnails, "versions": versions, "uploads": uploads})
         with open(out + ".tmp", "w") as f:
             json.dump(data, f, indent=1, default=str)
         os.replace(out + ".tmp", out)

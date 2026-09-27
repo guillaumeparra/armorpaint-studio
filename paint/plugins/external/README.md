@@ -336,7 +336,12 @@ Ce qui est publié, dans le contexte ShotGrid courant (la tâche de la dernière
   textures). En export par tuile, une **séquence `<UDIM>`** : un seul publish pour toutes ses tuiles, de type
   `UDIM Image` (`Texture` sinon), dépendant du publish du projet. ArmorPaint exporte au publish, une seule fois, les
   textures cochées, nommées par le template des textures (B3) ; chaque fichier est ensuite copié à l'emplacement du
-  `Publish Template` du plugin (sans lui, publié en place).
+  `Publish Template` du plugin (sans lui, publié en place) ;
+- **une Version de review** (`upload_version.py`, « Upload for review », sur le projet) : une capture du viewport au
+  moment du publish, à sa taille (réglage `Image Size`, en pixels, 0 : celle du viewport), envoyée comme média de la
+  Version (`sg_uploaded_movie`, ShotGrid en tire la vignette). La Version est liée au publish du projet, à l'entité et
+  à la tâche du contexte, et à aucun fichier local (la capture est effacée après l'envoi). Le plugin du projet décoché :
+  liée à aucun publish.
 
 La copie du projet est écrite par ArmorPaint (patch `project-copy`, `PATCHES.md`) : un `.arm` désigne ses fichiers
 (textures importées, maillage source, envmap) par des chemins relatifs à son dossier, qu'une simple copie du fichier
@@ -392,6 +397,9 @@ tk-multi-publish2:
     - name: Publish ArmorPaint Project
       hook: '{self}/publish_file.py:{engine}/tk-multi-publish2/basic/publish_session.py'
       settings: {Publish Template: armorpaint_asset_publish}
+    - name: Upload for review                          # après le projet : la Version est liée à son publish
+      hook: '{self}/upload_version.py:{engine}/tk-multi-publish2/basic/upload_version.py'
+      settings: {Image Size: 0}
     - name: Publish Textures
       hook: '{self}/publish_file.py:{engine}/tk-multi-publish2/basic/publish_textures.py'
       settings: {Publish Template: armorpaint_asset_textures_publish, Publish Type: Texture, UDIM Publish Type: UDIM Image}
@@ -402,14 +410,15 @@ tk-multi-publish2:
 - args : `description` ? (le commentaire de chaque publish), `skip` ? (éléments à ne pas publier, par nom,
   `robot_base.<UDIM>.png`, ou par type, `armorpaint.texture`), `task_id` ? ou `project_id` ? (contexte, comme
   `show_app`) ;
-- data : `{context, publishes, skipped, finalized, messages}`. `publishes` : `[{item, type, id, name, path,
-  version_number, published_file_type}]` ; `messages` : avertissements et erreurs des hooks, `[{level, message}]` ;
+- data : `{context, publishes, versions, skipped, finalized, messages}`. `publishes` : `[{item, type, id, name, path,
+  version_number, published_file_type}]` ; `versions` : les Versions de review, `[{item, id, code}]` ; `messages` : avertissements et erreurs des hooks, `[{level, message}]` ;
   `finalized` faux : tout est publié, mais la finalisation (version suivante du projet) a échoué, voir `messages` ;
 - erreurs : `publish_invalid` (à la validation, rien n'est publié), `publish_failed` (pendant le publish ; le message
   dit ce qui l'est déjà), `nothing_to_publish`, `app_unavailable` (tk-multi-publish2 absent de l'environnement).
 
 Comme la fenêtre, l'op agit sur le projet par des requêtes host : elle tourne en job (`studio_sg_start`), et l'app
-doit rendre ses frames jusqu'à la fin. Script testé dans ArmorPaint avec son interface (`--background` ne l'est pas) :
+doit rendre ses frames jusqu'à la fin. Script testé dans ArmorPaint avec son interface et en `--background` (vignettes
+et image de review capturées sans fenêtre ; ajouter `script_quit()` à la fin du job pour que le run se termine) :
 
 ```c
 int job = 0;
@@ -433,7 +442,7 @@ int main() {
 |---|---|---|
 | `publish_preflight` | `naming`, `choices` ?, `skip` ? | `{path, naming_template, export: {ok, report, error}}` : préflight de l'export, rien n'est écrit |
 | `publish_export` | idem | idem, après l'export |
-| `publish_thumbnail` | `path` | `{path, width, height}` : PNG du viewport (1280 px au plus), quelques frames plus tard |
+| `publish_thumbnail` | `path`, `size` ? | `{path, width, height}` : PNG du viewport, quelques frames plus tard ; plus grand côté `size` (défaut 1280, 0 : taille du viewport) |
 | `publish_copy` | `path` | `{path, size}` : copie du projet enregistré (`.arm`), écrite à côté puis renommée |
 
 `naming` : le modèle des noms de textures (`{template, pattern, pattern_udim}` de l'op `texture_pattern`), calculé
@@ -444,9 +453,11 @@ export de la fenêtre d'export ; absent, l'export courant. `skip` : les fichiers
 
 **Limites connues.**
 
-- Validé sur le site simulé seulement : l'envoi des vignettes (mockgun les ignore), les types de publish et les
-  chargeurs de textures UDIM du studio sont à vérifier à la recette (C6).
-- Pas de Version de review : le plugin `upload_version.py` de tk-multi-publish2 n'est pas configuré.
+- Validé sur le site simulé seulement : l'envoi des vignettes (mockgun les ignore) et des médias de Version (le site
+  simulé ne les garde pas), les types de publish et les chargeurs de textures UDIM du studio sont à vérifier à la
+  recette (C6).
+- ShotGrid injoignable (projet mis en file d'attente, C5) : pas de Version de review, un avertissement ; elle n'est pas
+  rejouée avec la file.
 - La vignette est l'image du viewport, sans compas ni sphères d'environnement.
 - Un fichier rangé dans le dossier de travail (texture importée depuis `work/`) est désigné là par la copie
   publiée : il manque sur un poste sans ce dossier.
@@ -1365,7 +1376,7 @@ int   studio_ocio_import_reconvert(void);        // recharge et reconvertit les 
 .tests/fbx.sh [dossier de travail]     # import FBX (patch fbx-split) : splits = upstream, UDIM, matériaux, fuzz ; FUZZ=<n>
 .tests/udim_app.sh [dossier]           # UDIM dans l'app (lot D0) : import OBJ/FBX, refus, ajout, 70 tuiles (atlas, peinture, export), conseil de résolution, layer() par tuile
 .tests/sg.sh [dossier de travail]     # ShotGrid hors app : sidecar (C2), noms des exports (B3), moteur (C3), publish (C4), mode dégradé et file d'attente (C5) ; Toolkit de .shotgrid/
-.tests/publish_app.sh [dossier]        # publish ShotGrid (C4) dans l'app, site simulé : op publish, puis fenêtre Publish (Qt offscreen) ; copie publiée rouverte sans le dossier de travail ; PY=<python PySide6>
+.tests/publish_app.sh [dossier]        # publish ShotGrid (C4) dans l'app, site simulé : op publish, fenêtre Publish (Qt offscreen), op publish en --background ; Versions de review ; copie publiée rouverte sans le dossier de travail ; PY=<python PySide6>
 .tests/sg_context_app.sh [dossier]     # contexte et mode dégradé ShotGrid (C5) dans l'app, site simulé : contexte gardé dans le .arm, site coupé (mode fichier, retour trouvé au repos), coupure en plein publish (file rejouée), journal d'audit
 .tests/arm_paths_app.sh [dossier]      # chemins enregistrés dans les .arm (patch arm-relative-paths) : relatifs, normalisés, rouverts sans l'ancien dossier
 python3 .tests/arm_paths.py <projet.arm> [fichier...]   # chemins des fichiers d'un .arm ; avec des fichiers, vérifie qu'il les désigne, relatifs et normalisés

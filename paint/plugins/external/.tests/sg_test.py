@@ -734,17 +734,33 @@ class TestPublish(PublishBase):
         self.assertEqual({f["description"] for f in files.values()}, {"first pass"})
         self.assertEqual({f["task"]["id"] for f in files.values()}, {1})
 
-        # Vignette du viewport, une capture pour tous ; puis le projet passe à la version suivante.
-        self.assertEqual(host.ops().count("publish_thumbnail"), 1)
+        # Vignette du viewport, une capture pour tous, puis l'image de review (taille du viewport), envoyée puis
+        # effacée ; puis le projet passe à la version suivante.
+        shots = [a for op, a in host.requests if op == "publish_thumbnail"]
+        self.assertEqual([a.get("size") for a in shots], [None, 0])
+        self.assertFalse(os.path.exists(shots[1]["path"]))
         self.assertEqual(host.path, os.path.join(self.work, "robot.v002.arm"))
         self.assertTrue(os.path.isfile(host.path))
         self.assertEqual(host.ops()[-1], "save_as")
+
+        # Version de review (upload_version.py) : liée au publish du projet, à l'asset et à la tâche, l'image en média,
+        # sans fichier local.
+        self.assertEqual([(v["item"], v["code"]) for v in result["versions"]], [("robot.v001.arm", "robot.v001")])
+        fields = ["code", "published_files", "entity", "sg_task", "description", "sg_uploaded_movie", "sg_path_to_movie"]
+        versions = s.data("find", {"entity_type": "Version", "fields": fields})
+        self.assertEqual([v["id"] for v in versions], [result["versions"][0]["id"]])
+        v = versions[0]
+        self.assertEqual([f["id"] for f in v["published_files"]], [project["id"]])
+        self.assertEqual((v["entity"]["type"], v["sg_task"]["id"], v["description"]), ("Asset", 1, "first pass"))
+        self.assertEqual(v["sg_uploaded_movie"]["name"], os.path.basename(shots[1]["path"]))
+        self.assertIsNone(v["sg_path_to_movie"])
 
         # Deuxième publish, depuis la v002, une texture écartée : ni exportée ni publiée.
         host.requests = []
         result = s.data("publish", {"task_id": 1, "skip": ["robot_nor.<UDIM>.png"]}, timeout=180)
         self.assertEqual(sorted(p["item"] for p in result["publishes"]), ["robot.v002.arm", "robot_base.<UDIM>.png"])
         self.assertEqual(result["skipped"], ["robot_nor.<UDIM>.png"])
+        self.assertEqual([v["code"] for v in result["versions"]], ["robot.v002"])
         export = dict(host.requests)["publish_export"]
         self.assertEqual(sorted(map(tuple, export["skip"])), [("nor", "", "1001"), ("nor", "", "1002")])
         self.assertFalse(os.path.exists(os.path.join(self.work, "textures", "v002", "robot_nor.1001.png")))
@@ -997,6 +1013,11 @@ class TestQueue(PublishBase):
         s, host = self.start_queue(STUDIO_TEST_LOST_AT="create:PublishedFile:1")
         result = s.data("publish", {"task_id": 1}, timeout=180)
         self.assertEqual([p["id"] for p in result["publishes"]], [None, None, None])
+        # Pas de Version de review pour un projet en file : un avertissement, rien de créé ni de capturé.
+        self.assertEqual(result["versions"], [])
+        warnings = [m["message"] for m in result["messages"] if m["level"] == "warning"]
+        self.assertEqual(len([m for m in warnings if "no review Version for robot.v001" in m]), 1, warnings)
+        self.assertEqual(host.ops().count("publish_thumbnail"), 1)
         records = self.records()
         self.assertEqual([r["key"] for r in records], result["queued"])
         project_key = records[0]["key"]
@@ -1014,6 +1035,21 @@ class TestQueue(PublishBase):
         self.assertEqual(len(files), 3)
         for r in replay["replayed"][1:]:
             self.assertEqual(files[r["id"]]["depends_on"], created)
+
+    def test_review_version_unreachable(self):
+        # ShotGrid tombe à la création de la Version de review : un avertissement, le publish continue (textures en
+        # file), la Version n'est pas rejouée.
+        s, host = self.start_queue(STUDIO_TEST_OFFLINE_AT="create:Version:1")
+        result = s.data("publish", {"task_id": 1}, timeout=180)
+        self.assertTrue(result["finalized"], result)
+        self.assertEqual(result["versions"], [])
+        by_item = {p["item"]: p for p in result["publishes"]}
+        self.assertGreater(by_item["robot.v001.arm"]["id"], 0)
+        self.assertEqual(len(result["queued"]), 2)
+        warnings = [m["message"] for m in result["messages"] if m["level"] == "warning"]
+        self.assertEqual(len([m for m in warnings if "ShotGrid unreachable: no review Version" in m]), 1, warnings)
+        self.assertEqual([m for m in result["messages"] if m["level"] == "error"], [])
+        self.assertTrue(all(r["name"] != "robot.v001" for r in self.records()))
 
     def test_replay_interrupted_and_discard(self):
         s, host = self.start_queue(STUDIO_TEST_OFFLINE_AT="create:PublishedFile:1")

@@ -121,6 +121,11 @@ def _demo_environments(config):
                     "settings": {"Publish Template": template("publish")},
                 },
                 {
+                    "name": "Upload for review",
+                    "hook": hooks % ("upload_version", "upload_version"),
+                    "settings": {},
+                },
+                {
                     "name": "Publish Textures",
                     "hook": hooks % ("publish_file", "publish_textures"),
                     "settings": {"Publish Template": template("textures_publish")} if copy_textures else {},
@@ -293,6 +298,21 @@ def setup(workdir, scenario=None):
         return create(entity_type, data, return_fields)
 
     db.create = create_with_link_type
+
+    # upload (média d'une Version) : mockgun ne l'implémente pas. Comme un vrai site : le fichier doit exister, le champ
+    # reçoit la pièce jointe, la réponse est l'id de l'Attachment. Le fichier n'est pas gardé (vignettes de même).
+    uploads = []
+
+    def upload(entity_type, entity_id, path, field_name=None, display_name=None, tag_list=None):
+        if not os.path.isfile(path):
+            raise ValueError("Path must be a valid file, got '%s'" % path)
+        name = display_name or os.path.basename(path)
+        if field_name:
+            db.update(entity_type, entity_id, {field_name: {"name": name, "link_type": "upload"}})
+        uploads.append(name)
+        return len(uploads)
+
+    db.upload = upload
 
     e = {"db": db, "storage": storage, "config": config}
     e["artist"] = db.create("HumanUser", {"login": LOGIN, "name": "Ada Artist", "email": "ada@studio.test"})

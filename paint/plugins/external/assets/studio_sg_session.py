@@ -966,10 +966,11 @@ class Session(object):
         Contexte comme _engine_for(). description : le commentaire des publishes ; skip : éléments à ne pas publier,
         par nom (robot_base.<UDIM>.png) ou par type (armorpaint.texture). Une tâche décochée par son plugin (texture sans
         version) reste décochée. Retourne {"context", "publishes": [{"item","type","id","name","path","version_number",
-        "published_file_type"}], "skipped", "finalized", "messages": [{"level","message"}]} (avertissements et erreurs
-        des hooks) ; finalized faux : publiés, mais la finalisation (version suivante du projet) a échoué, voir
-        messages. ShotGrid devenu injoignable pendant le publish (lot C5) : les publishes restants sont mis en file
-        d'attente, "queued" (leur clé) à la place de "id" ; la liste de ces clés dans "queued". Erreurs :
+        "published_file_type"}], "versions": [{"item","id","code"}] (Versions de review, upload_version.py), "skipped",
+        "finalized", "messages": [{"level","message"}]} (avertissements et erreurs des hooks) ; finalized faux :
+        publiés, mais la finalisation (version suivante du projet) a échoué, voir messages. ShotGrid devenu injoignable
+        pendant le publish (lot C5) : les publishes restants sont mis en file d'attente, "queued" (leur clé) à la place
+        de "id" ; la liste de ces clés dans "queued". Erreurs :
         publish_invalid (validation, rien n'est publié), sg_unreachable (ShotGrid injoignable avant le publish, rien
         n'est écrit), publish_failed (au publish : ce qui est déjà publié est dans le message), nothing_to_publish,
         app_unavailable (pas de tk-multi-publish2)."""
@@ -1062,9 +1063,16 @@ class Session(object):
                     "queued": queued,
                 }
             )
+        versions = [
+            {"item": item.name, "id": v.get("id"), "code": v.get("code")}
+            for item in manager.tree
+            for v in [item.properties.get("sg_version_data")]
+            if v
+        ]
         return {
             "context": engine.context_info(),
             "publishes": publishes,
+            "versions": versions,
             "skipped": skipped,
             "finalized": finalized,
             "messages": messages,
