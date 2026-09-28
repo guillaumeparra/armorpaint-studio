@@ -29,6 +29,8 @@ Ce dossier est compilé dans ArmorPaint par le hook upstream `paint/plugins/exte
   `STUDIO_PYTHON`, il prend le venv PySide6 de `.shotgrid/` (créé au besoin) pour la fenêtre d'export.
 - `tools/recette_c6.py` : vérifie un poste et la configuration Toolkit d'un projet sur le vrai site ShotGrid, par le
   sidecar d'ArmorPaint (recette C6, diagnostic d'un poste).
+- `tools/release_studio.py`, `release/studio/` : paquet binaire d'ArmorPaint Studio pour macOS (zip de l'app, `setup_python.sh`, README
+  en anglais) ; voir « Release macOS » plus bas.
 - `docs/` : documentation d'exploitation, en français : `GUIDE_ARTISTE.md` (une page pour l'artiste),
   `EXPLOITATION.md` (déploiement, fichiers d'un poste, surveillance, incidents, mises à jour) et `RECETTE_C6.md`
   (recette sur le vrai site ShotGrid).
@@ -1672,6 +1674,16 @@ char *subzero_materials_json(void);    // {"materials": N, "subzero": [{"name", 
 preset, valeurs, taille, format, Live, réglages couleur (`settings`, comme Apply ou Save), action (`create`,
 `update`, `duplicate`, `none`), puis résultat en JSON (couleur comprise) et captures, du panneau Settings aussi ;
 détail en tête de `subzero_window.py`.
+
+**Release macOS.** Depuis un worktree propre au commit publié (sans reste d'un ancien build dans `data/`) :
+`../base/make --compile` depuis `paint/`, puis `python3 plugins/external/tools/release_studio.py --check`. Le script
+refuse un bundle dont la signature ne tient plus (les bancs `*_app.sh` écrivent `config.json` et `studio_audit.jsonl`
+dans `data/` : supprimer le `.app` et relancer le build), sans OCIO, ou construit depuis un autre commit que `HEAD`, et
+un arbre git modifié. Sortie : `dist/studio/ArmorPaint-Studio-<version>-macos-<arch>.zip` (reproductible) et
+`SHA256SUMS`. `--check` extrait l'archive, vérifie la signature et démarre l'app en `--background`. Tag :
+`armorpaint-studio-v<STUDIO_VERSION>`. Le paquet : l'app, `setup_python.sh` (venv PySide6, opencolorio, numpy aux
+versions de `release_subzero.pins()`, dans le dossier de l'utilisateur d'ArmorPaint, puis `STUDIO_PYTHON` ajouté à son
+`studio.env` s'il ne la définit pas), `studio.env.example`, README.
 
 ## Tests
 

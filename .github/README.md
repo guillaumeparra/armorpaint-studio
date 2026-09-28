@@ -11,7 +11,21 @@ Tested on macOS (Apple Silicon). The Linux code is written but not validated yet
 | | |
 |---|---|
 | **subzero** (standalone) | [Releases](https://github.com/guillaumeparra/armorpaint-studio/releases): `subzero-<version>.tar.gz` (folder with a launcher and a rez package) or `subzero-<version>-py3-none-any.whl` (pip). Does not need ArmorPaint. |
-| **ArmorPaint Studio** | Build from source ([below](#build)). No binary release yet. |
+| **ArmorPaint Studio** | [Releases](https://github.com/guillaumeparra/armorpaint-studio/releases): `ArmorPaint-Studio-<version>-macos-arm64.zip`, for macOS 14 or later on Apple Silicon. Other systems: build from source ([below](#build)). |
+
+### Install ArmorPaint Studio (macOS)
+
+```sh
+gh release download armorpaint-studio-v0.8.0 -R guillaumeparra/armorpaint-studio   # or from the Releases page
+ditto -x -k ArmorPaint-Studio-0.8.0-macos-arm64.zip .
+mv ArmorPaint-Studio-0.8.0-macos-arm64/ArmorPaint.app /Applications/
+sh ArmorPaint-Studio-0.8.0-macos-arm64/setup_python.sh   # Python for the export window and subzero (from PyPI)
+```
+
+The app is not notarized by Apple. After a browser download, run
+`xattr -dr com.apple.quarantine /Applications/ArmorPaint.app` once, or use System Settings > Privacy & Security > Open
+Anyway. Settings and uninstall are covered in the [package README](../paint/plugins/external/release/studio/README.md),
+which also ships in the zip.
 
 ### Install subzero
 
@@ -96,6 +110,7 @@ git checkout studio && git merge upstream      # a git hook then checks every pa
 ```sh
 paint/plugins/external/tools/armorpaint.sh     # macOS: builds OCIO the first time, compiles, then launches
 cd paint && ../base/make --compile             # compile only, once OCIO is built (tools/build_ocio.sh)
+python3 paint/plugins/external/tools/release_studio.py --check   # macOS release zip, from a clean build
 ```
 
 ## Documentation

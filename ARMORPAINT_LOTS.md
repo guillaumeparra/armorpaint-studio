@@ -959,6 +959,12 @@ Linux, et les formats que seul le standalone servirait (WebP, DDS).
 **Phase 4 — industrialisation · 3 semaines**
 ✅ `B7` (headless réel, rapport, codes de retour) → ✅ `C4` (publish) → ✅ `C5` (contexte, mode dégradé) → ✅ `B6` → 🟡 `C6` (kit prêt, recette sur le vrai site)
 
+### Versions publiées
+
+- `subzero-v0.1.0` (2026-09-28) : subzero seul (E9), archive avec lanceur, roue pip, paquet rez.
+- `armorpaint-studio-v0.8.0` (2026-09-28) : ArmorPaint Studio pour macOS 14+ sur Apple Silicon, zip de l'app signée
+  ad hoc (non notarisée) avec `setup_python.sh` ; `tools/release_studio.py`.
+
 ### Risques principaux
 
 | Risque | Impact | Parade |
