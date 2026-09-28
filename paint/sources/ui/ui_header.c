@@ -101,11 +101,12 @@ void ui_header_draw_tool_properties_color_picker_base() {
 
 void ui_header_draw_tool_properties_to_mask(slot_layer_t *m) {
 	// STUDIO-PATCH(udim-tiles): every tile, the color id map read in the uv of each tile (as the ColorID brush does),
-	// see paint/sources/util/util_udim.h
+	// see paint/sources/util/util_udim.h. The new mask is cleared first: the shader discards the other colors, and a new
+	// render target is not zeroed under Vulkan (lavapipe hands back freed memory)
 	i32 udim_n = util_udim_loop_begin(util_udim_tile_layer(m, false));
 	for (i32 udim_k = 0; udim_k < udim_n; ++udim_k) {
 		util_udim_loop_tile(udim_k);
-		_gpu_begin(m->texpaint, NULL, NULL, GPU_CLEAR_NONE, 0, 0.0);
+		_gpu_begin(m->texpaint, NULL, NULL, GPU_CLEAR_COLOR, 0x00000000, 0.0);
 		gpu_set_pipeline(pipes_colorid_to_mask);
 		render_target_t *rt = any_map_get(render_path_render_targets, "texpaint_colorid");
 		gpu_set_texture(pipes_texpaint_colorid, rt->_image);

@@ -65,7 +65,7 @@ SRGB="sRGB Encoded Rec.709 (sRGB)"
 echo "== 1. Fichier des préférences"
 # 1a. --background sans STUDIO_PREFS : le fichier de l'artiste n'est ni lu ni écrit, les changements restent en mémoire.
 BUNDLE=$(cd "$(dirname "$APP")/.." && pwd)
-snapshot() { find "$BUNDLE" -name 'studio_prefs.json*' -exec shasum {} + 2> /dev/null | sort; }
+snapshot() { find "$BUNDLE" -name 'studio_prefs.json*' -exec cksum {} + 2> /dev/null | sort; }
 before=$(snapshot)
 cat > "$W/p1.c" << EOF
 int main() {
@@ -86,16 +86,24 @@ check "--background : fichier de l artiste intact" '[ "$(snapshot)" = "$before" 
 
 # 1a'. App en lecture seule (installée par l'IT) : préférences, journal d'audit et file des publishes vont dans le
 # dossier de sauvegarde d'ArmorPaint. Sur une copie de l'app, pour ne pas toucher au build.
+# macOS : le bundle .app, données dans Contents/Resources ; Linux : le dossier du binaire, données dans data/. Dossier de
+# sauvegarde d'iron : ~/Library/Application Support/<app>, ou ~/.<app> s'il existe, sinon $XDG_DATA_HOME/<app>.
+if [ "$(uname -s)" = Darwin ]; then
+	COPY=$(dirname "$BUNDLE") RES=Contents/Resources EXE=Contents/MacOS/$(basename "$APP") SAVE="$HOME/Library/Application Support/"
+else
+	COPY=$(dirname "$APP") RES=data EXE=$(basename "$APP") SAVE=${XDG_DATA_HOME:-$HOME/.local/share}/
+	[ ! -d "$HOME/.$(basename "$APP")" ] || SAVE=$HOME/.
+fi
 rm -rf "$W/ro" && mkdir -p "$W/ro"
-cp -R "$(dirname "$BUNDLE")" "$W/ro/"
-RO=$W/ro/$(basename "$(dirname "$BUNDLE")")
-chmod -R a-w "$RO/Contents/Resources"
-perl -e 'alarm 120; exec @ARGV' "$RO/Contents/MacOS/$(basename "$APP")" --background --script "$W/p1.c" \
+cp -R "$COPY" "$W/ro/"
+RO=$W/ro/$(basename "$COPY")
+chmod -R a-w "$RO/$RES"
+perl -e 'alarm 120; exec @ARGV' "$RO/$EXE" --background --script "$W/p1.c" \
 	-ApplePersistenceIgnoreState YES > "$W/p1ro.log" 2>&1 || true
 chmod -R u+w "$W/ro" && rm -rf "$W/ro"
 L=$W/p1ro.log
 RODEF=$(sed -n 's/^t: path=\[\(.*\)\]$/\1/p' "$L")
-check "app en lecture seule : dossier de sauvegarde, dit au journal" 'case $RODEF in "$HOME/Library/Application Support/"*/studio_prefs.json) starts "$L" "studio: preferences: the app folder is read-only, studio files go to " && ! printf "%s" "$RODEF" | grep -qE "//|/\./" ;; *) false ;; esac'
+check "app en lecture seule : dossier de sauvegarde, dit au journal" 'case $RODEF in "$SAVE"*/studio_prefs.json) starts "$L" "studio: preferences: the app folder is read-only, studio files go to " && ! printf "%s" "$RODEF" | grep -qE "//|/\./" ;; *) false ;; esac'
 
 # 1b. $STUDIO_PREFS absent : défauts ; chaque changement l'écrit.
 cat > "$W/p2.c" << EOF

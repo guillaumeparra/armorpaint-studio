@@ -964,6 +964,9 @@ Linux, et les formats que seul le standalone servirait (WebP, DDS).
 - `subzero-v0.1.0` (2026-09-28) : subzero seul (E9), archive avec lanceur, roue pip, paquet rez.
 - `armorpaint-studio-v0.8.0` (2026-09-28) : ArmorPaint Studio pour macOS 14+ sur Apple Silicon, zip de l'app signée
   ad hoc (non notarisée) avec `setup_python.sh` ; `tools/release_studio.py`.
+- `armorpaint-studio-v0.8.1` (2026-09-28) : macOS et Linux x86_64 (Rocky 9.4, glibc 2.34). Validé sous Rocky dans une VM
+  (lavapipe, sessions X11 et Wayland) : shader du viewport OCIO réécrit (SPIR-V invalide de Kong), masque ColorID vidé
+  avant le dessin, compilation Linux ; bancs rendus portables.
 
 ### Risques principaux
 

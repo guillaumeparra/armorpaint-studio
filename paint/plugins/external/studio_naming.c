@@ -7,6 +7,7 @@
 #include <direct.h>
 #define naming_mkdir(p) _mkdir(p)
 #define strncasecmp     _strnicmp
+#define S_ISDIR(m)      (((m) & S_IFMT) == S_IFDIR)
 #else
 #include <strings.h>
 #define naming_mkdir(p) mkdir(p, 0777)
@@ -232,7 +233,7 @@ bool studio_naming_split_version(const char *file, char **name, char **version) 
 
 static bool is_dir(const char *path) {
 	struct stat st;
-	return stat(path, &st) == 0 && (st.st_mode & S_IFMT) == S_IFDIR;
+	return stat(path, &st) == 0 && S_ISDIR(st.st_mode); // S_IFMT est XSI : absent en _POSIX_C_SOURCE (Linux)
 }
 
 bool studio_naming_make_parent(const char *path) {

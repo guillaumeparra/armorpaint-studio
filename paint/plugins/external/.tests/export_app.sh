@@ -6,7 +6,7 @@
 #
 #   sh .tests/export_app.sh [dossier de travail]
 #   APP=<binaire ArmorPaint> pour un autre build (défaut : build Release de paint/).
-# Demande : python3 avec Pillow (comparaison des PNG), tiffinfo (libtiff).
+# Demande : python3 avec Pillow (comparaison des PNG) ; tiffinfo (libtiff) s'il est là.
 set -eu
 EXT=$(cd "$(dirname "$0")/.." && pwd)
 APP=${APP:-$EXT/../../build/build/Release/ArmorPaint.app/Contents/MacOS/ArmorPaint}
@@ -100,7 +100,11 @@ for f in m["files"]:
     assert hashlib.sha256(b).hexdigest() == f["sha256"], f["path"]
     assert len(b) == f["size"], f["path"]
 PY'
-check "tiffinfo sans avertissement" '[ -z "$(tiffinfo -D "$W/out_deep/untitled/base.tif" "$W/out_deep/untitled/mask.tif" 2>&1 >/dev/null)" ]'
+if command -v tiffinfo > /dev/null; then
+	check "tiffinfo sans avertissement" '[ -z "$(tiffinfo -D "$W/out_deep/untitled/base.tif" "$W/out_deep/untitled/mask.tif" 2>&1 >/dev/null)" ]'
+else
+	echo "skip tiffinfo absent (libtiff-tools) : TIFF non relus par libtiff"
+fi
 
 # 3. Ligne de commande : --export-textures avec un preset studio, puis l'export upstream (generic) pour comparer.
 mkdir -p "$W/out_cli" "$W/out_generic" "$W/out_raw2"
@@ -129,7 +133,7 @@ int main() {
 }
 EOF
 "$APP" "$W/p.arm" --background --script "$W/fail.c" > "$W/fail.log" 2>&1 || true
-check "échec en cours d écriture : rien remplacé" 'grep -q "t: fail=0" "$W/fail.log" && grep -q "Texture export failed" "$W/fail.log" && [ "$(stat -f %Sm -t %Y "$W/out_raw/p_base.png")" = 2020 ] && [ ! -e "$W/out_raw/p_base.png.studio-tmp" ]'
+check "échec en cours d écriture : rien remplacé" 'grep -q "t: fail=0" "$W/fail.log" && grep -q "Texture export failed" "$W/fail.log" && [ "$(date -r "$W/out_raw/p_base.png" +%Y)" = 2020 ] && [ ! -e "$W/out_raw/p_base.png.studio-tmp" ]'
 rmdir "$W/out_raw/p_rough.png.studio-tmp"
 
 # 5. Bits et résolution par map : clé "resolution" du preset, réglages de l'export par-dessus, preset donné en JSON.

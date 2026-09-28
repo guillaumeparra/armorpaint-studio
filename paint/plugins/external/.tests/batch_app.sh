@@ -33,7 +33,7 @@ run() {
 }
 # Fichiers d'un dossier (chemins complets, triés) = fichiers du premier export du rapport ?
 same_files() {
-	[ "$(find "$2" -type f | sort)" = "$(json "$1" "'\n'.join(sorted(r['exports'][0]['files'] + ([r['exports'][0]['manifest']] if r['exports'][0]['manifest'] else [])))")" ]
+	[ "$(find "$2" -type f | LC_ALL=C sort)" = "$(json "$1" "'\n'.join(sorted(r['exports'][0]['files'] + ([r['exports'][0]['manifest']] if r['exports'][0]['manifest'] else [])))")" ]
 }
 unset STUDIO_EXPORT_PRESETS STUDIO_EXPORT_COLOR_SPACE STUDIO_SG_NAMING STUDIO_PREFS
 
@@ -104,7 +104,9 @@ if [ -x "$W/windows" ]; then
 else
 	echo "skip swiftc absent : fenêtres non vérifiées"
 fi
-check "application sans icône dans le Dock (type $TYPE)" '[ "$TYPE" = UIElement ]'
+if [ "$(uname -s)" = Darwin ]; then
+	check "application sans icône dans le Dock (type $TYPE)" '[ "$TYPE" = UIElement ]'
+fi
 wait $PID && RC=0 || RC=$?
 check "le script a tourné sans fenêtre, code 0" '[ $RC -eq 0 ]'
 

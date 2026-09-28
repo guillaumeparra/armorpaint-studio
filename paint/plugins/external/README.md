@@ -29,8 +29,8 @@ Ce dossier est compilé dans ArmorPaint par le hook upstream `paint/plugins/exte
   `STUDIO_PYTHON`, il prend le venv PySide6 de `.shotgrid/` (créé au besoin) pour la fenêtre d'export.
 - `tools/recette_c6.py` : vérifie un poste et la configuration Toolkit d'un projet sur le vrai site ShotGrid, par le
   sidecar d'ArmorPaint (recette C6, diagnostic d'un poste).
-- `tools/release_studio.py`, `release/studio/` : paquet binaire d'ArmorPaint Studio pour macOS (zip de l'app, `setup_python.sh`, README
-  en anglais) ; voir « Release macOS » plus bas.
+- `tools/release_studio.py`, `release/studio/` : paquet binaire d'ArmorPaint Studio pour macOS (zip de l'app) et Linux
+  (tar.gz du dossier `out/`), avec `setup_python.sh` et un README anglais par système ; voir « Release » plus bas.
 - `docs/` : documentation d'exploitation, en français : `GUIDE_ARTISTE.md` (une page pour l'artiste),
   `EXPLOITATION.md` (déploiement, fichiers d'un poste, surveillance, incidents, mises à jour) et `RECETTE_C6.md`
   (recette sur le vrai site ShotGrid).
@@ -1058,7 +1058,7 @@ echo $?   # 0, 1 ou 2
 
 ```json
 {
-  "version": 1, "status": "ok", "exit_code": 0, "studio_version": "0.8.0", "pid": 4242,
+  "version": 1, "status": "ok", "exit_code": 0, "studio_version": "0.8.1", "pid": 4242,
   "started": "2026-09-27T10:09:51Z", "duration_s": 0.51, "argv": ["…"],
   "exports": [
     {"dir": "…/textures", "preset": "arnold", "studio_preset": true, "mode": "per-tile", "destination": "disk",
@@ -1675,15 +1675,23 @@ preset, valeurs, taille, format, Live, réglages couleur (`settings`, comme Appl
 `update`, `duplicate`, `none`), puis résultat en JSON (couleur comprise) et captures, du panneau Settings aussi ;
 détail en tête de `subzero_window.py`.
 
-**Release macOS.** Depuis un worktree propre au commit publié (sans reste d'un ancien build dans `data/`) :
-`../base/make --compile` depuis `paint/`, puis `python3 plugins/external/tools/release_studio.py --check`. Le script
-refuse un bundle dont la signature ne tient plus (les bancs `*_app.sh` écrivent `config.json` et `studio_audit.jsonl`
-dans `data/` : supprimer le `.app` et relancer le build), sans OCIO, ou construit depuis un autre commit que `HEAD`, et
-un arbre git modifié. Sortie : `dist/studio/ArmorPaint-Studio-<version>-macos-<arch>.zip` (reproductible) et
-`SHA256SUMS`. `--check` extrait l'archive, vérifie la signature et démarre l'app en `--background`. Tag :
-`armorpaint-studio-v<STUDIO_VERSION>`. Le paquet : l'app, `setup_python.sh` (venv PySide6, opencolorio, numpy aux
-versions de `release_subzero.pins()`, dans le dossier de l'utilisateur d'ArmorPaint, puis `STUDIO_PYTHON` ajouté à son
-`studio.env` s'il ne la définit pas), `studio.env.example`, README.
+**Release.** Chaque paquet se fait sur son système, depuis un clone propre au commit publié (sans reste d'un ancien
+build dans `data/`) : `../base/make --compile` depuis `paint/`, puis `python3 plugins/external/tools/release_studio.py
+--check`. Le script refuse un arbre git modifié, une app construite depuis un autre commit que `HEAD` ou sans OCIO, et
+des fichiers écrits dans `data/` après le build (les bancs `*_app.sh` y écrivent `config.json` et `studio_audit.jsonl` :
+refaire le build). Sortie dans `dist/studio/` : l'archive (reproductible) et `SHA256SUMS`, qui garde les lignes des
+archives de l'autre système copiées dans le même dossier. `--check` extrait l'archive et démarre l'app en `--background`
+depuis un autre dossier courant. Tag : `armorpaint-studio-v<STUDIO_VERSION>`, les deux archives dans la même release.
+Le paquet : l'app, `setup_python.sh` (venv PySide6, opencolorio, numpy aux versions de `release_subzero.pins()`, dans
+le dossier de l'utilisateur d'ArmorPaint, puis `STUDIO_PYTHON` ajouté à son `studio.env` s'il ne la définit pas),
+`studio.env.example`, `README.md` (`README.<système>.md`).
+- macOS : `ArmorPaint-Studio-<version>-macos-<arch>.zip`, le `.app` signé ad hoc ; le script vérifie la signature,
+  avant et après l'archive.
+- Linux : `ArmorPaint-Studio-<version>-linux-<arch>.tar.gz`, le dossier `out/` renommé `ArmorPaint/` (binaire, `data/`
+  avec `libstudio_ocio.so`). Le script vérifie les bibliothèques (`ldd`) et donne le plancher glibc ; `--check` demande
+  un display X (`DISPLAY`). Build de référence : Rocky 9.4 (glibc 2.34), dans la VM jetable ; le clone y arrive par
+  `git clone --depth 1` sur le Mac puis tar (le sha de `version.json` vient de git), `assets/libstudio_ocio.so` copiée
+  depuis un build d'OCIO de la VM (`tools/build_ocio.sh`).
 
 ## Tests
 

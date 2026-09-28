@@ -10,7 +10,8 @@
 # - assets/opencolorio_licenses.txt : licences d'OCIO et des bibliothèques embarquées, livrées avec l'app.
 #
 # Usage : tools/build_ocio.sh [dossier de build]     (défaut : .ocio/build)
-# Variable : OCIO_SOURCE_DIR=<clone d'OpenColorIO au bon tag> évite le téléchargement d'OCIO.
+# Variables : OCIO_SOURCE_DIR=<clone d'OpenColorIO au bon tag> évite le téléchargement d'OCIO ;
+# CMAKE_BUILD_PARALLEL_LEVEL=<n> compilations en parallèle (défaut : un par cœur ; ~1 Go de mémoire chacune).
 # Premier build : 2 à 3 minutes (OCIO et ses dépendances depuis leurs sources). Réseau requis.
 
 set -e
@@ -38,7 +39,9 @@ fi
 # shellcheck disable=SC2086
 cmake -S "$EXT/.ocio" -B "$B" -DCMAKE_BUILD_TYPE=Release $PLATFORM $EXTRA > "$B/configure.log" 2>&1 ||
 	{ tail -30 "$B/configure.log" >&2; exit 1; }
-cmake --build "$B" --target studio_ocio --parallel > "$B/build.log" 2>&1 || { tail -30 "$B/build.log" >&2; exit 1; }
+# --parallel sans nombre donne `make -j` sans limite : sur une VM de 16 Go, le noyau tue cc1plus.
+JOBS=${CMAKE_BUILD_PARALLEL_LEVEL:-$(getconf _NPROCESSORS_ONLN 2> /dev/null || echo 4)}
+cmake --build "$B" --target studio_ocio --parallel "$JOBS" > "$B/build.log" 2>&1 || { tail -30 "$B/build.log" >&2; exit 1; }
 rm -f "$OUT/$SO"
 
 OCIO_BUILD=$B/_deps/opencolorio-build
@@ -63,7 +66,7 @@ fi
 
 # Licences : OCIO (BSD-3, et le code tiers qu'il embarque) et chaque dépendance liée.
 L=$EXT/assets/opencolorio_licenses.txt
-SRC=$B/_deps/opencolorio-src
+SRC=${OCIO_SOURCE_DIR:-$B/_deps/opencolorio-src}
 {
 	echo "ArmorPaint (studio build) embeds OpenColorIO $(sed -n 's/^set(STUDIO_OCIO_TAG "\([^"]*\)".*/\1/p' "$EXT/.ocio/CMakeLists.txt") and the libraries below."
 	for f in "OpenColorIO:$SRC/LICENSE" "OpenColorIO third-party code:$SRC/THIRD-PARTY.md" \

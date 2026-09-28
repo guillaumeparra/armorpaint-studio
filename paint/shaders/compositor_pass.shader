@@ -75,7 +75,9 @@ float4 frag(vert_out input) {
 	// STUDIO-PATCH(ocio-viewport): OCIO display transform instead of the filmic tonemap, then the .cube lut on the display
 	// values ; same sampling as studio_ocio_lut_sample
 	bool ocio = constants.ocio_lut_data.x > 0.0 && constants.tonemap_strength > 0.0;
-	if (ocio) {
+	// the whole condition, not if (ocio): kong's SPIR-V branches on a lone bool variable without loading it (invalid
+	// SPIR-V, lavapipe crashes); !ocio is loaded
+	if (constants.ocio_lut_data.x > 0.0 && constants.tonemap_strength > 0.0) {
 		float n = constants.ocio_lut_data.x;
 		float cols = constants.ocio_lut_data.y;
 		float r_o = min(max(ocio_shaper(color.x), 0.0), 1.0) * (n - 1.0);

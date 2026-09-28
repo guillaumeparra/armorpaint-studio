@@ -1,5 +1,5 @@
 diff --git a/paint/shaders/compositor_pass.shader b/paint/shaders/compositor_pass.shader
-index f5853505..d18b3ff0 100644
+index f58535050..10c3abfa7 100644
 --- a/paint/shaders/compositor_pass.shader
 +++ b/paint/shaders/compositor_pass.shader
 @@ -6,6 +6,7 @@ cbuffer constants {
@@ -36,14 +36,16 @@ index f5853505..d18b3ff0 100644
  float4 frag(vert_out input) {
  	float4 color = sample_lod(tex, sampler_linear, input.tex, 0.0);
  
-@@ -59,9 +72,34 @@ float4 frag(vert_out input) {
+@@ -59,9 +72,36 @@ float4 frag(vert_out input) {
  	// float expo = 2.0 - clamp(length(sample_lod(histogram, sampler_linear, float2(0.5, 0.5), 0.0).rgb), 0.0, 1.0);
  	// color.rgb *= pow(expo, auto_exposure_strength * 2.0);
  
 +	// STUDIO-PATCH(ocio-viewport): OCIO display transform instead of the filmic tonemap, then the .cube lut on the display
 +	// values ; same sampling as studio_ocio_lut_sample
 +	bool ocio = constants.ocio_lut_data.x > 0.0 && constants.tonemap_strength > 0.0;
-+	if (ocio) {
++	// the whole condition, not if (ocio): kong's SPIR-V branches on a lone bool variable without loading it (invalid
++	// SPIR-V, lavapipe crashes); !ocio is loaded
++	if (constants.ocio_lut_data.x > 0.0 && constants.tonemap_strength > 0.0) {
 +		float n = constants.ocio_lut_data.x;
 +		float cols = constants.ocio_lut_data.y;
 +		float r_o = min(max(ocio_shaper(color.x), 0.0), 1.0) * (n - 1.0);
@@ -72,7 +74,7 @@ index f5853505..d18b3ff0 100644
  		float r_s = min(max(color.x, 0.0), 1.0) * (constants.lut_size - 1.0);
  		float g_s = min(max(color.y, 0.0), 1.0) * (constants.lut_size - 1.0);
  		float b_s = min(max(color.z, 0.0), 1.0) * (constants.lut_size - 1.0);
-@@ -76,7 +114,7 @@ float4 frag(vert_out input) {
+@@ -76,7 +116,7 @@ float4 frag(vert_out input) {
  		float4 s1 = sample_lod(lut_tex, sampler_linear, float2(u1, v), 0.0);
  		color.rgb = lerp(s0.rgb, s1.rgb, float3(b_frac, b_frac, b_frac));
  	}

@@ -639,9 +639,11 @@ gt() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a > b) }'; }
 check "bake Texcoord : les uv locales de chaque tuile, le même texel partout" '[ "$(line bake texcoord)" = "0.255 0.753 0.000 1.000 | 0.255 0.753 0.000 1.000 | 0.255 0.753 0.000 1.000 | 0.255 0.753 0.000 1.000 | 0.255 0.753 0.000 1.000" ]'
 check "bake Position : la position monde de chaque tuile (x croît de 1001 à 1004, z plus haut en 1011)" 'gt $(comp bake position 2 1) $(comp bake position 1 1) && gt $(comp bake position 3 1) $(comp bake position 2 1) && gt $(comp bake position 4 1) $(comp bake position 3 1) && gt $(comp bake position 5 3) $(comp bake position 1 3)'
 check "bake Object ID : une couleur par objet, cinq différentes" '[ "$(line bake objectid | tr "|" "\n" | sort -u | wc -l | tr -d " ")" = 5 ]'
-check "high poly confondu avec le low : hauteur 0 et dérivée 0,5 sur toutes les tuiles" '[ "$(line bake_lowflat high)" = 0 ] && [ "$(line bake_lowflat height)" = "$K | $K | $K | $K | $K" ] && [ "$(line bake_lowflat derivative)" = "0.502 0.502 0.000 1.000 | 0.502 0.502 0.000 1.000 | 0.502 0.502 0.000 1.000 | 0.502 0.502 0.000 1.000 | 0.502 0.502 0.000 1.000" ]'
+# Dérivée nulle : 0,5 en 8 bits, 127 ou 128 selon l'arrondi du GPU (0.498 sous lavapipe, 0.502 sous Metal).
+half8() { sed 's/0\.498/0.502/g'; }
+check "high poly confondu avec le low : hauteur 0 et dérivée 0,5 sur toutes les tuiles" '[ "$(line bake_lowflat high)" = 0 ] && [ "$(line bake_lowflat height)" = "$K | $K | $K | $K | $K" ] && [ "$(line bake_lowflat derivative | half8)" = "0.502 0.502 0.000 1.000 | 0.502 0.502 0.000 1.000 | 0.502 0.502 0.000 1.000 | 0.502 0.502 0.000 1.000 | 0.502 0.502 0.000 1.000" ]'
 check "high poly incliné (1001 et 1003 en u, 1004 en v) : hauteur sur ces tuiles seules" '[ "$(line bake_lowhigh high)" = 0 ] && [ "$(comp bake_lowhigh height 2 1) $(comp bake_lowhigh height 5 1)" = "0.000 0.000" ] && gt $(comp bake_lowhigh height 1 1) 0.2 && [ "$(comp bake_lowhigh height 1 1)" = "$(comp bake_lowhigh height 3 1)" ] && gt $(comp bake_lowhigh height 4 1) 0.2'
-check "high poly incliné : la dérivée suit l axe de la pente, 0,5 sur les tuiles planes (patch bake-derivative)" '[ "$(comp bake_lowhigh derivative 1 1) $(comp bake_lowhigh derivative 3 1) $(comp bake_lowhigh derivative 4 2)" = "1.000 1.000 0.000" ] && [ "$(comp bake_lowhigh derivative 2 1) $(comp bake_lowhigh derivative 2 2) $(comp bake_lowhigh derivative 5 1) $(comp bake_lowhigh derivative 5 2)" = "0.502 0.502 0.502 0.502" ]'
+check "high poly incliné : la dérivée suit l axe de la pente, 0,5 sur les tuiles planes (patch bake-derivative)" '[ "$(comp bake_lowhigh derivative 1 1) $(comp bake_lowhigh derivative 3 1) $(comp bake_lowhigh derivative 4 2)" = "1.000 1.000 0.000" ] && [ "$(echo $(comp bake_lowhigh derivative 2 1) $(comp bake_lowhigh derivative 2 2) $(comp bake_lowhigh derivative 5 1) $(comp bake_lowhigh derivative 5 2) | half8)" = "0.502 0.502 0.502 0.502" ]'
 check "high poly : normales identiques au high plat sur les tuiles planes, différentes sur les inclinées, ni NaN ni noir" '(for k in 2 5; do [ "$(line bake_lowhigh normal | awk -F" [|] " -v k=$k "{print \$k}")" = "$(line bake_lowflat normal | awk -F" [|] " -v k=$k "{print \$k}")" ] || exit 1; done; for k in 1 3 4; do [ "$(line bake_lowhigh normal | awk -F" [|] " -v k=$k "{print \$k}")" != "$(line bake_lowflat normal | awk -F" [|] " -v k=$k "{print \$k}")" ] || exit 1; done) && ! grep -qi nan "$W/bake_lowhigh.out" && gt $(comp bake_lowhigh normal 2 3) 0.9'
 check "Curvature : un aperçu par tuile (1001 > 1011 > 1003 > 0, 1002 et 1004 planes à 0), le calque rempli le reprend" 'gt $(comp curvature preview 1 1) $(comp curvature preview 5 1) && gt $(comp curvature preview 5 1) $(comp curvature preview 3 1) && gt $(comp curvature preview 3 1) 0 && [ "$(comp curvature preview 2 1) $(comp curvature preview 4 1)" = "0.000 0.000" ] && [ "$(comp curvature layer 1 1) $(comp curvature layer 3 1) $(comp curvature layer 5 1)" = "$(comp curvature preview 1 1) $(comp curvature preview 3 1) $(comp curvature preview 5 1)" ]'
 
@@ -1087,7 +1089,10 @@ check "blob d'origine : le composite en grille (cases de 1001, 1002, 1003 ; 1004
 check "blob d'origine d'un calque limité à strip.1004 : sa tuile, pleine résolution" '[ "$(line arm blob_limited)" = "1 1 M" ]'
 check "rouvert : les mêmes tuiles par calque, masque compris" '[ "$(line arm_open names)" = "$(line arm_save names)" ] && [ "$(for l in 0 1 2 3; do line arm_open layer$l; done)" = "$(for l in 0 1 2 3; do line arm_save layer$l; done)" ] && line arm_open layer1 | grep -q "tiles=1001,1002,1003,1004,1011 128x128"'
 check "rouvert : export par tuile et Visible identiques au bit près ; resauvé : les mêmes tuiles" '[ "$(line arm roundtrip)" = "25/25/25 5/5/5" ] && [ "$(line arm resaved)" = "1 4" ]'
-check "fixture de l'ère atlas : 3 calques rangés dans leurs tuiles, export par tuile identique à celui du build D1" 'grep -q "UDIM: 3 layers of the atlas era cut into their tiles" "$W/arm_migrate.log" && line arm_migrate layer0 | grep -q "tiles=1001,1002,1003,1004,1011 256x256" && [ "$(line arm migrated)" = "5 0" ]'
+# Référence faite sous Metal : identique au bit près sur macOS ; ailleurs, 2 niveaux d'écart dans les tons sombres (calcul
+# flottant du GPU, amplifié par l'encodage sRGB ; lavapipe : 2 % des pixels de la 1002 et de la 1003).
+[ "$(uname -s)" = Darwin ] && TOL=0 || TOL=2
+check "fixture de l'ère atlas : 3 calques rangés dans leurs tuiles, export par tuile identique à celui du build D1 (écart <= $TOL)" 'grep -q "UDIM: 3 layers of the atlas era cut into their tiles" "$W/arm_migrate.log" && line arm_migrate layer0 | grep -q "tiles=1001,1002,1003,1004,1011 256x256" && line arm migrated | awk -v tol=$TOL "{ exit !(\$1 == 5 && \$2 <= tol) }"'
 
 echo "== 14. raytrace : proxy de l'atlas, path trace, bakes Lightmap et Occlusion"
 script raytrace <<EOF
@@ -1146,6 +1151,10 @@ int main() {
 	studio_udim_fill(0, 0, 1011, 0.0, 0.0, 1.0, 1.0);
 	cells("flat", 9);
 	cells("proxy", 12);
+	if (studio_raytrace_supported() == 0) {
+		console_log("t: rt 0"); // GPU sans ray tracing (lavapipe) : ni path trace ni bakes
+		return 0;
+	}
 	context_set_viewport_mode(15);
 	script_notify_on_update(update);
 	return 0;
@@ -1160,9 +1169,13 @@ letters() {
 		out = out (k > 1 ? " " : "") l } print out }'
 }
 check "flatten du raytrace : chaque tuile dans sa case (1001, 1002, 1003 ; 1004, 1011 ; vides), l'upstream garde la tuile du contexte" '[ "$(letters raytrace proxy)" = "R G Y Y B 0 0 0 0" ] && [ "$(letters raytrace flat)" = "R R R R R R R R R" ]'
-check "path trace : chaque tuile avec sa couleur (1001 rouge, 1002 vert, 1003 et 1004 gris, 1011 bleu)" '[ "$(letters raytrace pt)" = "R G Y Y B" ]'
-check "bake Lightmap : la base de chaque tuile éclairée, depuis sa case" '[ "$(letters raytrace lightmap)" = "R G Y Y B" ]'
-check "bake Occlusion : blanc sur chaque tuile (ruban plat, rien au-dessus)" '[ "$(line raytrace ao)" = "$H | $H | $H | $H | $H" ]'
+if [ "$(line raytrace rt)" = 0 ]; then
+	echo "skip GPU sans ray tracing : path trace et bakes Lightmap, Occlusion non vérifiés"
+else
+	check "path trace : chaque tuile avec sa couleur (1001 rouge, 1002 vert, 1003 et 1004 gris, 1011 bleu)" '[ "$(letters raytrace pt)" = "R G Y Y B" ]'
+	check "bake Lightmap : la base de chaque tuile éclairée, depuis sa case" '[ "$(letters raytrace lightmap)" = "R G Y Y B" ]'
+	check "bake Occlusion : blanc sur chaque tuile (ruban plat, rien au-dessus)" '[ "$(line raytrace ao)" = "$H | $H | $H | $H | $H" ]'
+fi
 
 [ $FAIL -eq 0 ] && echo "== OK" || echo "== FAIL"
 exit $FAIL

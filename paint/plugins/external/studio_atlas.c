@@ -932,8 +932,8 @@ static float half_to_float(uint16_t h) {
 }
 
 static char *pixel_text(gpu_texture_t *t, float *c) {
-#ifdef __APPLE__
-	if (t->format == GPU_TEXTURE_FORMAT_RGBA32) { // Cibles de rendu 8 bits en BGRA sous Metal
+#ifdef IRON_BGRA
+	if (t->format == GPU_TEXTURE_FORMAT_RGBA32) { // Cibles de rendu 8 bits en BGRA sous Metal et Vulkan desktop
 		float r = c[0];
 		c[0]    = c[2];
 		c[2]    = r;
@@ -1097,6 +1097,13 @@ static minic_val_t mn_studio_rt_pixel(minic_val_t *a, int n) {
 		draw_begin(current, false, 0);
 	}
 	return minic_val_ptr(out);
+}
+
+// 1 si le GPU fait le ray tracing (path trace, bakes Lightmap, Occlusion...) : l'interface d'upstream cache ces modes
+// sinon, un script qui les force plante (lavapipe, vieux GPU).
+static minic_val_t mn_studio_raytrace_supported(minic_val_t *a, int n) {
+	(void)a, (void)n;
+	return minic_val_int(gpu_raytrace_supported() ? 1 : 0);
 }
 
 // Met le calque i dans le groupe g (-1 : hors groupe), comme un glisser-déposer sur le groupe de l'onglet Layers ; les
@@ -1314,6 +1321,7 @@ void studio_atlas_init(void) {
 	minic_register("studio_layer_set_parent", "i(i,i)", mn_studio_layer_set_parent);
 	minic_register("studio_udim_fill", "i(i,i,i,f,f,f,f)", mn_studio_udim_fill);
 	minic_register("studio_rt_pixel", "p(p,f,f,f)", mn_studio_rt_pixel);
+	minic_register("studio_raytrace_supported", "i()", mn_studio_raytrace_supported);
 	minic_register("studio_layer_op", "i(p)", mn_studio_layer_op);
 	minic_register("studio_layer_tree", "p()", mn_studio_layer_tree);
 	minic_register("studio_layer_set_opacity", "i(f)", mn_studio_layer_set_opacity);

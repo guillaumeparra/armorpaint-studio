@@ -749,6 +749,12 @@ plugin se construit mais le compositeur reste filmique : les comparaisons à PyO
 comparer, et retirer le patch si l'upstream offre une LUT 3D HDR qu'un plugin peut remplir. Le shader généré se
 vérifie dans `paint/build/out/data/compositor_pass.vert.metal`.
 
+**Kong (SPIR-V).** `if (ocio)` sur la variable `bool` seule donnait un SPIR-V invalide : kong branche sur le pointeur
+de la variable sans la lire (`OpBranchConditional` sur un `OpVariable`), et lavapipe (Mesa 23.3, Rocky 9.4) plantait
+en compilant le shader, dès la première frame. Metal n'est pas touché. Le `if` écrit donc la condition en entier ;
+`!ocio` est bien lu. Vérifier un shader modifié avec `spirv-val --target-env vulkan1.1` sur le `.spirv` d'un build
+Linux (trouvé le 2026-09-28).
+
 **Non couvert.** Les sphères d'environnement (`render_envsphere.c`, `render_pathsphere.c`, désactivées par défaut)
 gardent leur propre tonemap filmique. Les aperçus de matériaux qui passent par le compositeur en mode Lit suivent
 la vue OCIO, comme le viewport.
@@ -1847,7 +1853,10 @@ sans tuile). Le code upstream travaille sans changement sur la tuile du contexte
 - `slot_layer.c` : `layers_apply_mask` sur un calque à tuiles passe par `util_udim_apply_mask` (rappel par tuile) :
   Apply Mask, masques de groupe et fusions avec masque.
 - `ui_header.c` : ColorID → To Mask écrit chaque tuile du masque, la carte d'id lue dans les uv de chaque tuile
-  (comme le pinceau ColorID).
+  (comme le pinceau ColorID). Chaque tuile est d'abord vidée à 0 : le shader `mask_colorid` fait `discard` hors de la
+  couleur piquée, et l'upstream comptait sur un masque neuf à zéro (`layers_new_mask(false)`). C'est vrai en pratique
+  sous Metal, pas sous Vulkan : lavapipe (Rocky 9.4) rendait une mémoire libérée, gris 0,5 d'un ancien calque à droite de
+  la 1001 (trouvé le 2026-09-28).
 - Une boucle sur les tuiles lancée dans une autre n'en refait pas le tour (`util_udim_loop_begin` rend 1).
 
 **Points d'appel (D2d).**

@@ -5,6 +5,7 @@
 
 #include "iron_array.h"
 #include <stdbool.h>
+#include <stddef.h>
 
 // Lit la configuration (variables d'environnement STUDIO_EXR_*) et remplace l'importeur "exr".
 // Appelé par external_init(), donc après plugins_init() qui a enregistré l'importeur upstream.
